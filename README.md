@@ -366,7 +366,7 @@ The scalability docs reference an active roadmap — **S3/MinIO object storage**
 
 **PAXS Archive Server** · *v0.1.0* · built with ❤️ and ☕
 
-<sub>Crafted by <b>M.ELSamani</b> · <a href="https://www.elsamani.rf.gd">www.elsamani.rf.gd</a></sub>
+<sub>Crafted by <b>M.ELSamani</b> · <a href="https://www.elsamanii.rf.gd">www.elsamani.rf.gd</a></sub>
 
 <br>
 
