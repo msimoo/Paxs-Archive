@@ -1,0 +1,33 @@
+{
+  "allowNonWorkspaceAccess": true,
+  "enableTelemetry": false,
+  "gatewayProviders": {
+        "floodgate": {
+          "apiKey": "sk-8BnWiMhza96WVoBYoLu4xaVtNmzFTuJ5ETtc3n6Q0r6Uqq0Q",
+          "baseUrl": "https://api.floodgate.dev/"
+        },
+        "justwoker": {
+          "apiKey": "sk-2gZVcdGySkT1tvi7cMUQAyzJvkBItRxnxrw89OFtcnlmKnKr",
+          "baseUrl": "https://api.justwoker.icu/"
+        },
+        "agentrouter": {
+      "apiKey": "sk-NBqdd53gBMlvLpI9dzF0cHp5bpnAnEZmkGC1OMRANvCJa5x9",
+      "baseUrl": "https://agentrouter.org/"
+        }
+        
+      }
+}
+
+    {
+      "allowNonWorkspaceAccess": true,
+      "enableTelemetry": false,
+      "gatewayProviders": {
+        "floodgate": { ... },
+        "justwoker": { ... },
+        "agentrouter": { ... },
+        "my_new_provider": {
+          "apiKey": "sk-your-key-here",
+          "baseUrl": "https://api.yourprovider.com/"
+        }
+      }
+    }

@@ -1,0 +1,153 @@
+{
+  "live": {
+    "ok": true,
+    "detail": "ok"
+  },
+  "ready": {
+    "ok": true,
+    "detail": "ready"
+  },
+  "health": {
+    "ok": true,
+    "detail": "ok",
+    "payload": {
+      "status": "ok",
+      "app": "PAXS Archive Server",
+      "version": "0.1.0",
+      "instance": "node-1",
+      "database": "ok",
+      "dicom": {
+        "ae_title": "PAXS_SCP",
+        "host": "0.0.0.0",
+        "port": 10400,
+        "enabled": true
+      },
+      "tls": {
+        "enabled": false,
+        "cert": "./certs/paxs.crt"
+      },
+      "hl7": {
+        "enabled": true,
+        "host": "127.0.0.1",
+        "port": 2575
+      },
+      "storage": {
+        "backend": "local",
+        "endpoint": "aws",
+        "bucket": "paxs",
+        "presign_expires": null,
+        "backends": 1
+      },
+      "fhir": {
+        "enabled": true
+      },
+      "compression": {
+        "method": "RLE",
+        "enabled": true
+      },
+      "rate_limit_per_minute": 300,
+      "services": {
+        "dicom": [
+          {
+            "name": "C-STORE",
+            "sop_class": "1.2.840.10008.5.1.4.1.1",
+            "roles": "SCP + SCU",
+            "enabled": true
+          },
+          {
+            "name": "C-FIND (Study Root)",
+            "sop_class": "1.2.840.10008.5.1.4.1.2.2.1",
+            "roles": "SCP + SCU",
+            "enabled": true
+          },
+          {
+            "name": "C-GET (Study Root)",
+            "sop_class": "1.2.840.10008.5.1.4.1.2.2.3",
+            "roles": "SCP + SCU",
+            "enabled": true
+          },
+          {
+            "name": "C-MOVE (Study Root)",
+            "sop_class": "1.2.840.10008.5.1.4.1.2.2.2",
+            "roles": "SCP + SCU",
+            "enabled": true
+          },
+          {
+            "name": "C-ECHO (Verification)",
+            "sop_class": "1.2.840.10008.1.1",
+            "roles": "SCP + SCU",
+            "enabled": true
+          },
+          {
+            "name": "Modality Worklist (MWL)",
+            "sop_class": "1.2.840.10008.5.1.4.31",
+            "roles": "SCP",
+            "enabled": true
+          },
+          {
+            "name": "MPPS",
+            "sop_class": "1.2.840.10008.3.1.2.3.3",
+            "roles": "SCP",
+            "enabled": true
+          },
+          {
+            "name": "Storage Commitment",
+            "sop_class": "1.2.840.10008.1.20.1",
+            "roles": "SCP + SCU",
+            "enabled": true
+          }
+        ],
+        "dicom_enabled": true,
+        "tls_enabled": false,
+        "web": [
+          {
+            "name": "DICOMweb (QIDO/WADO/STOW)",
+            "detail": "REST /dicom-web",
+            "enabled": true
+          },
+          {
+            "name": "HL7 MLLP (HIS ADT + ORM)",
+            "detail": "MLLP",
+            "enabled": false
+          },
+          {
+            "name": "HL7 ORU (report \u2192 EMR)",
+            "detail": "MLLP out",
+            "enabled": false
+          },
+          {
+            "name": "FHIR R4",
+            "detail": "REST /fhir",
+            "enabled": true
+          }
+        ]
+      },
+      "time": "2026-08-07T08:31:27.896455+00:00"
+    }
+  },
+  "dicom": {
+    "ok": true,
+    "detail": "TCP 127.0.0.1:10400"
+  },
+  "database": {
+    "ok": true,
+    "detail": "ok"
+  },
+  "dicom_service": {
+    "ok": true,
+    "detail": "PAXS_SCP on 10400"
+  },
+  "hl7": {
+    "ok": true,
+    "detail": "enabled 127.0.0.1:2575"
+  },
+  "storage": {
+    "ok": true,
+    "detail": "backend=local bucket=paxs"
+  },
+  "verdict": {
+    "label": "ALL SYSTEMS NOMINAL",
+    "exit_code": 0
+  },
+  "time": "2026-08-07 10:31:27"
+}
