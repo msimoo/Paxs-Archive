@@ -13,11 +13,10 @@
 [![DICOM](https://img.shields.io/badge/DICOM-DIMSE%20SCP%20%2B%20DICOMweb-EF2B2D?style=for-the-badge)](#-at-a-glance)
 [![MySQL](https://img.shields.io/badge/MySQL%208%20%7C%20SQLite-4479A1?style=for-the-badge&logo=mysql&logoColor=white)](#-at-a-glance)
 [![PaxsViewer](https://img.shields.io/badge/PaxsViewer-Embedded%20Diagnostic%20Viewer-F59E0B?style=for-the-badge)](#-imaging-experience)
-[![License](https://img.shields.io/badge/License-MIT-2EA043?style=for-the-badge)](#-license)
 
 <br>
 
-**[✨ Features](#-features) · [🏛 Architecture](#-architecture) · [🚀 Quick Start](#-quick-start) · [🗺 URL Map](#-your-first-launch--url-map) · [⚙️ Configuration](#️-configuration) · [🧪 Testing](#-testing) · [📂 Structure](#-project-structure) · [🔐 Security](#-security-checklist)**
+**[✨ Features](#-features) · [🏛 Architecture](#-architecture) · [🚀 Quick Start](#-quick-start) · [🗺 URL Map](#️-your-first-launch--url-map) · [⚙️ Configuration](#️-configuration) · [🧪 Testing](#-testing) · [📂 Structure](#-project-structure)**
 
 <br>
 
@@ -52,11 +51,9 @@
 | ⚖️ **Scale-out** | Stateless nodes behind HAProxy · shared DB/object storage · Prometheus metrics · instance health IDs |
 | 📦 **Deployment** | Bare Python · Windows service · PyInstaller standalone EXE · Docker Compose |
 
----
-
 ## ✨ Features
 
-### 📥 Ingest & Archive
+### 📥 [Ingest & Archive](#-features)
 | | |
 |:---|:---|
 | 🏥 **DICOM SCP** | Full DIMSE receiver on port **10400** (AE: `PAXS_SCP`) — C-STORE, C-FIND, C-GET, C-MOVE, C-ECHO, Modality Worklist, MPPS, Storage Commitment, IAN |
@@ -64,15 +61,324 @@
 | 🗜 **Smart compression** | Background worker re-encodes studies to **RLE / JPEG-LS / JPEG 2000 / HTJ2K**, generates thumbnails, applies lossy re-compression policies |
 | 🔁 **Routing & replication** | Rules-based auto-forwarding, peer prefetching, priors pull, replication, quotas & lifecycle retention |
 
-### 🖥 Imaging Experience
+### 🖥 [Imaging Experience](#-imaging-experience)
 | | |
 |:---|:---|
 | 🔬 **PaxsViewer** | Embedded, zero-install diagnostic viewer — MPR / 3D volume rendering, fusion, GSPS overlays, hanging protocols, window / zoom / measure tools |
 | 📋 **Worklists** | Reading worklist, DICOM worklist tasks, prior comparisons, peer review, reports & critical-results management |
 | 🫀 **Clinical tools** | Clinical protocols, dose tracking, split / merge studies, DICOMDIR import & export, anonymized research export |
 
-### 🏥 Hospital Integration
+### 🏥 [Hospital Integration](#-hospital-integration)
 | | |
+|:---|:---|
+| 🧬 **HL7 / FHIR gateway** | HL7 v2 ADT listener (patients register via `ADT^A01`) · FHIR R4 API · XDS-I · PIX/PDQ |
+| 🔗 **Patient sharing** | Expiring share links & QR codes (`SHARE_EXPIRY_DAYS`) — patients open studies from a phone |
+| 🏢 **Multi-tenant** | Tenants, node management, LDAP directory sync, license keys (`paxs.lic`) with a licensing API |
+
+### 🛡 [Operations & Safety](#-operations--safety)
+| | |
+|:---|:---|
+| 🔐 **Defense in depth** | Refresh-token rotation with theft detection, brute-force lockout, per-minute rate limits, RBAC roles, DB-backed settings overrides |
+| 🧾 **Auditability** | Audit service logs every authentication & admin event; HA health endpoint exposes node identity |
+| 📈 **Observability** | Prometheus metrics exporter, `/api/v1/health` probes (`live` / `ready`), Redis cache panel, DB panel |
+| ⚖️ **Horizontal scale** | Stateless nodes + HAProxy config + shared storage — see [`deploy/SCALE-OUT-GUIDE.md`](deploy/SCALE-OUT-GUIDE.md) |
+
+## 🏛 Architecture
+
+> **PAXS is designed as a unified medical-imaging platform:** modalities and hospital systems connect through standards-based interfaces, while one async Python runtime orchestrates ingestion, storage, processing, security, integrations, and the clinical web experience.
+
+<div align="center">
+
+```mermaid
+flowchart TB
+    %% ─────────────────────────────────────────────────────────────
+    %% EXPERIENCE / CLINICAL CONSUMERS
+    %% ─────────────────────────────────────────────────────────────
+    subgraph EXPERIENCE["🖥️ CLINICAL EXPERIENCE"]
+        direction LR
+        PV["🩻 PaxsViewer<br/><sub>MPR · 3D · Fusion · GSPS</sub>"]
+        SL["📋 Study List<br/><sub>Worklists · Priors · Reports</sub>"]
+        AC["🛡️ Admin Console<br/><sub>RBAC · Audit · Operations</sub>"]
+        ST["⚙️ Settings<br/><sub>Configuration · Tenants · Nodes</sub>"]
+    end
+
+    %% ─────────────────────────────────────────────────────────────
+    %% EXTERNAL SYSTEMS
+    %% ─────────────────────────────────────────────────────────────
+    subgraph SOURCES["🏥 IMAGING & HOSPITAL ECOSYSTEM"]
+        direction LR
+        MOD["🩻 Modalities<br/><sub>CT · MR · US · CR · XA</sub>"]
+        PACS["🔗 DICOM Clients / PACS"]
+        HIS["🏥 EMR / HIS<br/><sub>HL7 v2 · FHIR R4</sub>"]
+        WEB["🌐 DICOMweb Clients"]
+    end
+
+    %% ─────────────────────────────────────────────────────────────
+    %% PAXS CORE
+    %% ─────────────────────────────────────────────────────────────
+    subgraph PAXS["⚕️ PAXS ARCHIVE SERVER · ONE PYTHON PROCESS"]
+        direction TB
+
+        subgraph EDGE["🚪 PROTOCOL & API EDGE"]
+            direction LR
+            DIMSE["📡 DIMSE SCP<br/><sub>C-STORE · C-FIND · C-GET · C-MOVE</sub>"]
+            API["⚡ FastAPI<br/><sub>REST · DICOMweb · Auth</sub>"]
+            INT["🔌 Integration Gateway<br/><sub>HL7 · FHIR · XDS-I · PIX/PDQ</sub>"]
+        end
+
+        subgraph DOMAIN["🧠 DOMAIN SERVICES"]
+            direction LR
+            ING["📥 Ingest & Validate"]
+            META["🧬 Metadata / Patient Index"]
+            ROUTE["🔁 Routing & Replication"]
+            CLIN["🩺 Clinical Workflows"]
+            SHARE["🔗 Secure Sharing"]
+            TENANT["🏢 Multi-tenancy"]
+        end
+
+        subgraph WORKERS["⚙️ ASYNC PROCESSING"]
+            direction LR
+            QUEUE["📬 Background Jobs"]
+            COMP["🗜️ Compression<br/><sub>RLE · JPEG-LS · JP2 · HTJ2K</sub>"]
+            THUMB["🖼️ Thumbnails"]
+            AI["🤖 AI Triage"]
+        end
+
+        subgraph SECURITY["🔐 SECURITY & OBSERVABILITY"]
+            direction LR
+            AUTH["JWT · RBAC<br/>Rate Limit · Lockout"]
+            AUDIT["🧾 Audit Trail"]
+            METRICS["📈 Health · Metrics<br/>Prometheus"]
+        end
+    end
+
+    %% ─────────────────────────────────────────────────────────────
+    %% DATA PLANE
+    %% ─────────────────────────────────────────────────────────────
+    subgraph DATA["💾 PERSISTENCE & OBJECT DATA"]
+        direction LR
+        DB[("🗄️ MySQL 8<br/>SQLite fallback")]
+        OBJ[("📦 Object Storage<br/>Filesystem · S3 · MinIO")]
+        CACHE[("⚡ Redis<br/><sub>Optional acceleration</sub>")]
+    end
+
+    %% Sources → Edge
+    MOD -->|"C-STORE / C-FIND<br/>C-GET / C-MOVE / C-ECHO"| DIMSE
+    PACS <-->|"DIMSE"| DIMSE
+    WEB <-->|"QIDO-RS · WADO-RS<br/>STOW-RS"| API
+    HIS <-->|"ADT · FHIR R4"| INT
+
+    %% Edge → Domain
+    DIMSE --> ING
+    API --> META
+    API --> CLIN
+    INT --> META
+    INT --> CLIN
+
+    %% Domain relationships
+    ING --> META
+    META --> ROUTE
+    META --> CLIN
+    CLIN --> SHARE
+    TENANT --> AUTH
+    ROUTE --> QUEUE
+
+    %% Workers
+    QUEUE --> COMP
+    QUEUE --> THUMB
+    QUEUE --> AI
+
+    %% Security cross-cutting
+    API -.-> AUTH
+    DIMSE -.-> AUTH
+    INT -.-> AUTH
+    API -.-> AUDIT
+    DIMSE -.-> AUDIT
+    API -.-> METRICS
+
+    %% Persistence
+    META --> DB
+    CLIN --> DB
+    TENANT --> DB
+    AUDIT --> DB
+    COMP --> OBJ
+    THUMB --> OBJ
+    ING --> OBJ
+    API --> CACHE
+
+    %% Experience
+    PV <-->|"DICOMweb"| API
+    SL <-->|"REST / DICOMweb"| API
+    AC <-->|"REST"| API
+    ST <-->|"REST"| API
+
+    %% Styling
+    classDef source fill:#0f172a,stroke:#38bdf8,color:#e2e8f0,stroke-width:2px;
+    classDef edge fill:#082f49,stroke:#38bdf8,color:#e0f2fe,stroke-width:2px;
+    classDef domain fill:#1e1b4b,stroke:#818cf8,color:#eef2ff,stroke-width:2px;
+    classDef worker fill:#422006,stroke:#f59e0b,color:#fff7ed,stroke-width:2px;
+    classDef security fill:#3f1010,stroke:#ef4444,color:#fee2e2,stroke-width:2px;
+    classDef data fill:#052e16,stroke:#22c55e,color:#dcfce7,stroke-width:2px;
+    classDef experience fill:#172554,stroke:#60a5fa,color:#dbeafe,stroke-width:2px;
+
+    class MOD,PACS,HIS,WEB source;
+    class DIMSE,API,INT edge;
+    class ING,META,ROUTE,CLIN,SHARE,TENANT domain;
+    class QUEUE,COMP,THUMB,AI worker;
+    class AUTH,AUDIT,METRICS security;
+    class DB,OBJ,CACHE data;
+    class PV,SL,AC,ST experience;
+```
+
+</div>
+
+### 🔄 The PAXS Data Journey
+
+```text
+  🩻 MODALITY / HIS
+        │
+        │  DICOM DIMSE · DICOMweb · HL7 · FHIR
+        ▼
+┌─────────────────────── PAXS EDGE ───────────────────────┐
+│  📡 DIMSE SCP   ⚡ FastAPI   🔌 Integration Gateway      │
+└──────────────────────────┬───────────────────────────────┘
+                           │
+                           ▼
+                  🧠 INGEST & VALIDATE
+                           │
+             ┌─────────────┼─────────────┐
+             ▼             ▼             ▼
+        🧬 Metadata    🔐 Security    🧾 Audit
+             │
+             ▼
+       🗄️ DATABASE + 📦 OBJECT STORAGE
+             │
+             ├──────────────► ⚙️ BACKGROUND WORKER
+             │                    ├─ 🗜️ Compression
+             │                    ├─ 🖼️ Thumbnails
+             │                    ├─ 🤖 AI Triage
+             │                    └─ 🔁 Routing / Replication
+             │
+             ▼
+       🌐 DICOMweb / REST APIs
+             │
+       ┌─────┼──────────┬──────────┐
+       ▼     ▼          ▼          ▼
+    🩻 Viewer  📋 Worklist  🛡️ Admin  📱 Secure Share
+```
+
+### 🧩 Architecture Layers
+
+| Layer | Responsibility | Key Technologies |
+|:---|:---|:---|
+| **🖥 Experience** | Diagnostic viewing, study management, administration | PaxsViewer · SPA UIs |
+| **🚪 Protocol Edge** | Accept and expose medical/hospital standards | DIMSE · FastAPI · DICOMweb · HL7 · FHIR |
+| **🧠 Domain Core** | Imaging lifecycle, metadata, workflows, routing | Async Python services |
+| **⚙️ Processing** | CPU/background workloads without blocking API traffic | Compression · thumbnails · AI · replication |
+| **🔐 Trust Plane** | Authentication, authorization, auditing, protection | JWT · RBAC · rate limiting · audit |
+| **💾 Data Plane** | Structured metadata + binary medical objects | MySQL/SQLite · Filesystem/S3/MinIO |
+| **📈 Operations** | Health, metrics and scale-out readiness | Prometheus · health probes · HAProxy |
+
+### 🚀 Startup Lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BOOT as 🚀 run_paxs.py
+    participant DB as 🗄️ Database
+    participant W as ⚙️ Worker
+    participant D as 📡 DIMSE SCP
+    participant H as 🔌 HL7 Listener
+    participant API as ⚡ FastAPI + UIs
+
+    BOOT->>DB: Create / validate schema
+    BOOT->>W: Start background processing
+    BOOT->>D: Start DICOM receiver :10400
+    BOOT->>H: Start optional HL7 listener
+    BOOT->>API: Start REST + DICOMweb + UIs :8000
+    API-->>BOOT: PAXS READY
+```
+
+> **Design principle:** PAXS keeps the deployment simple without making the architecture simple. The default runtime is a single Python process, while the internal boundaries allow storage backends, workers, integrations, security controls, and scale-out infrastructure to evolve independently.
+
+> **Scale-out:** for larger deployments, run stateless PAXS nodes behind HAProxy and share the database/object storage layer. Redis remains optional for acceleration, not a hard runtime dependency.
+
+## 🚀 Quick Start
+
+### ✅ Prerequisites
+
+| Requirement | Notes |
+|:---|:---|
+| 🐍 **Python 3.11+** | The only *hard* requirement |
+| 🍃 **MySQL 8** *(optional)* | Production default — or use zero-setup SQLite |
+| 🔴 **Redis** *(optional)* | Auto-detected by `run_all.bat`; standalone mode works without it |
+| 🟩 **Node.js 18+** *(optional)* | Only for hacking on the `study-list-ui` frontend |
+
+### 1️⃣ Clone & create a virtual environment
+
+**Windows (PowerShell):**
+```powershell
+git clone <your-repo-url> paxs-archive
+cd paxs-archive
+
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+**Linux / macOS:**
+```bash
+git clone <your-repo-url> paxs-archive && cd paxs-archive
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2️⃣ Configure the environment
+
+```powershell
+copy .env.example .env      # Windows
+# cp .env.example .env      # Linux / macOS
+```
+
+> 💡 **Zero-setup mode (fastest way to try PAXS):** open `.env` and switch the database line to SQLite — no MySQL server needed:
+> ```env
+> DATABASE_URL=sqlite+aiosqlite:///./paxs.db
+> ```
+
+<details>
+<summary>🐘 <b>Using production MySQL</b> (click to expand)</summary>
+
+```sql
+CREATE DATABASE paxs_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'paxs_user'@'localhost' IDENTIFIED BY 'paxs';
+GRANT ALL ON paxs_db.* TO 'paxs_user'@'localhost';
+```
+Then in `.env`:
+```env
+DATABASE_URL=mysql+aiomysql://paxs_user:paxs@localhost:3306/paxs_db?charset=utf8mb4
+```
+The DB schema is **created automatically on first start**; Alembic migrations live in `migrations/` (`alembic.ini`) for schema upgrades.
+
+</details>
+
+> [!WARNING]
+> ⚠️ **Before going live:** set `SECRET_KEY` to a long random string and review the [🔐 security checklist](#-security-checklist).
+
+### 3️⃣ Run it
+
+```powershell
+python run_paxs.py
+```
+
+One command starts **everything** — REST API, DICOM receiver, worker and all four UIs:
+
+```text
+[PAXS] Starting on http://0.0.0.0:8000
+       DIMSE SCP  :  PAXS_SCP listening on 0.0.0.0:10400
+       Worker     :  compression / thumbnails / triage enabled
+```
+
+<!-- PAXS:CONTINUE -->| | |
 |:---|:---|
 | 🧬 **HL7 / FHIR gateway** | HL7 v2 ADT listener (patients register via `ADT^A01`) · FHIR R4 API · XDS-I · PIX/PDQ |
 | 🔗 **Patient sharing** | Expiring share links & QR codes (`SHARE_EXPIRY_DAYS`) — patients open studies from a phone |
