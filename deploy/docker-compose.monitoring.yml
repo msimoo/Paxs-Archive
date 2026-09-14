@@ -1,0 +1,43 @@
+# Monitoring stack for PAXS — Prometheus + Grafana.
+#
+#   docker compose -f deploy/docker-compose.monitoring.yml up -d
+#
+# Joins the SAME network as docker-compose.lb.yml (both live under deploy/ so
+# the compose project/network name matches), scraping:
+#   - HAProxy  http://haproxy:8405/metrics  (per-node traffic)
+#   - PAXS     http://paxs-node-N:8000/metrics (worker queue, replica lag)
+#
+#   Grafana: http://localhost:3000  (admin / admin — change on first login)
+#   Dashboards auto-provision from deploy/grafana/dashboards.
+# See deploy/MONITORING.md.
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: paxs-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: paxs-grafana
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+
+volumes:
+  prometheus-data:
+  grafana-data:

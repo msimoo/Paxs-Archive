@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<title>Sign in — PAXS Archive</title>
+<style>
+  :root {
+    --ink: #070c18;
+    --panel: #0c1424;
+    --raised: #111c30;
+    --raised-2: #16233c;
+    --hairline: rgba(148, 163, 184, 0.14);
+    --hairline-strong: rgba(148, 163, 184, 0.28);
+    --text: #e2e8f0;
+    --muted: #8b9bb4;
+    --faint: #5b6b85;
+    --accent: #22d3ee;
+    --teal: #2dd4bf;
+    --danger: #f87171;
+    --ok: #34d399;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+    --sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --radius: 12px;
+    --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--sans);
+    background:
+      radial-gradient(1100px 600px at 15% -10%, rgba(34, 211, 238, 0.10), transparent 60%),
+      radial-gradient(900px 500px at 110% 15%, rgba(45, 212, 191, 0.08), transparent 55%),
+      var(--ink);
+    color: var(--text);
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+  /* scanline sweep across the whole viewport */
+  body::before {
+    content: "";
+    position: fixed; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,0.015) 0 1px, transparent 1px 3px);
+  }
+  .card {
+    width: min(420px, 100%);
+    background: linear-gradient(180deg, var(--panel), #0a1220);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius);
+    box-shadow: 0 30px 60px rgba(2, 6, 16, 0.6), 0 0 0 1px rgba(34, 211, 238, 0.04);
+    padding: 34px 32px 26px;
+    position: relative;
+    overflow: hidden;
+  }
+  .card::before {
+    content: "";
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), var(--teal), transparent);
+    opacity: 0.8;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .brand img { width: 38px; height: 38px; border-radius: 9px; }
+  .brand h1 { font-size: 17px; letter-spacing: 0.2px; }
+  .brand small {
+    display: block; font-family: var(--mono); font-size: 10.5px;
+    color: var(--faint); letter-spacing: 1.5px; text-transform: uppercase; margin-top: 2px;
+  }
+  .eyebrow {
+    font-family: var(--mono); font-size: 10px; color: var(--faint);
+    letter-spacing: 2.5px; text-transform: uppercase; margin: 18px 0 4px;
+  }
+  .eyebrow b { color: var(--accent); font-weight: 600; }
+  .tabs { display: flex; gap: 4px; margin: 14px 0 18px; background: rgba(7, 12, 24, 0.6);
+          border: 1px solid var(--hairline); border-radius: 8px; padding: 4px; }
+  .tabs button {
+    flex: 1; padding: 8px 10px; border: 0; border-radius: 6px; cursor: pointer;
+    background: transparent; color: var(--muted); font: 500 13px var(--sans);
+    transition: all 0.18s var(--ease);
+  }
+  .tabs button.active { background: var(--raised-2); color: var(--text); box-shadow: 0 0 0 1px var(--hairline); }
+  .tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 11.5px; font-weight: 600; color: var(--muted); margin-bottom: 6px; letter-spacing: 0.3px; }
+  .input {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(7, 12, 24, 0.7);
+    border: 1px solid var(--hairline-strong);
+    border-radius: 8px; padding: 0 12px;
+    transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+  }
+  .input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12); }
+  .input svg { flex: none; color: var(--faint); }
+  .input input {
+    flex: 1; background: transparent; border: 0; outline: 0; color: var(--text);
+    font: 14px var(--sans); padding: 11px 0;
+  }
+  .input input::placeholder { color: var(--faint); }
+  .err {
+    display: none; margin: 2px 0 12px; padding: 9px 12px; border-radius: 8px;
+    background: rgba(248, 113, 113, 0.09); border: 1px solid rgba(248, 113, 113, 0.35);
+    color: var(--danger); font-size: 12.5px;
+  }
+  .err.show { display: block; animation: shake 0.3s var(--ease); }
+  @keyframes shake { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+  .submit {
+    width: 100%; margin-top: 6px; padding: 12px; border: 0; border-radius: 8px; cursor: pointer;
+    background: linear-gradient(90deg, var(--accent), var(--teal));
+    color: #04121a; font: 700 14px var(--sans); letter-spacing: 0.4px;
+    transition: transform 0.15s var(--ease), box-shadow 0.15s var(--ease);
+    box-shadow: 0 8px 22px rgba(34, 211, 238, 0.22);
+  }
+  .submit:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 26px rgba(34, 211, 238, 0.3); }
+  .submit:disabled { opacity: 0.6; cursor: progress; }
+  .submit:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  .hint { margin-top: 14px; font-size: 12px; color: var(--faint); line-height: 1.5; text-align: center; }
+  .hint a { color: var(--accent); text-decoration: none; }
+  .hint a:hover { text-decoration: underline; }
+  .chips { display: flex; gap: 6px; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
+  .chips span {
+    font-family: var(--mono); font-size: 9.5px; color: var(--faint); letter-spacing: 1px;
+    border: 1px solid var(--hairline); border-radius: 999px; padding: 3px 9px;
+  }
+  .foot { margin-top: 18px; text-align: center; font-family: var(--mono); font-size: 10px; color: var(--faint); letter-spacing: 1.2px; }
+</style>
+</head>
+<body>
+  <main class="card" id="card">
+    <div class="brand">
+      <img src="/static/logo/logo.png" alt="PAXS emblem" />
+      <div>
+        <h1>PAXS Archive</h1>
+        <small>Clinical Imaging Platform</small>
+      </div>
+    </div>
+    <p class="eyebrow"><b>PAXS</b> · DICOM ARCHIVE &amp; PACS</p>
+
+    <div class="tabs" role="tablist">
+      <button id="tab-login" class="active" role="tab" aria-selected="true">Sign in</button>
+      <button id="tab-register" role="tab" aria-selected="false">Create account</button>
+    </div>
+
+    <form id="auth-form" novalidate>
+      <div class="field">
+        <label for="username">Username</label>
+        <div class="input">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg>
+          <input id="username" name="username" autocomplete="username" placeholder="e.g. admin" required />
+        </div>
+      </div>
+      <div class="field" id="fullname-field" hidden>
+        <label for="fullname">Full name</label>
+        <div class="input">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <input id="fullname" name="fullname" autocomplete="name" placeholder="Optional — shown to colleagues" />
+        </div>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <div class="input">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          <input id="password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required />
+        </div>
+      </div>
+      <div class="err" id="err" role="alert"></div>
+      <button class="submit" id="submit" type="submit">
+        <span id="submit-label">Sign in</span>
+      </button>
+    </form>
+
+    <p class="hint" id="hint">No account? Ask an administrator to create one for you.</p>
+    <div class="chips">
+      <span>C-STORE</span><span>DICOMweb</span><span>MWL · MPPS</span><span>RBAC</span><span>TLS</span>
+    </div>
+    <p class="foot">PAXS Archive · clinical imaging platform · <a href="/" style="color:var(--faint)">dashboard</a></p>
+  </main>
+
+<script>
+(function () {
+  var mode = "login";
+  var $ = function (id) { return document.getElementById(id); };
+
+  function showErr(msg) {
+    var el = $("err");
+    el.textContent = msg || "Authentication failed";
+    el.classList.add("show");
+  }
+  function clearErr() { $("err").classList.remove("show"); }
+
+  function setMode(m) {
+    mode = m;
+    $("tab-login").classList.toggle("active", m === "login");
+    $("tab-register").classList.toggle("active", m === "register");
+    $("tab-login").setAttribute("aria-selected", m === "login" ? "true" : "false");
+    $("tab-register").setAttribute("aria-selected", m === "register" ? "true" : "false");
+    $("fullname-field").hidden = m !== "register";
+    $("submit-label").textContent = m === "login" ? "Sign in" : "Create account";
+    $("password").autocomplete = m === "login" ? "current-password" : "new-password";
+    $("hint").textContent = m === "login"
+      ? "No account? Ask an administrator to create one for you."
+      : "First account on a fresh install becomes the ADMIN. Self-registration can never create ADMINs once one exists.";
+    clearErr();
+  }
+
+  // Preserve the ?next= deep-link target so login returns where they were headed.
+  var next = new URLSearchParams(location.search).get("next") || "";
+
+  $("tab-login").addEventListener("click", function () { setMode("login"); });
+  $("tab-register").addEventListener("click", function () { setMode("register"); });
+
+  $("auth-form").addEventListener("submit", async function (ev) {
+    ev.preventDefault();
+    clearErr();
+    var username = $("username").value.trim();
+    var password = $("password").value;
+    if (!username || !password) { showErr("Username and password are required"); return; }
+
+    var body = mode === "login"
+      ? { username: username, password: password }
+      : { username: username, password: password, full_name: $("fullname").value.trim() || null };
+
+    var btn = $("submit");
+    var prevLabel = $("submit-label").textContent;
+    btn.disabled = true;
+    $("submit-label").textContent = "Please wait…";
+    try {
+      var url = "/api/v1/auth/" + (mode === "login" ? "login" : "register");
+      if (next) url += "?next=" + encodeURIComponent(next);
+      var res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(body),
+      });
+      var data = await res.json().catch(function () { return {}; });
+      if (!res.ok) { showErr(data.detail || ("HTTP " + res.status)); return; }
+
+      // Mirror the dashboard: keep the bearer token for the SPA (paxs_token),
+      // the server cookie is what lets /viewer + /studies-ui load.
+      try { localStorage.setItem("paxs_token", data.access_token); } catch (e) {}
+      window.location.href = data.redirect_to || next || "/";
+    } catch (e) {
+      showErr("Network error — is the server reachable?");
+    } finally {
+      btn.disabled = false;
+      $("submit-label").textContent = prevLabel;
+    }
+  });
+})();
+</script>
+</body>
+</html>

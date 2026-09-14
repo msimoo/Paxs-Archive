@@ -1,0 +1,755 @@
+/* ==========================================================================
+   PAXS Archive — Master Clinical DICOM Workstation Theme
+   Designed for Radiologists & Physicians (Refactoring UI + shadcn/ui)
+
+   Color System & Tool Categorization:
+   - Base Palette: Deep Obsidian/Slate (#020617 / #0f172a / #1e293b)
+   - Navigation Tools (Zoom, Pan, Scroll, Rotate): Sky Blue (#38bdf8)
+   - Measurement Tools (Length, Angle, Ellipse, Cobb): Emerald Green (#34d399)
+   - Window/Level & Contrast: Amber Yellow (#fbbf24)
+   - Annotation & Key Images: Violet (#a78bfa)
+   - Destructive / Reset: Rose Pink (#f43f5e)
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
+
+/* ------------------------------------------------------------------ */
+/* 0. Paxs HSL Token Overrides (Native Design System Mapping)         */
+/* ------------------------------------------------------------------ */
+:root {
+  /* HSL Triplets without wrapper for Paxs Tailwind integration */
+  --highlight: 160 84% 39%;
+  --neutral: 215 16% 57%;
+  --neutral-light: 215 20% 75%;
+  --neutral-dark: 222 47% 11%;
+  --background: 222 84% 4%;
+  --foreground: 210 40% 98%;
+  --card: 222 47% 9%;
+  --card-foreground: 210 40% 98%;
+  --popover: 222 47% 11%;
+  --popover-foreground: 210 40% 98%;
+  --primary: 217 91% 60%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 215 25% 22%;
+  --secondary-foreground: 210 40% 90%;
+  --muted: 217 33% 15%;
+  --muted-foreground: 215 16% 65%;
+  --accent: 217 33% 18%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 343 88% 50%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 215 25% 20%;
+  --input: 215 25% 22%;
+  --ring: 217 91% 60%;
+
+  /* Direct Hex Variables */
+  --paxs-navy: #020617;
+  --paxs-panel: #0f172a;
+  --paxs-card: #1e293b;
+  --paxs-border: rgba(51, 65, 85, 0.6);
+
+  --paxs-blue: #3b82f6;
+  --paxs-sky: #38bdf8;
+  --paxs-emerald: #34d399;
+  --paxs-amber: #fbbf24;
+  --paxs-violet: #a78bfa;
+  --paxs-rose: #f43f5e;
+
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+/* ------------------------------------------------------------------ */
+/* 1. Global Page Reset & Layout                                      */
+/* ------------------------------------------------------------------ */
+html, body, #root {
+  background-color: var(--paxs-navy) !important;
+  color: #f8fafc !important;
+  font-family: var(--font-sans) !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  -webkit-font-smoothing: antialiased !important;
+}
+
+div[class*="bg-black"],
+div[class*="bg-slate-900"],
+div[class*="bg-slate-950"] {
+  background-color: var(--paxs-navy) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 2. Control Tower Header Bar                                        */
+/* ------------------------------------------------------------------ */
+header,
+div[class*="bg-popover"][class*="z-20"],
+header[class*="relative"],
+div[class*="relative h-[48px] items-center"] {
+  background: rgba(2, 6, 23, 0.96) !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  border-bottom: 1px solid var(--paxs-border) !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6) !important;
+  height: 58px !important;
+  z-index: 40 !important;
+  transform: none !important;
+}
+
+/* Brand Link */
+header a[href*="viewer"],
+div[class*="header"] a {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+  text-decoration: none !important;
+}
+
+header img[src*="logo"],
+header img[src*="logo.png"],
+header img[src*="logomain"],
+header img[src*="PaxsViewer-logo"],
+div[class*="header"] img {
+  height: 32px !important;
+  width: auto !important;
+  max-width: 120px !important;
+  object-fit: contain !important;
+  display: inline-block !important;
+  filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.25)) !important;
+}
+
+/* Patient Name Badge */
+div[class*="mpr-corner-tl"],
+header span[class*="patient-name"],
+span[class*="patient-name"] {
+  font-family: var(--font-sans) !important;
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: #ffffff !important;
+  letter-spacing: 0.03em !important;
+  text-transform: uppercase !important;
+  background: rgba(30, 41, 59, 0.8) !important;
+  padding: 5px 14px !important;
+  border-radius: 8px !important;
+  border: 1px solid rgba(56, 189, 248, 0.4) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. Toolbar Dock & Category-Colored Buttons (All-Sides Multi-Color Border) */
+/* ------------------------------------------------------------------ */
+header div[class*="relative flex justify-center"],
+div[class*="relative flex justify-center gap-"] {
+  position: relative !important;
+  background:
+    linear-gradient(rgba(15, 23, 42, 0.95), rgba(15, 23, 42, 0.95)) padding-box,
+    linear-gradient(90deg, #38bdf8, #34d399, #fbbf24, #a78bfa, #f43f5e, #38bdf8) border-box !important;
+  border: 1px solid transparent !important;
+  border-radius: 999px !important; /* Fully rounded capsule on all sides */
+  padding: 4px 14px !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 18px rgba(56, 189, 248, 0.22) !important;
+  gap: 8px !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  background-size: 100% 100%, 240% 240% !important;
+  animation: paxs-tool-border-shine 5s linear infinite !important;
+}
+
+@keyframes paxs-tool-border-shine {
+  0% { background-position: 0% 0%, 0% 0%; }
+  100% { background-position: 0% 0%, 240% 240%; }
+}
+
+/* Clear Base Button Styles (Explicit Borders & 8px Radii) */
+header button[aria-label],
+div[class*="relative flex justify-center"] button {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 8px !important;
+  font-family: var(--font-sans) !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: #cbd5e1 !important;
+  background: rgba(30, 41, 59, 0.7) !important;
+  border: 1.5px solid rgba(71, 85, 105, 0.6) !important;
+  border-radius: 8px !important;
+  padding: 4px  !important;
+  height: 30px !important;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  cursor: pointer !important;
+}
+
+/* Explicit 20px SVG Icon Sizing with 5px Padding All Around */
+header button[aria-label] svg,
+div[class*="relative flex justify-center"] button svg,
+button[class*="paxs-tool-"] svg,
+div[class*="toolbar"] svg,
+header svg {
+  width: 20px !important;
+  height: 20px !important;
+  min-width: 20px !important;
+  min-height: 20px !important;
+  max-width: 20px !important;
+  max-height: 20px !important;
+  padding: 5px !important;
+  box-sizing: content-box !important;
+  flex-shrink: 0 !important;
+}
+
+/* Tool Category Hover & Focus States */
+header button[aria-label]:hover,
+div[class*="relative flex justify-center"] button:hover {
+  transform: translateY(-1px) !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* Category: Navigation (Sky Blue) */
+button.paxs-tool-nav,
+header button[aria-label*="Zoom"],
+header button[aria-label*="Pan"],
+header button[aria-label*="Scroll"],
+header button[aria-label*="Rotate"] {
+  border-color: rgba(56, 189, 248, 0.45) !important;
+}
+button.paxs-tool-nav:hover {
+  background: rgba(56, 189, 248, 0.15) !important;
+  border-color: var(--paxs-sky) !important;
+  color: #ffffff !important;
+}
+button.paxs-tool-nav svg { color: var(--paxs-sky) !important; }
+
+/* Category: Measurement (Emerald Green) */
+button.paxs-tool-measure,
+header button[aria-label*="Length"],
+header button[aria-label*="Ellipse"],
+header button[aria-label*="Angle"],
+header button[aria-label*="Rectangle"] {
+  border-color: rgba(52, 211, 153, 0.45) !important;
+}
+button.paxs-tool-measure:hover {
+  background: rgba(52, 211, 153, 0.15) !important;
+  border-color: var(--paxs-emerald) !important;
+  color: #ffffff !important;
+}
+button.paxs-tool-measure svg { color: var(--paxs-emerald) !important; }
+
+/* Category: Window/Level & Contrast (Amber Yellow) */
+button.paxs-tool-wl,
+header button[aria-label*="Window"],
+header button[aria-label*="Contrast"],
+header button[aria-label*="W/L"] {
+  border-color: rgba(251, 191, 36, 0.45) !important;
+}
+button.paxs-tool-wl:hover {
+  background: rgba(251, 191, 36, 0.15) !important;
+  border-color: var(--paxs-amber) !important;
+  color: #ffffff !important;
+}
+button.paxs-tool-wl svg { color: var(--paxs-amber) !important; }
+
+/* Category: Annotation & SR (Violet) */
+button.paxs-tool-annot,
+header button[aria-label*="Arrow"],
+header button[aria-label*="Text"],
+header button[aria-label*="Probe"],
+header button[aria-label*="Crosshairs"] {
+  border-color: rgba(167, 139, 250, 0.45) !important;
+}
+button.paxs-tool-annot:hover {
+  background: rgba(167, 139, 250, 0.15) !important;
+  border-color: var(--paxs-violet) !important;
+  color: #ffffff !important;
+}
+button.paxs-tool-annot svg { color: var(--paxs-violet) !important; }
+
+/* Active Tool Button (Solid Category Gradient Wash) */
+header button[aria-label][class*="bg-highlight"],
+div[class*="relative flex justify-center"] button[class*="bg-highlight"],
+header button[aria-label][data-state="active"],
+div[class*="relative flex justify-center"] button[data-state="active"] {
+  background: linear-gradient(135deg, #10b981, #059669) !important;
+  border-color: transparent !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.5) !important;
+  transform: scale(1.04) !important;
+}
+header button[aria-label][data-state="active"] svg,
+div[class*="relative flex justify-center"] button[data-state="active"] svg {
+  color: #ffffff !important;
+}
+
+/* Undo / Redo Cluster */
+button[aria-label*="Undo"],
+button[aria-label*="Redo"] {
+  border-radius: 8px !important;
+  background: rgba(15, 23, 42, 0.9) !important;
+  border: 1.5px solid rgba(71, 85, 105, 0.6) !important;
+  color: #e2e8f0 !important;
+  padding: 6px 12px !important;
+  height: 36px !important;
+}
+button[aria-label*="Undo"]:hover,
+button[aria-label*="Redo"]:hover {
+  background: rgba(59, 130, 246, 0.2) !important;
+  border-color: var(--paxs-blue) !important;
+  color: #ffffff !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 4. Filmstrip & Lightbox Series Cards (Next-Gen Clinical UI/UX)      */
+/* ------------------------------------------------------------------ */
+/* Master Left Resizable Panel Container */
+#viewerLayoutResizableLeftPanel,
+div[id*="viewerLayoutResizableLeftPanel"],
+div[data-cy="viewerLayoutResizableLeftPanel"],
+div[class*="viewerLayoutResizableLeftPanel"],
+div[class*="border-secondary"][class*="w-"],
+div[data-cy="study-browser"],
+div[class*="study-browser"],
+div[class*="StudyBrowser"] {
+  background: radial-gradient(circle at 10% 0%, rgba(14, 165, 233, 0.08), transparent 40%),
+              radial-gradient(circle at 90% 100%, rgba(168, 85, 247, 0.06), transparent 40%),
+              rgba(3, 7, 18, 0.96) !important;
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+  border-right: 1px solid rgba(56, 189, 248, 0.22) !important;
+  box-shadow: 6px 0 32px rgba(0, 0, 0, 0.75), inset -1px 0 0 rgba(255, 255, 255, 0.04) !important;
+  z-index: 30 !important;
+  transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s ease !important;
+}
+
+/* Collapse / Expand Handle on Left Resizable Divider */
+div[class*="resizer"],
+div[class*="Resizer"],
+div[role="separator"][aria-orientation="vertical"],
+div[data-cy*="resize-handle"] {
+  width: 4px !important;
+  background: rgba(30, 41, 59, 0.8) !important;
+  transition: all 0.2s ease !important;
+  position: relative !important;
+}
+
+div[class*="resizer"]:hover,
+div[class*="Resizer"]:hover,
+div[role="separator"][aria-orientation="vertical"]:hover,
+div[data-cy*="resize-handle"]:hover {
+  background: linear-gradient(180deg, #38bdf8, #2dd4bf, #a855f7) !important;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.8) !important;
+  cursor: col-resize !important;
+}
+
+/* Studies & Series Header Tabs Header */
+#viewerLayoutResizableLeftPanel div[class*="header"],
+div[data-cy="study-browser"] div[class*="header"],
+div[class*="study-browser"] div[class*="header"],
+div[class*="StudyBrowser"] div[class*="header"] {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(8, 15, 30, 0.96)) !important;
+  border-bottom: 1px solid rgba(56, 189, 248, 0.2) !important;
+  padding: 10px 14px !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5) !important;
+}
+
+/* Tab Switchers (e.g. Study / Series switcher buttons) */
+#viewerLayoutResizableLeftPanel button[role="tab"],
+div[data-cy="study-browser"] button[role="tab"] {
+  font-family: var(--font-sans) !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.04em !important;
+  color: #94a3b8 !important;
+  background: rgba(15, 23, 42, 0.6) !important;
+  border: 1px solid rgba(148, 163, 184, 0.15) !important;
+  border-radius: 6px !important;
+  padding: 5px 12px !important;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+#viewerLayoutResizableLeftPanel button[role="tab"]:hover,
+div[data-cy="study-browser"] button[role="tab"]:hover {
+  color: #ffffff !important;
+  background: rgba(30, 41, 59, 0.85) !important;
+  border-color: rgba(56, 189, 248, 0.4) !important;
+  box-shadow: 0 2px 10px rgba(56, 189, 248, 0.2) !important;
+}
+
+#viewerLayoutResizableLeftPanel button[role="tab"][data-state="active"],
+#viewerLayoutResizableLeftPanel button[role="tab"][aria-selected="true"],
+div[data-cy="study-browser"] button[role="tab"][data-state="active"] {
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.2), rgba(45, 212, 191, 0.15)) !important;
+  border-color: #22d3ee !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 14px rgba(34, 211, 238, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
+}
+
+/* Series Thumbnail Card Container */
+#viewerLayoutResizableLeftPanel div[class*="flex h-full w-full flex-col"] button[class*="cursor-pointer"],
+#viewerLayoutResizableLeftPanel div[class*="flex h-full w-full flex-col"] div[class*="cursor-pointer"],
+#viewerLayoutResizableLeftPanel div[data-cy*="study-browser-thumbnail"],
+#viewerLayoutResizableLeftPanel div[class*="thumbnail-wrapper"],
+#viewerLayoutResizableLeftPanel div[class*="Thumbnail"] {
+  position: relative !important;
+  border: 1px solid rgba(148, 163, 184, 0.22) !important;
+  border-radius: 12px !important;
+  background: linear-gradient(145deg, rgba(15, 23, 42, 0.9), rgba(6, 11, 22, 0.95)) !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  overflow: hidden !important;
+  margin: 6px 8px 10px 8px !important;
+  padding: 4px !important;
+}
+
+/* Glowing Neon Left Indicator Strip */
+#viewerLayoutResizableLeftPanel div[class*="cursor-pointer"]::before,
+#viewerLayoutResizableLeftPanel button[class*="cursor-pointer"]::before {
+  content: "" !important;
+  position: absolute !important;
+  left: 0 !important;
+  top: 0 !important;
+  bottom: 0 !important;
+  width: 3.5px !important;
+  background: linear-gradient(180deg, #38bdf8, #2dd4bf) !important;
+  opacity: 0 !important;
+  transition: opacity 0.2s ease, box-shadow 0.2s ease !important;
+  z-index: 5 !important;
+}
+
+/* Hover State with Neon Cyan Lift */
+#viewerLayoutResizableLeftPanel div[class*="cursor-pointer"]:hover,
+#viewerLayoutResizableLeftPanel button[class*="cursor-pointer"]:hover,
+#viewerLayoutResizableLeftPanel div[data-cy*="study-browser-thumbnail"]:hover {
+  border-color: rgba(56, 189, 248, 0.7) !important;
+  background: linear-gradient(145deg, rgba(22, 36, 64, 0.95), rgba(10, 18, 36, 0.98)) !important;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.75), 0 0 20px rgba(56, 189, 248, 0.35) !important;
+  transform: translateY(-2px) scale(1.015) !important;
+}
+
+#viewerLayoutResizableLeftPanel div[class*="cursor-pointer"]:hover::before,
+#viewerLayoutResizableLeftPanel button[class*="cursor-pointer"]:hover::before {
+  opacity: 1 !important;
+  box-shadow: 0 0 10px #38bdf8 !important;
+}
+
+/* Active / Dragging / Selected Series Card with 0.5px Rainbow Gradient Border (Matching Footer) */
+#viewerLayoutResizableLeftPanel div[class*="border-primary"],
+#viewerLayoutResizableLeftPanel button[class*="border-primary"],
+#viewerLayoutResizableLeftPanel div[class*="border-highlight"],
+#viewerLayoutResizableLeftPanel div[class*="selected"][class*="cursor-pointer"],
+#viewerLayoutResizableLeftPanel div[aria-selected="true"][class*="cursor-pointer"],
+#viewerLayoutResizableLeftPanel div[data-state="selected"][class*="cursor-pointer"] {
+  position: relative !important;
+  border: 0.5px solid transparent !important;
+  background:
+    linear-gradient(rgba(15, 23, 42, 0.98), rgba(8, 15, 30, 0.98)) padding-box,
+    linear-gradient(90deg, #38bdf8, #34d399, #fbbf24, #a78bfa, #f43f5e, #38bdf8) border-box !important;
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.4), 0 4px 16px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+  background-size: 100% 100%, 200% 200% !important;
+  animation: paxs-selected-shine 4s linear infinite !important;
+}
+
+@keyframes paxs-selected-shine {
+  0% { background-position: 0% 0%, 0% 0%; }
+  100% { background-position: 0% 0%, 200% 200%; }
+}
+
+#viewerLayoutResizableLeftPanel div[class*="border-primary"]::before,
+#viewerLayoutResizableLeftPanel button[class*="border-primary"]::before,
+#viewerLayoutResizableLeftPanel div[class*="selected"][class*="cursor-pointer"]::before,
+#viewerLayoutResizableLeftPanel div[aria-selected="true"]::before {
+  opacity: 1 !important;
+  background: linear-gradient(180deg, #38bdf8, #34d399, #fbbf24, #a78bfa, #f43f5e) !important;
+  box-shadow: 0 0 12px #38bdf8 !important;
+}
+
+/* Series Description & Metadata Typography */
+#viewerLayoutResizableLeftPanel span[class*="description"],
+#viewerLayoutResizableLeftPanel div[data-cy*="study-browser"] span,
+#viewerLayoutResizableLeftPanel div[class*="thumbnail-wrapper"] span {
+  font-family: var(--font-sans) !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  color: #f1f5f9 !important;
+}
+
+/* Modality Signature Color Tags & Badges */
+#viewerLayoutResizableLeftPanel span[class*="modality-badge"],
+#viewerLayoutResizableLeftPanel span[class*="modality"],
+#viewerLayoutResizableLeftPanel .paxs-modality-pill {
+  font-family: var(--font-mono) !important;
+  font-size: 10.5px !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.07em !important;
+  padding: 3px 8px !important;
+  border-radius: 6px !important;
+  text-transform: uppercase !important;
+  background: rgba(34, 211, 238, 0.18) !important;
+  color: #22d3ee !important;
+  border: 1px solid rgba(34, 211, 238, 0.45) !important;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.25) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+}
+
+#viewerLayoutResizableLeftPanel .paxs-modality-pill svg {
+  color: #38bdf8 !important;
+  width: 12px !important;
+  height: 12px !important;
+  padding: 0 !important;
+}
+
+/* Instance Count Pill (e.g. 30 imgs 3D) */
+#viewerLayoutResizableLeftPanel span[class*="count"],
+#viewerLayoutResizableLeftPanel span[class*="series-count"],
+#viewerLayoutResizableLeftPanel div[class*="instances"] {
+  font-family: var(--font-mono) !important;
+  font-size: 10.5px !important;
+  font-weight: 700 !important;
+  color: #38bdf8 !important;
+  background: rgba(15, 23, 42, 0.85) !important;
+  padding: 2px 7px !important;
+  border-radius: 6px !important;
+  border: 1px solid rgba(56, 189, 248, 0.3) !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 5. Viewport View (Clean Diagnostic Canvas)                        */
+/* ------------------------------------------------------------------ */
+div.viewport-element,
+div.cornerstone-viewport-element,
+div.viewport-wrapper {
+  position: relative !important;
+  background-color: #000000 !important;
+  border: 1px solid rgba(51, 65, 85, 0.5) !important;
+  border-radius: 4px !important;
+}
+
+/* ACR Corner HUD Overlay Reads */
+#paxs-mpr-root .mpr-corner-tl,
+#paxs-mpr-root .mpr-corner-tr,
+#paxs-mpr-root .mpr-corner-bl,
+#paxs-mpr-root .mpr-corner-br,
+div[class*="corner-overlay"] {
+  font-family: var(--font-mono) !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: #38bdf8 !important;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95) !important;
+  pointer-events: none !important;
+}
+
+#paxs-mpr-root .mpr-corner-tl { color: #f8fafc !important; font-weight: 700 !important; }
+#paxs-mpr-root .mpr-corner-tr { color: #a78bfa !important; }
+#paxs-mpr-root .mpr-corner-bl { color: #34d399 !important; }
+#paxs-mpr-root .mpr-corner-br { color: #fbbf24 !important; font-weight: 700 !important; }
+
+/* Viewport Crosshair Lines */
+#paxs-mpr-root .mpr-line {
+  position: absolute !important;
+  background: var(--paxs-sky) !important;
+  opacity: 0.8 !important;
+  pointer-events: none !important;
+  z-index: 10 !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 6. Modals, Popovers & Dialogs                                      */
+/* ------------------------------------------------------------------ */
+#react-portal > div[class*="fixed"],
+div[class*="fixed inset-0"][class*="bg-"] {
+  background: rgba(0, 0, 0, 0.75) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+#react-portal div[role="dialog"],
+div[role="dialog"] {
+  background: rgba(15, 23, 42, 0.98) !important;
+  border: 1px solid var(--paxs-border) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.8) !important;
+  color: #f8fafc !important;
+}
+
+/* Mechanical Keycaps */
+div[role="dialog"] kbd {
+  background: rgba(30, 41, 59, 0.9) !important;
+  border: 1px solid rgba(71, 85, 105, 0.6) !important;
+  color: var(--paxs-sky) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  padding: 2px 7px !important;
+  border-radius: 4px !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 7. Range Sliders & Scrollbars                                      */
+/* ------------------------------------------------------------------ */
+input[type="range"] {
+  accent-color: var(--paxs-blue) !important;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.5);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--paxs-blue);
+}
+
+/* ------------------------------------------------------------------ */
+/* 8. PAXS Archive Site Footer (Compact Single-Line & Auto-Hide)      */
+/* ------------------------------------------------------------------ */
+.paxs-viewer-foot {
+  position: fixed !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  z-index: 9999 !important;
+  width: 100% !important;
+  height: 26px !important;
+  background:
+    linear-gradient(rgba(15, 23, 42, 0.95), rgba(15, 23, 42, 0.95)) padding-box,
+    linear-gradient(90deg, #38bdf8, #34d399, #fbbf24, #a78bfa, #f43f5e, #38bdf8) border-box !important;
+  border: 1px solid transparent !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important; 
+  padding: 2px 16px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  font-family: var(--font-sans) !important;
+  font-size: 10.5px !important;
+  color: #94a3b8 !important;
+  /* Auto-hide transition: collapses down leaving a 3px glowing indicator edge */
+  transform: translateY(calc(100% - 3px)) !important;
+  opacity: 0.7 !important;
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.28s ease, box-shadow 0.28s ease !important;
+}
+
+/* Hover reveal on mouseover or proximity */
+.paxs-viewer-foot:hover,
+.paxs-viewer-foot:focus-within,
+.paxs-viewer-foot.paxs-foot-visible {
+  transform: translateY(0) !important;
+  opacity: 1 !important;
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.85) !important;
+}
+
+.paxs-viewer-foot .foot-glow {
+  position: absolute !important;
+  top: -1px !important;
+  left: 0 !important;
+  right: 0 !important;
+  height: 2px !important;
+  background: linear-gradient(90deg, transparent, #3b82f6, #10b981, #f59e0b, transparent) !important;
+}
+
+.paxs-viewer-foot .foot-brand {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  font-size: 10.5px !important;
+  color: #64748b !important;
+}
+
+.paxs-viewer-foot .foot-brand svg {
+  width: 13px !important;
+  height: 13px !important;
+  padding: 0 !important;
+  min-width: 13px !important;
+  min-height: 13px !important;
+  max-width: 13px !important;
+  max-height: 13px !important;
+}
+
+.paxs-viewer-foot .foot-copy {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  font-size: 10.5px !important;
+  color: #94a3b8 !important;
+}
+
+.paxs-viewer-foot .foot-heart {
+  color: var(--paxs-rose) !important;
+  font-size: 11px !important;
+  animation: paxs-heart-beat 1.7s ease-in-out infinite !important;
+}
+
+@keyframes paxs-heart-beat {
+  0%, 100% { transform: scale(1); }
+  12% { transform: scale(1.25); }
+  24% { transform: scale(1); }
+}
+
+.paxs-viewer-foot .foot-name {
+  font-weight: 700 !important;
+  background: linear-gradient(90deg, #38bdf8, #34d399, #a78bfa, #38bdf8) !important;
+  background-size: 200% auto !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  color: transparent !important;
+  animation: paxs-foot-shine 5s linear infinite !important;
+}
+
+@keyframes paxs-foot-shine { to { background-position: 200% center; } }
+
+.paxs-viewer-foot .foot-link {
+  font-family: var(--font-mono) !important;
+  font-size: 10.5px !important;
+  color: var(--paxs-sky) !important;
+  text-decoration: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 3px !important;
+}
+
+.paxs-viewer-foot .foot-link svg {
+  width: 11px !important;
+  height: 11px !important;
+  padding: 0 !important;
+  min-width: 11px !important;
+  min-height: 11px !important;
+  max-width: 11px !important;
+  max-height: 11px !important;
+}
+
+.paxs-viewer-foot .foot-link:hover {
+  color: #7dd3fc !important;
+}
+
+.paxs-viewer-foot .foot-pulse {
+  display: flex !important;
+  align-items: center !important;
+  gap: 2px !important;
+}
+
+.paxs-viewer-foot .foot-pulse span {
+  width: 2.5px !important;
+  border-radius: 2px !important;
+  background: linear-gradient(180deg, #38bdf8, #34d399) !important;
+  animation: paxs-ecg-pulse 1.3s ease-in-out infinite !important;
+}
+
+.paxs-viewer-foot .foot-pulse span:nth-child(odd) { height: 4px !important; }
+.paxs-viewer-foot .foot-pulse span:nth-child(even) { height: 10px !important; animation-delay: 0.16s !important; }
+
+@keyframes paxs-ecg-pulse {
+  0%, 100% { opacity: 0.3; transform: scaleY(0.6); }
+  50% { opacity: 1; transform: scaleY(1.15); }
+}
+
+body {
+  padding-bottom: 0px !important;
+}

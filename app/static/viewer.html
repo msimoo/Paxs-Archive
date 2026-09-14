@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PAXS DICOM Viewer</title>
+  <link rel="icon" href="/static/logo/logo.ico" />
+  <link rel="stylesheet" href="/static/styles.css?v=10" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    /* Theme initialization */
+    (function () {
+      try {
+        var t = localStorage.getItem("paxs_theme");
+        document.documentElement.dataset.theme = (t === "light" ? "light" : "dark");
+      } catch (e) {
+        document.documentElement.dataset.theme = "dark";
+      }
+    })();
+  </script>
+  <style>
+    .viewer-body {
+      display: flex;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+      background: var(--ink, #060b17);
+    }
+    .v-sidebar {
+      width: 320px;
+      background: var(--panel, #0b1329);
+      border-right: 1px solid var(--hairline, rgba(148, 163, 184, 0.14));
+      display: flex;
+      flex-direction: column;
+    }
+    .v-study {
+      padding: 16px;
+      border-bottom: 1px solid var(--hairline, rgba(148, 163, 184, 0.14));
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .v-study .name {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text, #f1f5f9);
+    }
+    .v-study .meta {
+      font-size: 11px;
+      color: var(--muted, #94a3b8);
+      font-family: var(--mono, monospace);
+      margin-top: 4px;
+    }
+    .v-series-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .series-card {
+      padding: 10px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--hairline, rgba(148, 163, 184, 0.14));
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .series-card:hover {
+      background: rgba(34, 211, 238, 0.08);
+      border-color: rgba(34, 211, 238, 0.4);
+      transform: translateY(-1px);
+    }
+    .series-card.active {
+      border-color: #22d3ee;
+      background: linear-gradient(135deg, rgba(34, 211, 238, 0.15), rgba(45, 212, 191, 0.08));
+      box-shadow: 0 0 16px rgba(34, 211, 238, 0.25);
+    }
+    .series-card img {
+      width: 56px;
+      height: 56px;
+      border-radius: 6px;
+      object-fit: cover;
+      background: #000;
+    }
+    .v-main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+    .v-stage {
+      flex: 1;
+      position: relative;
+      background: #03060d;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+    #v-canvas {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      box-shadow: 0 0 40px rgba(0, 0, 0, 0.8);
+    }
+    /* 3D Anatomical Cube Overlay */
+    #v-3d-cube-wrap {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      width: 120px;
+      height: 120px;
+      z-index: 10;
+      background: rgba(11, 19, 41, 0.65);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    }
+    #v-3d-cube-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .v-toolbar {
+      height: 56px;
+      background: rgba(11, 19, 41, 0.85);
+      backdrop-filter: blur(14px);
+      border-top: 1px solid var(--hairline, rgba(148, 163, 184, 0.14));
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      z-index: 10;
+    }
+    .v-toolbar .preset-bar {
+      display: flex;
+      gap: 6px;
+    }
+    .v-toolbar button.preset {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--hairline, rgba(148, 163, 184, 0.2));
+      border-radius: 999px;
+      padding: 5px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted, #94a3b8);
+      cursor: pointer;
+      transition: all 0.18s ease;
+    }
+    .v-toolbar button.preset:hover {
+      color: var(--text, #f1f5f9);
+      background: rgba(148, 163, 184, 0.12);
+    }
+    .v-toolbar button.preset.active {
+      background: linear-gradient(135deg, #22d3ee, #2dd4bf);
+      color: #040914;
+      font-weight: 600;
+      border-color: transparent;
+      box-shadow: 0 0 14px rgba(34, 211, 238, 0.35);
+    }
+    .v-toolbar .controls-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .icon-btn-lg {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--hairline, rgba(148, 163, 184, 0.2));
+      border-radius: 8px;
+      padding: 6px 12px;
+      color: var(--text, #f1f5f9);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.18s ease;
+    }
+    .icon-btn-lg:hover {
+      background: #22d3ee;
+      color: #040914;
+      border-color: transparent;
+      box-shadow: 0 0 12px rgba(34, 211, 238, 0.35);
+    }
+    .icon-btn-lg.active {
+      background: #22d3ee;
+      color: #040914;
+    }
+  </style>
+</head>
+<body>
+  <div class="viewer-body">
+    <aside class="v-sidebar">
+      <div class="v-study" id="v-study">
+        <div class="name" id="v-patient">Loading…</div>
+        <div class="meta" id="v-meta">—</div>
+      </div>
+      <div class="v-series-list" id="v-series"></div>
+    </aside>
+
+    <main class="v-main">
+      <div class="v-stage" id="v-stage">
+        <div class="hud" id="v-hud"></div>
+        <div id="v-3d-cube-wrap" title="Interactive 3D Anatomical Spatial Orientation Cube">
+          <canvas id="v-3d-cube-canvas"></canvas>
+        </div>
+        <canvas id="v-canvas"></canvas>
+      </div>
+
+      <div class="v-toolbar">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button class="icon-btn-lg" id="v-prev" title="Previous image (←)">‹ Prev</button>
+          <button class="icon-btn-lg" id="v-next" title="Next image (→)">Next ›</button>
+          <button class="icon-btn-lg" id="v-cine" title="Toggle Cine Loop (Space)">▶ Cine</button>
+        </div>
+
+        <div class="preset-bar" id="v-presets">
+          <button class="preset active" data-window="">Auto</button>
+          <button class="preset" data-window="40,400">Soft tissue</button>
+          <button class="preset" data-window="40,80">Brain</button>
+          <button class="preset" data-window="-600,1500">Lung</button>
+          <button class="preset" data-window="400,1800">Bone</button>
+        </div>
+
+        <div class="controls-right">
+          <span id="v-counter" style="font-family:var(--mono);font-size:12px;color:var(--muted);">– / –</span>
+          <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);">
+            <span>Zoom</span>
+            <input type="range" id="v-zoom" min="50" max="400" value="100" style="width:90px;" />
+            <span id="v-zoom-label" style="font-family:var(--mono);width:36px;">100%</span>
+          </div>
+          <button class="icon-btn-lg" id="btn-theme" title="Toggle theme">🌓 Theme</button>
+          <button class="btn sm primary" id="v-back">← Dashboard</button>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/static/viewer.js?v=9"></script>
+</body>
+</html>

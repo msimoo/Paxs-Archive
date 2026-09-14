@@ -1,0 +1,113 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@import 'tailwindcss';
+
+@theme {
+  /* Custom colors */
+  --color-ink: #070c18;
+  --color-panel: #0c1424;
+  --color-raised: #111c30;
+  --color-raised-2: #16233c;
+  --color-accent: #22d3ee;
+  --color-teal: #2dd4bf;
+  --color-danger: #f87171;
+  --color-ok: #34d399;
+  --color-text-primary: #e2e8f0;
+  --color-text-muted: #8b9bb4;
+  --color-text-faint: #5b6b85;
+  --color-hairline: rgba(148, 163, 184, 0.14);
+  --color-hairline-strong: rgba(148, 163, 184, 0.28);
+  --color-glow: rgba(34, 211, 238, 0.06);
+  
+  /* Modality colors */
+  --color-mod-ct: #38bdf8;
+  --color-mod-mr: #a78bfa;
+  --color-mod-cr: #fbbf24;
+  --color-mod-dx: #fb923c;
+  --color-mod-us: #34d399;
+  --color-mod-nm: #fb7185;
+  --color-mod-pt: #f472b6;
+  --color-mod-xa: #22d3ee;
+  --color-mod-mg: #e879f9;
+  --color-mod-ot: #94a3b8;
+  
+  /* Fonts */
+  --font-sans: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  
+  /* Radius */
+  --radius-panel: 14px;
+  --radius-card: 10px;
+  --radius-sm: 6px;
+}
+
+:root {
+  /* Custom non-Tailwind properties */
+  --bg-radial-gradient: radial-gradient(circle at 50% -20%, rgba(34, 211, 238, 0.15) 0%, rgba(7, 12, 24, 0) 70%);
+  --glass-bg: rgba(12, 20, 36, 0.65);
+  --glass-border: rgba(148, 163, 184, 0.1);
+}
+
+body {
+  background-color: var(--color-ink);
+  background-image: var(--bg-radial-gradient);
+  background-attachment: fixed;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Glassmorphism utility */
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-raised-2);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-faint);
+}
+
+/* Animations */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.05) 50%, rgba(255,255,255,0) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 2.5s infinite linear;
+}
+
+.animate-slide-up {
+  animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

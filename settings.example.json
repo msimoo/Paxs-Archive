@@ -1,0 +1,10 @@
+{
+  "allowNonWorkspaceAccess": true,
+  "enableTelemetry": false,
+  "gatewayProviders": {
+    "my_provider": {
+      "apiKey": "sk-your-key-here",
+      "baseUrl": "https://api.yourprovider.com/"
+    }
+  }
+}

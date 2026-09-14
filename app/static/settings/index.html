@@ -1,0 +1,1096 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PAXS Archive — Organization Settings & Licensing Engine</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap">
+    <style>
+        :root {
+            --bg-dark: #020617;
+            --panel-bg: #0f172a;
+            --card-bg: #1e293b;
+            --border-color: rgba(51, 65, 85, 0.6);
+            --accent-blue: #3b82f6;
+            --accent-sky: #38bdf8;
+            --accent-emerald: #34d399;
+            --accent-amber: #fbbf24;
+            --accent-rose: #f43f5e;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            padding: 24px;
+            min-height: 100vh;
+        }
+
+        .header-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 24px;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+        }
+
+        .brand-title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 18px;
+            font-weight: 700;
+            color: #ffffff;
+        }
+
+        .brand-title span {
+            background: linear-gradient(90deg, #38bdf8, #34d399);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 12px;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            font-family: var(--font-sans);
+            font-size: 13px;
+            font-weight: 600;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: rgba(30, 41, 59, 0.8);
+            color: #ffffff;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }
+
+        .btn:hover {
+            border-color: var(--accent-sky);
+            background: rgba(56, 189, 248, 0.15);
+            transform: translateY(-1px);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #0284c7, #0d9488);
+            border: none;
+            color: #ffffff;
+            font-weight: 700;
+            box-shadow: 0 4px 14px rgba(2, 132, 199, 0.4);
+        }
+
+        .btn-primary:hover {
+            background: linear-gradient(135deg, #0369a1, #0f766e);
+            box-shadow: 0 6px 18px rgba(2, 132, 199, 0.6);
+        }
+
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 24px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 8px;
+        }
+
+        .tab-btn {
+            padding: 10px 20px;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-muted);
+            background: transparent;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .tab-btn.active {
+            color: #ffffff;
+            background: rgba(56, 189, 248, 0.15);
+            border: 1px solid rgba(56, 189, 248, 0.4);
+        }
+
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        .grid-layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }
+
+        .panel-card {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            margin-bottom: 20px;
+        }
+
+        .panel-header {
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--accent-sky);
+            margin-bottom: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 12.5px;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+
+        .form-control {
+            width: 100%;
+            padding: 10px 14px;
+            font-family: var(--font-sans);
+            font-size: 13.5px;
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: #ffffff;
+            transition: all 0.2s ease;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: var(--accent-sky);
+            box-shadow: 0 0 10px rgba(56, 189, 248, 0.3);
+        }
+
+        textarea.form-control {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            min-height: 100px;
+            resize: vertical;
+        }
+
+        .preview-box {
+            background: #ffffff;
+            color: #0f172a;
+            border-radius: 8px;
+            padding: 20px;
+            min-height: 120px;
+            border: 1px solid #cbd5e1;
+            margin-top: 8px;
+        }
+
+        .logo-preview-img {
+            max-height: 60px;
+            margin-top: 10px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+        }
+
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+        }
+
+        .table th, .table td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 13px;
+        }
+
+        .table th {
+            color: var(--accent-sky);
+            font-weight: 700;
+            background: rgba(30, 41, 59, 0.5);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 9px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-family: var(--font-mono);
+            font-weight: 700;
+        }
+        .badge-blue { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
+        .badge-green { background: rgba(52, 211, 153, 0.2); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.4); }
+        .badge-amber { background: rgba(251, 191, 36, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.4); }
+        .badge-rose { background: rgba(244, 63, 94, 0.2); color: #f43f5e; border: 1px solid rgba(244, 63, 94, 0.4); }
+
+        /* Licensing Specific Styles */
+        .license-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 24px;
+            background: linear-gradient(135deg, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.8));
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+        }
+
+        .lic-edition-box {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .lic-edition-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #0284c7, #0d9488);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            box-shadow: 0 0 20px rgba(13, 148, 136, 0.3);
+        }
+
+        .lic-edition-title {
+            font-size: 20px;
+            font-weight: 800;
+            color: #ffffff;
+            letter-spacing: -0.5px;
+        }
+
+        .lic-meta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-top: 16px;
+        }
+
+        .lic-meta-card {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px 16px;
+        }
+
+        .lic-meta-label {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        .lic-meta-val {
+            font-size: 14px;
+            font-weight: 700;
+            color: #ffffff;
+        }
+
+        .fingerprint-box {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: #020617;
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin: 12px 0;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: #38bdf8;
+            word-break: break-all;
+        }
+
+        .feature-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .feature-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid var(--border-color);
+            color: #cbd5e1;
+        }
+
+        .feature-chip.active {
+            background: rgba(52, 211, 153, 0.12);
+            border-color: rgba(52, 211, 153, 0.35);
+            color: #34d399;
+        }
+
+        .drop-zone {
+            border: 2px dashed rgba(56, 189, 248, 0.35);
+            border-radius: 12px;
+            padding: 28px 20px;
+            text-align: center;
+            background: rgba(2, 6, 23, 0.5);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-bottom: 16px;
+        }
+
+        .drop-zone:hover, .drop-zone.dragover {
+            border-color: var(--accent-sky);
+            background: rgba(56, 189, 248, 0.08);
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(2, 6, 23, 0.85);
+            backdrop-filter: blur(8px);
+            z-index: 10000;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal.active { display: flex; }
+
+        .modal-content {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 28px;
+            width: 600px;
+            max-width: 90vw;
+            box-shadow: 0 25px 60px rgba(0,0,0,0.8);
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: #10b981;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 700;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            display: none;
+            z-index: 20000;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header-bar">
+        <div class="brand-title">
+            <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
+                <rect x="4" y="6" width="24" height="20" rx="4" stroke="#22d3ee" stroke-width="2"/>
+                <path d="M4 12h24M4 18h24M10 6v20M22 6v20" stroke="#2dd4bf" stroke-width="1.5"/>
+            </svg>
+            <span>PAXS Archive · Diagnostic Settings & Institutional Licensing</span>
+        </div>
+        <div class="nav-links">
+            <a href="/studies-ui" class="btn">📋 Study List</a>
+            <a href="/viewer" class="btn">🩻 DICOM Viewer</a>
+            <a href="/" class="btn">📊 Dashboard</a>
+        </div>
+    </div>
+
+    <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('org-tab')">🏢 Institution Branding & Headers</button>
+        <button class="tab-btn" onclick="switchTab('templates-tab')">📜 Report Templates Manager</button>
+        <button class="tab-btn" onclick="switchTab('license-tab')">🛡️ Server License & System Activation</button>
+    </div>
+
+    <!-- Tab 1: Organization Settings -->
+    <div id="org-tab" class="tab-content active">
+        <form id="org-form" onsubmit="saveOrgSettings(event)" enctype="multipart/form-data">
+            <div class="grid-layout">
+                <div class="panel-card">
+                    <div class="panel-header">Institutional Details & Logo</div>
+                    <div class="form-group">
+                        <label>Organization Name (Arabic / Arabic Header)</label>
+                        <input type="text" id="org_name_ar" class="form-control" placeholder="مستشفى PAXS الأرشيفي">
+                    </div>
+                    <div class="form-group">
+                        <label>Organization Name (English / Primary)</label>
+                        <input type="text" id="org_name_en" class="form-control" placeholder="PAXS Archive Diagnostic Center">
+                    </div>
+                    <div class="form-group">
+                        <label>Institution Logo Image</label>
+                        <input type="file" id="logo_file" class="form-control" accept="image/*" onchange="previewLogo(this)">
+                        <img id="logo_preview" class="logo-preview-img" src="/viewer/assets/Paxs-logo.png" alt="Logo Preview">
+                    </div>
+                    <div class="form-group">
+                        <label>Phone Number</label>
+                        <input type="text" id="phone" class="form-control" placeholder="+1 (800) 555-PAXS">
+                    </div>
+                    <div class="form-group">
+                        <label>Email Address</label>
+                        <input type="email" id="email" class="form-control" placeholder="reports@paxs-archive.org">
+                    </div>
+                    <div class="form-group">
+                        <label>Physical Address</label>
+                        <input type="text" id="address" class="form-control" placeholder="Building 4, Healthcare Innovation District">
+                    </div>
+                </div>
+
+                <div class="panel-card">
+                    <div class="panel-header">Rich Text / HTML Report Header & Footer</div>
+                    <div class="form-group">
+                        <label>Header HTML Template (Shown on Printable Reports)</label>
+                        <textarea id="header_html_text" class="form-control" oninput="updateLivePreview()"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Footer HTML Template (Shown on Printable Reports)</label>
+                        <textarea id="footer_html_text" class="form-control" oninput="updateLivePreview()"></textarea>
+                    </div>
+
+                    <div style="margin-top: 20px;">
+                        <label style="font-size: 12px; font-weight: 700; color: var(--accent-sky);">LIVE PRINT PREVIEW (HEADER & FOOTER)</label>
+                        <div id="live_preview_header" class="preview-box"></div>
+                        <div id="live_preview_footer" class="preview-box" style="margin-top: 10px; font-size: 11px; text-align: center;"></div>
+                    </div>
+
+                    <div style="margin-top: 24px; text-align: right;">
+                        <button type="submit" class="btn btn-primary">💾 Save Organization Settings</button>
+                    </div>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <!-- Tab 2: Report Templates -->
+    <div id="templates-tab" class="tab-content">
+        <div class="panel-card">
+            <div class="panel-header">
+                <span>Diagnostic Report Templates</span>
+                <button class="btn btn-primary" onclick="openTemplateModal()">➕ Add New Template</button>
+            </div>
+            <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px;">
+                Pre-defined standard findings and impressions for radiologists. Supports Jinja2 placeholders: 
+                <code>{{patient_name}}</code>, <code>{{study_description}}</code>, <code>{{study_date}}</code>, <code>{{accession_number}}</code>.
+            </p>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Title</th>
+                        <th>Modality</th>
+                        <th>Default</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="templates-table-body">
+                    <tr><td colspan="4" style="color: var(--text-muted);">Loading templates...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Tab 3: License & System Activation -->
+    <div id="license-tab" class="tab-content">
+        <!-- License Header Banner -->
+        <div class="license-banner">
+            <div class="lic-edition-box">
+                <div class="lic-edition-icon">🛡️</div>
+                <div>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <div class="lic-edition-title" id="lic-edition-title">ENTERPRISE EDITION</div>
+                        <span id="lic-status-badge" class="badge badge-green">ACTIVE</span>
+                    </div>
+                    <p style="color: var(--text-muted); font-size: 13px; margin-top: 4px;" id="lic-customer-sub">
+                        Licensed to PAXS Medical Center
+                    </p>
+                </div>
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button class="btn" onclick="reloadLicense()">⟳ Reload from Disk</button>
+                <button class="btn btn-primary" onclick="scrollToActivation()">🔑 Update License</button>
+            </div>
+        </div>
+
+        <div class="grid-layout">
+            <!-- Left: License Specifications -->
+            <div>
+                <div class="panel-card">
+                    <div class="panel-header">License Certificate Overview</div>
+                    <div class="lic-meta-grid">
+                        <div class="lic-meta-card">
+                            <div class="lic-meta-label">License ID</div>
+                            <div class="lic-meta-val" id="lic-id-val" style="font-family: var(--font-mono); font-size: 12px;">PAXS-2026-XXXX</div>
+                        </div>
+                        <div class="lic-meta-card">
+                            <div class="lic-meta-label">Validity / Expiration</div>
+                            <div class="lic-meta-val" id="lic-exp-val">PERPETUAL</div>
+                        </div>
+                        <div class="lic-meta-card">
+                            <div class="lic-meta-label">Max User Seats</div>
+                            <div class="lic-meta-val" id="lic-users-val">100 Seats</div>
+                        </div>
+                        <div class="lic-meta-card">
+                            <div class="lic-meta-label">Annual Volume Cap</div>
+                            <div class="lic-meta-val" id="lic-studies-val">100,000 Studies/yr</div>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 20px;">
+                        <div class="lic-meta-label">Licensed Clinical & System Modules</div>
+                        <div class="feature-chips" id="lic-feature-chips">
+                            <span class="feature-chip active">✓ 3D MPR Viewport</span>
+                            <span class="feature-chip active">✓ RECIST 1.1 Tracking</span>
+                            <span class="feature-chip active">✓ Lung-RADS AI</span>
+                            <span class="feature-chip active">✓ Agatston Calcium</span>
+                            <span class="feature-chip active">✓ PE Clot Triage</span>
+                            <span class="feature-chip active">✓ BI-RADS Density</span>
+                            <span class="feature-chip active">✓ Live HL7 Router</span>
+                            <span class="feature-chip active">✓ FHIR Gateway</span>
+                            <span class="feature-chip active">✓ Cold Tiering</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Hardware Fingerprint Card -->
+                <div class="panel-card">
+                    <div class="panel-header">
+                        <span>Server Hardware Fingerprint</span>
+                        <button class="btn" style="padding: 4px 10px; font-size: 11px;" onclick="copyFingerprint()">📋 Copy Fingerprint</button>
+                    </div>
+                    <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 8px;">
+                        Provide this 32-character hardware fingerprint to your vendor to generate machine-locked licenses:
+                    </p>
+                    <div class="fingerprint-box" id="lic-server-fp">
+                        <span id="lic-fp-text">LOADING-FINGERPRINT...</span>
+                    </div>
+                    <div style="font-size: 12px; color: var(--text-muted); margin-top: 10px;" id="lic-hw-details">
+                        OS: Windows 11 · MAC: EA:13:6B:8C:F2:74
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right: Activation & File Upload -->
+            <div id="activation-section">
+                <div class="panel-card">
+                    <div class="panel-header">Activate or Replace License (.lic)</div>
+                    <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px;">
+                        Select your signed <code>paxs.lic</code> binary certificate, or paste the Base64 license string below.
+                    </p>
+
+                    <!-- File Dropzone -->
+                    <div class="drop-zone" id="lic-drop-zone" onclick="document.getElementById('lic_file_input').click()">
+                        <div style="font-size: 28px; margin-bottom: 8px;">📄</div>
+                        <div style="font-weight: 700; color: #ffffff; margin-bottom: 4px;">Click to Browse or Drag & Drop .lic File</div>
+                        <div style="font-size: 12px; color: var(--text-muted);">Encrypted & RSA-2048 Signed PAXS Certificate</div>
+                        <input type="file" id="lic_file_input" accept=".lic,application/octet-stream" style="display: none;" onchange="uploadLicenseFile(this)">
+                    </div>
+
+                    <!-- Online Product Key Activation -->
+                    <div style="background: rgba(2, 6, 23, 0.4); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 8px; padding: 14px; margin-bottom: 16px;">
+                        <div style="font-weight: 700; color: var(--accent-sky); font-size: 13px; margin-bottom: 8px;">🌐 Online Activation (Product Key)</div>
+                        <div class="form-group" style="margin-bottom: 8px;">
+                            <label>Activation Key</label>
+                            <input type="text" id="lic_online_key" class="form-control" placeholder="PAXS-XXXX-XXXX-XXXX-XXXX" style="font-family: var(--font-mono); text-transform: uppercase;">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 8px;">
+                            <label>Customer / Licensee Email</label>
+                            <input type="email" id="lic_online_email" class="form-control" placeholder="admin@hospital.org">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 12px;">
+                            <label>Vendor Portal URL</label>
+                            <input type="text" id="lic_online_portal" class="form-control" placeholder="http://localhost:8080 or https://elsamanii.rf.gd">
+                        </div>
+                        <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                            <button type="button" class="btn" onclick="validateOnlineHeartbeat()">🔄 Check Heartbeat</button>
+                            <button type="button" class="btn btn-primary" onclick="activateOnlineKey()">🌐 Activate Key Online</button>
+                        </div>
+                    </div>
+
+                    <!-- Base64 Key Activation -->
+                    <div class="form-group">
+                        <label>Or Paste Base64-Encoded License Payload</label>
+                        <textarea id="lic_b64_input" class="form-control" style="min-height: 90px; font-family: var(--font-mono); font-size: 11px;" placeholder="PAXS... (Paste raw license content here)"></textarea>
+                    </div>
+
+                    <div style="text-align: right; margin-top: 16px;">
+                        <button type="button" class="btn" onclick="activateBase64License()">⚡ Activate Pasted Payload</button>
+                    </div>
+                </div>
+
+                <div class="panel-card" style="background: rgba(15, 23, 42, 0.4);">
+                    <div class="panel-header" style="font-size: 13px;">Licensing & Support Notes</div>
+                    <ul style="color: var(--text-muted); font-size: 12.5px; line-height: 1.6; padding-left: 18px;">
+                        <li>Online activation automatically claims a license from your vendor portal and binds it to this machine.</li>
+                        <li>Licenses are cryptographically signed with RSA-2048 and encrypted via AES-256-GCM.</li>
+                        <li>A 7-day automatic grace period is granted if an annual subscription lapses or the portal is unreachable.</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Template Modal -->
+    <div id="tmpl-modal" class="modal">
+        <div class="modal-content">
+            <div class="panel-header">
+                <span id="modal-title-text">Create Report Template</span>
+                <button type="button" class="btn" onclick="closeTemplateModal()">✕</button>
+            </div>
+            <form id="tmpl-form" onsubmit="saveTemplate(event)">
+                <input type="hidden" id="tmpl_id">
+                <div class="form-group">
+                    <label>Template Title</label>
+                    <input type="text" id="tmpl_title" class="form-control" required placeholder="Normal Brain CT">
+                </div>
+                <div class="form-group">
+                    <label>Modality (CT, MRI, XR, US, DX)</label>
+                    <input type="text" id="tmpl_modality" class="form-control" placeholder="CT">
+                </div>
+                <div class="form-group">
+                    <label>Findings Text / Jinja2 Template</label>
+                    <textarea id="tmpl_findings" class="form-control" placeholder="CT Brain without IV contrast demonstrates normal brain parenchyma..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Default Impression Text</label>
+                    <textarea id="tmpl_impression" class="form-control" placeholder="Unremarkable non-contrast CT brain."></textarea>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" id="tmpl_is_default">
+                    <label for="tmpl_is_default" style="margin: 0; cursor: pointer;">Set as Default for Modality</label>
+                </div>
+                <div style="margin-top: 20px; text-align: right; display: flex; gap: 10px; justify-content: flex-end;">
+                    <button type="button" class="btn" onclick="closeTemplateModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Template</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="toast" class="toast">Settings Saved Successfully!</div>
+
+    <script>
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            const targetBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.getAttribute('onclick')?.includes(tabId));
+            if (targetBtn) targetBtn.classList.add('active');
+            const targetContent = document.getElementById(tabId);
+            if (targetContent) targetContent.classList.add('active');
+            if (tabId === 'license-tab') {
+                loadLicenseInfo();
+            }
+        }
+
+        function showToast(msg, isErr = false) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.style.background = isErr ? '#e11d48' : '#10b981';
+            t.style.display = 'block';
+            setTimeout(() => { t.style.display = 'none'; }, 3500);
+        }
+
+        function scrollToActivation() {
+            document.getElementById('activation-section')?.scrollIntoView({ behavior: 'smooth' });
+            document.getElementById('lic_b64_input')?.focus();
+        }
+
+        async function loadOrgSettings() {
+            try {
+                const res = await fetch('/api/v1/settings/organization');
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('org_name_ar').value = data.org_name_ar || '';
+                    document.getElementById('org_name_en').value = data.org_name_en || '';
+                    document.getElementById('phone').value = data.phone || '';
+                    document.getElementById('email').value = data.email || '';
+                    document.getElementById('address').value = data.address || '';
+                    document.getElementById('header_html_text').value = data.header_html_text || '';
+                    document.getElementById('footer_html_text').value = data.footer_html_text || '';
+                    if (data.logo_path) {
+                        document.getElementById('logo_preview').src = data.logo_path;
+                    }
+                    updateLivePreview();
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        function updateLivePreview() {
+            document.getElementById('live_preview_header').innerHTML = document.getElementById('header_html_text').value;
+            document.getElementById('live_preview_footer').innerHTML = document.getElementById('footer_html_text').value;
+        }
+
+        function previewLogo(input) {
+            if (input.files && input.files[0]) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    document.getElementById('logo_preview').src = e.target.result;
+                };
+                reader.readAsDataURL(input.files[0]);
+            }
+        }
+
+        async function saveOrgSettings(e) {
+            e.preventDefault();
+            const formData = new FormData();
+            formData.append('org_name_ar', document.getElementById('org_name_ar').value);
+            formData.append('org_name_en', document.getElementById('org_name_en').value);
+            formData.append('phone', document.getElementById('phone').value);
+            formData.append('email', document.getElementById('email').value);
+            formData.append('address', document.getElementById('address').value);
+            formData.append('header_html_text', document.getElementById('header_html_text').value);
+            formData.append('footer_html_text', document.getElementById('footer_html_text').value);
+            
+            const logoFile = document.getElementById('logo_file').files[0];
+            if (logoFile) {
+                formData.append('logo_file', logoFile);
+            }
+
+            try {
+                const res = await fetch('/api/v1/settings/organization', {
+                    method: 'POST',
+                    body: formData
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    showToast('Organization settings updated successfully!');
+                    if (data.logo_path) {
+                        document.getElementById('logo_preview').src = data.logo_path;
+                    }
+                } else {
+                    alert('Failed to save settings');
+                }
+            } catch (err) { console.error(err); alert('Error saving settings'); }
+        }
+
+        async function loadTemplates() {
+            try {
+                const res = await fetch('/api/v1/templates');
+                if (res.ok) {
+                    const data = await res.json();
+                    const tbody = document.getElementById('templates-table-body');
+                    if (data.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted);">No templates created yet. Click "+ Add New Template".</td></tr>';
+                        return;
+                    }
+                    tbody.innerHTML = data.map(t => `
+                        <tr>
+                            <td><b>${t.title}</b></td>
+                            <td><span class="badge badge-blue">${t.modality || 'ALL'}</span></td>
+                            <td>${t.is_default ? '<span class="badge badge-green">Default</span>' : '-'}</td>
+                            <td>
+                                <button class="btn" style="padding: 4px 10px; font-size: 11px;" onclick="editTemplate(${t.id})">✏️ Edit</button>
+                                <button class="btn" style="padding: 4px 10px; font-size: 11px; color: var(--accent-rose);" onclick="deleteTemplate(${t.id})">🗑 Delete</button>
+                            </td>
+                        </tr>
+                    `).join('');
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        function openTemplateModal() {
+            document.getElementById('tmpl_id').value = '';
+            document.getElementById('tmpl-form').reset();
+            document.getElementById('modal-title-text').textContent = 'Create Report Template';
+            document.getElementById('tmpl-modal').classList.add('active');
+        }
+
+        function closeTemplateModal() {
+            document.getElementById('tmpl-modal').classList.remove('active');
+        }
+
+        async function editTemplate(id) {
+            try {
+                const res = await fetch(`/api/v1/templates/${id}`);
+                if (res.ok) {
+                    const t = await res.json();
+                    document.getElementById('tmpl_id').value = t.id;
+                    document.getElementById('tmpl_title').value = t.title;
+                    document.getElementById('tmpl_modality').value = t.modality || '';
+                    document.getElementById('tmpl_findings').value = t.body_findings_template || '';
+                    document.getElementById('tmpl_impression').value = t.default_impression_template || '';
+                    document.getElementById('tmpl_is_default').checked = t.is_default;
+                    document.getElementById('modal-title-text').textContent = 'Edit Report Template';
+                    document.getElementById('tmpl-modal').classList.add('active');
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        async function saveTemplate(e) {
+            e.preventDefault();
+            const id = document.getElementById('tmpl_id').value;
+            const payload = {
+                title: document.getElementById('tmpl_title').value,
+                modality: document.getElementById('tmpl_modality').value,
+                body_findings_template: document.getElementById('tmpl_findings').value,
+                default_impression_template: document.getElementById('tmpl_impression').value,
+                is_default: document.getElementById('tmpl_is_default').checked
+            };
+            const url = id ? `/api/v1/templates/${id}` : '/api/v1/templates';
+            const method = id ? 'PATCH' : 'POST';
+
+            try {
+                const res = await fetch(url, {
+                    method: method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (res.ok) {
+                    closeTemplateModal();
+                    showToast(id ? 'Template updated!' : 'Template created!');
+                    loadTemplates();
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        async function deleteTemplate(id) {
+            if (!confirm('Are you sure you want to delete this template?')) return;
+            try {
+                const res = await fetch(`/api/v1/templates/${id}`, { method: 'DELETE' });
+                if (res.ok) {
+                    showToast('Template deleted');
+                    loadTemplates();
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        /* ------------------ Licensing Management ------------------ */
+        let _serverFingerprint = "";
+
+        async function loadLicenseInfo() {
+            try {
+                const [stRes, fpRes] = await Promise.all([
+                    fetch('/api/v1/license/status', { credentials: 'same-origin' }),
+                    fetch('/api/v1/license/fingerprint', { credentials: 'same-origin' })
+                ]);
+
+                if (fpRes.ok) {
+                    const fpData = await fpRes.json();
+                    _serverFingerprint = fpData.fingerprint || "";
+                    document.getElementById('lic-fp-text').textContent = _serverFingerprint;
+                    const hw = fpData.hardware_info || {};
+                    document.getElementById('lic-hw-details').textContent = 
+                        `OS: ${hw.os || '-'} · Hostname: ${hw.hostname || '-'} · MAC: ${hw.mac_addresses || '-'}`;
+                }
+
+                if (stRes.ok) {
+                    const st = await stRes.json();
+                    document.getElementById('lic-edition-title').textContent = `${(st.edition || 'UNLICENSED').toUpperCase()} EDITION`;
+                    
+                    const badge = document.getElementById('lic-status-badge');
+                    badge.textContent = st.status || 'UNKNOWN';
+                    if (st.status === 'VALID') {
+                        badge.className = 'badge badge-green';
+                    } else if (st.status === 'GRACE_PERIOD') {
+                        badge.className = 'badge badge-amber';
+                    } else {
+                        badge.className = 'badge badge-rose';
+                    }
+
+                    document.getElementById('lic-customer-sub').textContent = 
+                        st.customer_name ? `Licensed to ${st.customer_name} ${st.customer_organization ? `(${st.customer_organization})` : ''}` : 'No active license installed';
+
+                    document.getElementById('lic-id-val').textContent = st.license_id || '—';
+                    document.getElementById('lic-exp-val').textContent = 
+                        st.is_perpetual ? 'PERPETUAL' : (st.expires_at ? `${new Date(st.expires_at).toLocaleDateString()} (${st.days_remaining || 0} days remaining)` : '—');
+                    
+                    document.getElementById('lic-users-val').textContent = `${st.max_users || 0} Seats`;
+                    document.getElementById('lic-studies-val').textContent = `${(st.max_studies_per_year || 0).toLocaleString()} Studies/yr`;
+
+                    // Render feature chips
+                    const featChips = document.getElementById('lic-feature-chips');
+                    if (st.features && st.features.length > 0) {
+                        featChips.innerHTML = st.features.map(f => `<span class="feature-chip active">✓ ${f.replace(/_/g, ' ').toUpperCase()}</span>`).join('');
+                    } else {
+                        featChips.innerHTML = '<span class="feature-chip" style="color: var(--accent-rose);">✕ No premium features enabled</span>';
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to load license info:", err);
+            }
+        }
+
+        function copyFingerprint() {
+            if (!_serverFingerprint) return;
+            navigator.clipboard.writeText(_serverFingerprint).then(() => {
+                showToast('Hardware fingerprint copied to clipboard!');
+            }).catch(() => {
+                showToast('Failed to copy', true);
+            });
+        }
+
+        async function reloadLicense() {
+            try {
+                const res = await fetch('/api/v1/license/reload', {
+                    method: 'POST',
+                    credentials: 'same-origin'
+                });
+                if (res.ok) {
+                    showToast('License reloaded from disk successfully!');
+                    loadLicenseInfo();
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    showToast(err.detail || 'Failed to reload license', true);
+                }
+            } catch (e) {
+                showToast('Error reloading license', true);
+            }
+        }
+
+        async function uploadLicenseFile(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const res = await fetch('/api/v1/license/upload', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    body: formData
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    showToast(data.message || 'License activated successfully!');
+                    loadLicenseInfo();
+                } else {
+                    showToast(data.detail || data.message || 'License activation failed', true);
+                }
+            } catch (err) {
+                showToast('Network error during license upload', true);
+            }
+        }
+
+        async function activateBase64License() {
+            const raw = document.getElementById('lic_b64_input').value.trim();
+            if (!raw) {
+                showToast('Please paste a license string', true);
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/v1/license/activate', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ license_b64: raw })
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    showToast(data.message || 'License activated successfully!');
+                    document.getElementById('lic_b64_input').value = '';
+                    loadLicenseInfo();
+                } else {
+                    showToast(data.detail || data.message || 'Activation failed', true);
+                }
+            } catch (err) {
+                showToast('Failed to activate license', true);
+            }
+        }
+
+        async function activateOnlineKey() {
+            const key = document.getElementById('lic_online_key').value.trim();
+            const email = document.getElementById('lic_online_email').value.trim();
+            const portalUrl = document.getElementById('lic_online_portal').value.trim();
+            if (!key) {
+                showToast('Please enter an activation key', true);
+                return;
+            }
+
+            showToast('Contacting vendor activation portal...');
+            try {
+                const res = await fetch('/api/v1/license/activate-online', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        activation_key: key,
+                        customer_email: email || null,
+                        portal_url: portalUrl || null
+                    })
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    showToast(data.message || 'Online activation successful!');
+                    document.getElementById('lic_online_key').value = '';
+                    loadLicenseInfo();
+                } else {
+                    showToast(data.detail || data.message || 'Online activation failed', true);
+                }
+            } catch (err) {
+                showToast('Network error contacting activation portal', true);
+            }
+        }
+
+        async function validateOnlineHeartbeat() {
+            showToast('Sending online license heartbeat...');
+            try {
+                const res = await fetch('/api/v1/license/validate-online', {
+                    method: 'POST',
+                    credentials: 'same-origin'
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    showToast(data.message || 'License validated successfully!');
+                    loadLicenseInfo();
+                } else {
+                    showToast(data.message || data.detail || 'Validation failed or portal offline', true);
+                }
+            } catch (err) {
+                showToast('Heartbeat error: portal unreachable', true);
+            }
+        }
+
+        // Setup dropzone drag and drop
+        const dropZone = document.getElementById('lic-drop-zone');
+        if (dropZone) {
+            ['dragenter', 'dragover'].forEach(name => {
+                dropZone.addEventListener(name, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    dropZone.classList.add('dragover');
+                });
+            });
+            ['dragleave', 'drop'].forEach(name => {
+                dropZone.addEventListener(name, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    dropZone.classList.remove('dragover');
+                });
+            });
+            dropZone.addEventListener('drop', (e) => {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+                if (files && files.length > 0) {
+                    document.getElementById('lic_file_input').files = files;
+                    uploadLicenseFile(document.getElementById('lic_file_input'));
+                }
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadOrgSettings();
+            loadTemplates();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,464 @@
+/* ==========================================================================
+   PAXS Study List — themed to match the PAXS Archive dashboard
+   Injected into app/static/viewer/index.html
+
+   Uses the EXACT design tokens of app/static/styles.css (dark reading-room
+   default + light clinical mode via :root[data-theme="light"]), so the
+   viewer's study list reads as part of the same product:
+   - deep navy ink + cyan/teal accents (--accent #22d3ee / --teal #2dd4bf)
+   - flat panels with hairline borders, 10px / 6px radii, subtle shadows
+   - Segoe UI sans + ui-monospace data labels
+   The page follows the dashboard's persisted theme (localStorage paxs_theme)
+   set by the inline boot script in index.html.
+   ========================================================================== */
+
+/* ------------------------------------------------------------------ */
+/* 0. PAXS Archive design tokens (mirrors app/static/styles.css)       */
+/* ------------------------------------------------------------------ */
+:root {
+  --ink: #070c18;
+  --panel: #0c1424;
+  --raised: #111c30;
+  --raised-2: #16233c;
+  --hairline: rgba(148, 163, 184, 0.14);
+  --hairline-strong: rgba(148, 163, 184, 0.28);
+  --text: #e2e8f0;
+  --muted: #8b9bb4;
+  --faint: #5b6b85;
+  --accent: #22d3ee;
+  --teal: #2dd4bf;
+  --danger: #f87171;
+  --ok: #34d399;
+
+  --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+  --sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+
+  --glow: rgba(34, 211, 238, 0.06);
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* Light clinical mode — same flip as the dashboard */
+:root[data-theme="light"] {
+  --ink: #eef2f7;
+  --panel: #ffffff;
+  --raised: #ffffff;
+  --raised-2: #e7edf6;
+  --hairline: rgba(15, 23, 42, 0.09);
+  --hairline-strong: rgba(15, 23, 42, 0.18);
+  --text: #0f172a;
+  --muted: #475569;
+  --faint: #64748b;
+  --accent: #0e7490;
+  --teal: #0f766e;
+  --danger: #dc2626;
+  --ok: #059669;
+  --glow: rgba(8, 145, 178, 0.05);
+}
+
+body, html {
+  font-family: var(--sans) !important;
+  background-color: var(--ink) !important;
+  color: var(--text) !important;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: rgba(34, 211, 238, 0.25); }
+
+/* ------------------------------------------------------------------ */
+/* 1. Whole-Page — same atmosphere as the dashboard body               */
+/* ------------------------------------------------------------------ */
+div.flex.h-screen.min-h-0.flex-col.overflow-hidden.bg-black {
+  background:
+    radial-gradient(1200px 500px at 85% -10%, var(--glow), transparent 60%),
+    var(--ink) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 2. Console card — flat panel, hairline border, 10px radius          */
+/* ------------------------------------------------------------------ */
+.paxs-sl {
+  position: relative;
+  background: transparent !important;
+}
+
+.paxs-sl > .min-h-0.flex-1 > .h-full.rounded-md {
+  position: relative;
+  background: var(--panel) !important;
+  border: 1px solid var(--hairline) !important;
+  border-radius: var(--radius) !important;
+  box-shadow:
+    0 10px 32px rgba(3, 7, 24, 0.45),
+    0 1px 0 rgba(148, 163, 184, 0.05),
+    inset 0 1px 0 rgba(148, 163, 184, 0.05) !important;
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. Header — dashboard list-head styling                             */
+/* ------------------------------------------------------------------ */
+.paxs-sl .relative.flex.items-center.justify-center.py-4 {
+  padding: 16px 20px 12px !important;
+  border-bottom: 1px solid var(--hairline);
+  background: linear-gradient(180deg, rgba(34, 211, 238, 0.04), transparent);
+}
+
+.paxs-sl .text-\[20px\].font-medium {
+  font-family: var(--sans) !important;
+  font-size: 16px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.01em !important;
+  color: var(--text) !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Status dot — PAXS ok-green pulse */
+.paxs-sl .text-\[20px\].font-medium::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 55%, transparent);
+  animation: paxs-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes paxs-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%      { transform: scale(1.25); opacity: 0.65; }
+}
+
+/* Pagination + view controls — dashboard badge/btn.mini language */
+.paxs-sl button[aria-label="Rows per page"] {
+  background: rgba(148, 163, 184, 0.08) !important;
+  border: 1px solid var(--hairline-strong) !important;
+  border-radius: var(--radius-sm) !important;
+  color: var(--text) !important;
+  font-family: var(--mono) !important;
+  font-weight: 600 !important;
+  font-size: 11px !important;
+  padding: 5px 12px !important;
+  height: 28px !important;
+  transition: all 0.18s var(--ease) !important;
+}
+
+.paxs-sl button[aria-label="Rows per page"]:hover {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  background: rgba(34, 211, 238, 0.08) !important;
+}
+
+.paxs-sl button[aria-label="Previous page"],
+.paxs-sl button[aria-label="Next page"] {
+  color: var(--muted) !important;
+  border-radius: var(--radius-sm) !important;
+  transition: all 0.18s var(--ease) !important;
+}
+
+.paxs-sl button[aria-label="Previous page"]:hover:not([disabled]),
+.paxs-sl button[aria-label="Next page"]:hover:not([disabled]) {
+  color: var(--accent) !important;
+  background: rgba(34, 211, 238, 0.08) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 4. Table — dashboard list-head micro-labels                        */
+/* ------------------------------------------------------------------ */
+.paxs-sl .border-input\/50.min-h-0.flex-1.rounded-md.border {
+  border: 1px solid var(--hairline) !important;
+  border-radius: var(--radius-sm) !important;
+  background: rgba(7, 12, 24, 0.35) !important;
+  overflow: hidden !important;
+  margin: 12px !important;
+}
+
+:root[data-theme="light"] .paxs-sl .border-input\/50.min-h-0.flex-1.rounded-md.border {
+  background: rgba(238, 242, 247, 0.6) !important;
+}
+
+.paxs-sl table thead th {
+  font-family: var(--mono) !important;
+  text-transform: uppercase !important;
+  font-size: 10.5px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.08em !important;
+  color: var(--muted) !important;
+  height: 42px !important;
+  background: color-mix(in srgb, var(--panel) 92%, transparent) !important;
+  backdrop-filter: blur(6px) !important;
+  -webkit-backdrop-filter: blur(6px) !important;
+  border-bottom: 1px solid var(--hairline) !important;
+}
+
+.paxs-sl table thead th[aria-sort]:not([aria-sort="none"]) {
+  color: var(--accent) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 5. Study rows — dashboard card hover language                       */
+/* ------------------------------------------------------------------ */
+.paxs-sl table tbody tr[class*="cursor-pointer"] {
+  position: relative;
+  border-bottom: 1px solid var(--hairline) !important;
+  transition: all 0.18s var(--ease) !important;
+}
+
+.paxs-sl table tbody tr[class*="cursor-pointer"]:hover {
+  background: var(--raised) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 3px 12px rgba(3, 7, 24, 0.35);
+}
+
+/* Cyan left rail — dashboard active-item accent */
+.paxs-sl table tbody tr[class*="cursor-pointer"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--accent), var(--teal));
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  z-index: 5;
+}
+
+.paxs-sl table tbody tr[class*="cursor-pointer"]:hover::before {
+  opacity: 1;
+}
+
+/* Active / selected study */
+.paxs-sl table tbody tr[aria-selected="true"],
+.paxs-sl table tbody tr[data-state="selected"] {
+  background: linear-gradient(90deg, rgba(34, 211, 238, 0.09), rgba(45, 212, 191, 0.03)) !important;
+  border-bottom-color: rgba(34, 211, 238, 0.25) !important;
+}
+
+.paxs-sl table tbody tr[aria-selected="true"]::before,
+.paxs-sl table tbody tr[data-state="selected"]::before {
+  opacity: 1;
+}
+
+.paxs-sl table tbody td {
+  font-size: 13.5px !important;
+  font-weight: 500 !important;
+  color: var(--text) !important;
+  padding-top: 10px !important;
+  padding-bottom: 10px !important;
+}
+
+/* The fork renders the patient cell as a plain table-cell, so the injected
+   thumbnail stacks ABOVE the name and leaves dead space in the wide cell.
+   Make any cell holding a thumbnail a compact flex row: thumb LEFT of name. */
+.paxs-sl table tbody td:has(> .paxs-thumb) {
+  display: flex !important;
+  align-items: center !important;
+  gap: 10px;
+}
+
+.paxs-sl table tbody td:has(> .paxs-thumb) .paxs-thumb {
+  margin-right: 0;
+  flex: none;
+}
+
+.paxs-sl table tbody td:has(> .paxs-thumb) > :not(.paxs-thumb) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* Cap the patient-name block so very long names ellipsize cleanly next to
+   the thumbnail instead of stretching the patient column (44px thumb + 10px
+   gap + up to 240px of name). The fork's own .truncate class truncates, but
+   only when the column is already constrained — this guarantees the cap
+   regardless of window width or name length. */
+.paxs-sl table tbody td:has(> .paxs-thumb) .truncate {
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* 6. Study thumbnails — compact PAXS tiles                            */
+/* ------------------------------------------------------------------ */
+.paxs-sl table tbody td .paxs-thumb {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.9), rgba(2, 6, 23, 0.95));
+  overflow: hidden;
+  flex: none;
+  margin-right: 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.paxs-sl table tbody tr:hover .paxs-thumb {
+  border-color: var(--paxs-mod, #38bdf8);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--paxs-mod, #38bdf8) 40%, transparent);
+  transform: scale(1.06);
+}
+
+.paxs-sl table tbody td .paxs-thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.paxs-sl table tbody tr:hover .paxs-thumb img {
+  transform: scale(1.08);
+}
+
+.paxs-sl table tbody td .paxs-thumb.paxs-loaded img {
+  opacity: 1;
+}
+
+.paxs-sl table tbody td .paxs-thumb .paxs-mod {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #06121f;
+  background: var(--paxs-mod, var(--accent));
+  border-radius: 4px;
+  padding: 2px 6px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+  z-index: 3;
+}
+
+.paxs-sl table tbody td .paxs-thumb.paxs-loaded .paxs-mod,
+.paxs-sl table tbody td .paxs-thumb.paxs-nothumb .paxs-mod {
+  left: auto;
+  top: auto;
+  right: 0;
+  bottom: 0;
+  transform: none;
+  border-radius: 4px 0 0 0;
+  font-size: 8.5px;
+  font-weight: 800;
+  padding: 1.5px 5px;
+  box-shadow: -1px -1px 4px rgba(0, 0, 0, 0.5);
+}
+
+/* Patient-initials avatar — the graceful fallback shown while a study has no
+   resolvable instance (no series/instance, failed decode, or empty thumbnail).
+   Colored by the study's modality; replaced by the real thumbnail on load. */
+.paxs-sl table tbody td .paxs-thumb .paxs-avatar {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--paxs-mod, var(--accent));
+  background: rgba(148, 163, 184, 0.10);
+  background: color-mix(in srgb, var(--paxs-mod, var(--accent)) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--paxs-mod, var(--accent)) 35%, transparent);
+  border-radius: inherit;
+  z-index: 2;
+}
+
+.paxs-sl table tbody td .paxs-thumb.paxs-loaded .paxs-avatar {
+  display: none;
+}
+
+.paxs-sl table tbody td .paxs-thumb:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: 0 5px 14px rgba(3, 7, 24, 0.45);
+}
+
+/* ------------------------------------------------------------------ */
+/* 7. Action menu — dashboard btn.mini                                 */
+/* ------------------------------------------------------------------ */
+.paxs-sl table tbody button[aria-label="Action Menu"] {
+  background: rgba(148, 163, 184, 0.08) !important;
+  color: var(--muted) !important;
+  border: 1px solid var(--hairline-strong) !important;
+  border-radius: var(--radius-sm) !important;
+  padding: 6px 12px !important;
+  font-family: var(--mono) !important;
+  font-size: 11px !important;
+  transition: all 0.18s var(--ease) !important;
+}
+
+.paxs-sl table tbody button[aria-label="Action Menu"]:hover {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  background: rgba(34, 211, 238, 0.08) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 8. Right detail panel — dashboard cards                             */
+/* ------------------------------------------------------------------ */
+div[class*="bg-background relative flex h-full w-full flex-col"] .bg-muted.flex.items-center.gap-3.rounded-lg.px-4.py-3,
+div[class*="bg-background relative flex h-full w-full flex-col"] .border-border\/50.bg-muted.w-full.rounded-lg.px-4.py-3 {
+  background: var(--panel) !important;
+  border: 1px solid var(--hairline) !important;
+  border-radius: var(--radius) !important;
+  box-shadow: 0 4px 16px rgba(3, 7, 24, 0.35), inset 0 1px 0 rgba(148, 163, 184, 0.05) !important;
+}
+
+/* Launch-workflow pill — dashboard primary gradient */
+div[class*="bg-background relative flex h-full w-full flex-col"] .bg-primary\/20.text-primary.ring-primary {
+  background: linear-gradient(var(--accent), var(--teal)) !important;
+  color: #06121f !important;
+  border: none !important;
+  border-radius: 999px !important;
+  font-weight: 600 !important;
+  box-shadow: 0 2px 12px rgba(34, 211, 238, 0.25) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 9. Scrollbars — subtle cyan-tinted                                  */
+/* ------------------------------------------------------------------ */
+.paxs-sl ::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.paxs-sl ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.paxs-sl ::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.paxs-sl ::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(34, 211, 238, 0.45);
+}
+
+/* ------------------------------------------------------------------ */
+/* 10. Reduced motion                                                  */
+/* ------------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .paxs-sl * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

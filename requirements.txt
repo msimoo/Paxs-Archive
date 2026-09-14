@@ -1,0 +1,36 @@
+# ---- PAXS Archive Server - core ----
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+sqlalchemy[asyncio]>=2.0.30
+aiosqlite>=0.20          # local zero-setup database
+aiomysql>=0.2            # production MySQL (async)
+pymysql>=1.1             # production MySQL (sync worker)
+alembic>=1.13            # schema migrations
+pydicom>=3.0
+pynetdicom>=2.1
+numpy>=1.26
+pillow>=10.3
+python-multipart>=0.0.9
+qrcode>=7.4
+cryptography>=42.0.0
+
+# ---- Required: compressed pixel-data encode/decode plugins (JPEG-LS, JPEG2000, RLE, JPEG) ----
+pylibjpeg>=2.0
+pylibjpeg-libjpeg>=2.1
+pylibjpeg-openjpeg>=2.0
+pylibjpeg-rle>=2.0
+pyjpegls>=1.9
+imagecodecs>=2024.1        # HTJ2K codec (bundles the openjph codec). Required for
+                           # DEFAULT_COMPRESSION=HTJ2K; on pydicom 3.0.x the archive
+                           # encodes HTJ2K itself via imagecodecs.htj2k_encode.
+
+# ---- Optional (install for richer compression / production scale) ----
+# boto3>=1.34                # S3/MinIO object-storage backend (STORAGE_BACKEND=s3)
+# celery>=5.4               # distributed task queue
+# redis>=5.0
+
+# ---- Dev / tests ----
+pytest>=8.2
+httpx>=0.27

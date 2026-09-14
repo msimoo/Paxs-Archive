@@ -1,0 +1,28 @@
+# Prometheus scrape configuration for PAXS (deploy/MONITORING.md).
+#
+# Two jobs:
+#   paxs-haproxy — HAProxy built-in exporter (:8405/metrics): per-node traffic,
+#                  frontend request totals, server status.
+#   paxs-nodes   — each stateless node's /metrics endpoint: worker queue depth,
+#                  routing queue, read-replica lag, instance identity.
+#
+# All targets are inside the compose network; see deploy/docker-compose.lb.yml
+# and deploy/docker-compose.monitoring.yml.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: paxs-haproxy
+    static_configs:
+      - targets: ["haproxy:8405"]
+        labels:
+          component: haproxy
+
+  - job_name: paxs-nodes
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["paxs-node-1:8000", "paxs-node-2:8000", "paxs-node-3:8000"]
+        labels:
+          component: paxs

@@ -1,0 +1,14 @@
+{
+  "version": "2.2.1",
+  "name": "PaxsServer Viewer",
+  "description": "PaxsServer Viewer",
+  "icons": {
+    "60": "/assets/logo.png",
+    "128": "/assets/logo.png",
+    "512": "/assets/logo.png"
+  },
+  "developer": {
+    "name": "PaxsServer Viewer",
+    "url": "https://github.com/msimoo/paxs-archive"
+  }
+}
