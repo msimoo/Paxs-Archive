@@ -18,7 +18,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import (
+    get_current_user,
+    require_admin,
+    require_destructive_role,
+)
 from app.db.models import LossyCompressionRule, User
 from app.db.session import get_db
 from app.services import lossy_compression_service
@@ -37,7 +41,13 @@ class CreateLossyRuleRequest(BaseModel):
     modality: str | None = Field(None, description="Optional Modality filter (e.g. CT, MR)")
     body_part_examined: str | None = Field(None, description="Optional BodyPart filter (e.g. CHEST, HEAD)")
     transfer_syntax_uid: str = Field(
-        "1.2.840.10008.1.2.4.50", description="Target lossy TransferSyntaxUID (e.g. JPEG Baseline Lossy 8-bit)"
+        "1.2.840.10008.1.2.4.81",
+        description=(
+            "Target lossy TransferSyntaxUID. Supported (an installed encoder must "
+            "exist): JPEG-LS Near-Lossless (1.2.840.10008.1.2.4.81) or "
+            "JPEG 2000 Lossy (1.2.840.10008.1.2.4.91). JPEG Baseline (…4.50) is "
+            "not encodable and is rejected."
+        ),
     )
     quality_factor: int = Field(85, description="JPEG quality factor (1..100)")
 
@@ -75,13 +85,16 @@ def _rule_to_dict(rule: LossyCompressionRule) -> dict[str, Any]:
 async def create_lossy_rule(
     req: CreateLossyRuleRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_destructive_role),
 ):
     """Create a new lossy compression policy rule."""
     try:
         rule = await lossy_compression_service.create_rule(db, req.model_dump())
         await db.commit()
         return JSONResponse(_rule_to_dict(rule), status_code=201)
+    except lossy_compression_service.LossyCompressionError as exc:
+        # Unsupported/unencodable target — reject before it can be stored.
+        raise HTTPException(400, str(exc)) from exc
     except Exception as exc:
         log.exception("Failed to create lossy compression rule %s", req.name)
         raise HTTPException(400, f"Failed to create rule: {exc}") from exc
@@ -115,7 +128,7 @@ async def update_lossy_rule(
     rule_id: int,
     req: UpdateLossyRuleRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_destructive_role),
 ):
     """Update a lossy compression rule."""
     rule = await lossy_compression_service.get_rule(db, rule_id)
@@ -123,6 +136,13 @@ async def update_lossy_rule(
         raise HTTPException(404, f"Lossy compression rule #{rule_id} not found")
 
     update_data = req.model_dump(exclude_unset=True)
+    if update_data.get("transfer_syntax_uid") is not None:
+        try:
+            lossy_compression_service.validate_target_transfer_syntax(
+                update_data["transfer_syntax_uid"]
+            )
+        except lossy_compression_service.LossyCompressionError as exc:
+            raise HTTPException(400, str(exc)) from exc
     for field, val in update_data.items():
         setattr(rule, field, val)
 
@@ -135,7 +155,7 @@ async def update_lossy_rule(
 async def delete_lossy_rule(
     rule_id: int,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_destructive_role),
 ):
     """Delete a lossy compression rule."""
     deleted = await lossy_compression_service.delete_rule(db, rule_id)
@@ -149,14 +169,24 @@ async def delete_lossy_rule(
 async def trigger_lossy_compression_run(
     rule_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_destructive_role),
 ):
-    """Trigger an on-demand lossy compression evaluation & transcoding run."""
+    """Trigger an on-demand lossy compression evaluation & transcoding run.
+
+    Fail-closed: while ``LOSSY_COMPRESSION_ENABLED`` is false the run is a no-op
+    (``disabled: true``, zero processed) and no object is modified.
+    """
     res = await lossy_compression_service.evaluate_and_run_lossy_compression(db, rule_id)
     await db.commit()
     return JSONResponse(
         {
-            "message": "Lossy compression run completed",
+            "message": (
+                "Lossy compression is disabled (LOSSY_COMPRESSION_ENABLED=false)"
+                if res.get("disabled")
+                else "Lossy compression run completed"
+            ),
             "processed_instances": res.get("processed", 0),
+            "skipped_instances": res.get("skipped", 0),
+            "disabled": bool(res.get("disabled", False)),
         }
     )

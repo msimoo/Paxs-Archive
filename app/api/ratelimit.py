@@ -26,11 +26,28 @@ _LOCK = Lock()
 _CLEANUP_TICK = 0
 
 
+def _trusted_proxies() -> set[str]:
+    """Peers whose X-Forwarded-For may be believed (H07).
+
+    Defaults to loopback: a reverse proxy running on the same host. Any other
+    peer's header is ignored, because a client that can set it could otherwise
+    rotate the value per request and never hit the cap.
+    """
+    from app.core.config import settings
+
+    raw = getattr(settings, "TRUSTED_PROXIES", "") or ""
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
 def _client_key(request: Request) -> str:
+    peer = request.client.host if request.client else "unknown"
     forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    if forwarded and peer in _trusted_proxies():
+        # Left-most entry is the original client as seen by the trusted proxy.
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return peer
 
 
 def rate_limit(window_key: str, limit: int, window_seconds: int):

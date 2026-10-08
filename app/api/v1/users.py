@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.auth import ROLES, write_audit
@@ -348,9 +348,18 @@ async def reset_password(user_id: int, body: ResetPasswordBody,
                          db: AsyncSession = Depends(get_db)):
     user = await _get_user(db, user_id)
     user.password_hash = hash_password(body.password)
+    # H04: a password reset must invalidate existing sessions — otherwise a
+    # stolen cookie keeps working after the credential is changed.
+    revoked = (
+        await db.execute(
+            update(Session)
+            .where(Session.user_id == user.id, Session.is_revoked.is_(False))
+            .values(is_revoked=True)
+        )
+    ).rowcount
     await write_audit(db, user.id, "password_change")
     await db.flush()
-    return {"ok": True, "username": user.username}
+    return {"ok": True, "username": user.username, "sessions_revoked": revoked or 0}
 
 
 @router.delete("/{user_id}")

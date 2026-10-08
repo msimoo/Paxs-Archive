@@ -21,6 +21,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -195,7 +196,14 @@ class Patient(Base):
     __tablename__ = "patients"
 
     id: Mapped[int] = pk()
-    patient_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # C10: the external MRN is only unique *within* a tenant. The composite key
+    # below replaces the old global unique constraint, so two institutions can
+    # both hold MRN "12345" as separate patients. NULL = legacy/unscoped row
+    # (pre-VNA data), which keeps resolving exactly as before.
+    tenant_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    patient_id: Mapped[str] = mapped_column(String(64), nullable=False)
     patient_name: Mapped[str | None] = mapped_column(String(192), index=True)
     patient_birth_date: Mapped[str | None] = mapped_column(String(8))
     patient_sex: Mapped[str | None] = mapped_column(String(16))
@@ -214,6 +222,10 @@ class Patient(Base):
 
     __table_args__ = (
         Index("ix_patients_name_id", "patient_name", "patient_id"),
+        # C10: one row per (tenant, MRN). Legacy rows (tenant NULL) are matched
+        # explicitly by the resolver, which is what keeps their behaviour
+        # unchanged — see resolve_patient_identity().
+        UniqueConstraint("tenant_id", "patient_id", name="uq_patients_tenant_patient_id"),
     )
 
     studies: Mapped[list["Study"]] = relationship(
@@ -282,6 +294,11 @@ class PatientIdentity(Base):
     __tablename__ = "patient_identities"
 
     id: Mapped[int] = pk()
+    # C10: identities are scoped to the tenant that owns them, so the same
+    # (authority, identifier) pair can exist in two institutions.
+    tenant_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     patient_id: Mapped[int] = mapped_column(
         ForeignKey("patients.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -309,8 +326,14 @@ class PatientIdentity(Base):
     __table_args__ = (
         # A patient can have at most one primary ID per assigning authority
         Index("ix_patient_identities_patient_aa", "patient_id", "assigning_authority_id"),
-        # The core PIX lookup: find patient by (AA, identifier)
-        Index("ix_patient_identities_aa_identifier", "assigning_authority_id", "identifier", unique=True),
+        # The core PIX lookup: find the patient for (tenant, AA, identifier).
+        Index(
+            "ix_patient_identities_tenant_aa_identifier",
+            "tenant_id",
+            "assigning_authority_id",
+            "identifier",
+            unique=True,
+        ),
     )
 
 
@@ -1014,7 +1037,10 @@ class LossyCompressionRule(Base):
     modality: Mapped[str | None] = mapped_column(String(16))
     body_part_examined: Mapped[str | None] = mapped_column(String(64))
     transfer_syntax_uid: Mapped[str] = mapped_column(
-        String(128), default="1.2.840.10008.1.2.4.50", nullable=False
+        # Default to JPEG-LS Near-Lossless (1.2.840.10008.1.2.4.81): pydicom
+        # implements no JPEG Baseline (…4.50) encoder, so a baseline default
+        # could only ever fail. Both supported targets preserve 16-bit samples.
+        String(128), default="1.2.840.10008.1.2.4.81", nullable=False
     )
     quality_factor: Mapped[int] = mapped_column(Integer, default=85, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -1117,6 +1143,12 @@ class StorageQuota(Base):
     )
     max_bytes: Mapped[int] = mapped_column(
         BigInteger, default=0, nullable=False
+    )
+    # H08: reserved+committed bytes for this scope. A denormalised counter is
+    # what makes check-and-reserve a single atomic UPDATE, closing the
+    # check-then-act race. `recompute_used_bytes()` reconciles it if it drifts.
+    used_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
     )
     warning_threshold_pct: Mapped[int] = mapped_column(
         Integer, default=80, nullable=False
@@ -1431,6 +1463,59 @@ class RadiologyReport(Base):
     __table_args__ = (
         # Reading-worklist + EMR counters filter by status and ORU delivery.
         Index("ix_reports_status_oru", "status", "oru_status"),
+    )
+
+
+class ReportAddendum(Base, TimestampMixin):
+    """An append-only addendum to a FINALIZED report (C06).
+
+    A finalized report is immutable: its ``clinical_history`` / ``findings`` /
+    ``impression`` are the signed record and must never be rewritten. Follow-up
+    observations, corrections and clarifications are recorded here instead, so
+    the original text is preserved verbatim alongside the addition and both stay
+    attributable to the authenticated author.
+    """
+
+    __tablename__ = "report_addenda"
+
+    id: Mapped[int] = pk()
+    report_id: Mapped[int] = mapped_column(
+        ForeignKey("reports.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # The authenticated actor who added it (never a client-supplied name).
+    author: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    report: Mapped[RadiologyReport] = relationship()
+
+
+class PatientIdentityConflict(Base, TimestampMixin):
+    """A quarantined demographic conflict (C10).
+
+    When an ingest resolves to an existing (tenant, assigning authority, MRN)
+    but carries *different* demographics, the existing validated row is left
+    untouched and the discrepancy is recorded here for human reconciliation.
+    Nothing is auto-merged and no clinical field is overwritten.
+    """
+
+    __tablename__ = "patient_identity_conflicts"
+
+    id: Mapped[int] = pk()
+    tenant_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    patient_id: Mapped[int] = mapped_column(
+        ForeignKey("patients.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    study_instance_uid: Mapped[str | None] = mapped_column(String(128), index=True)
+    identifier: Mapped[str] = mapped_column(String(64), nullable=False)
+    assigning_authority: Mapped[str] = mapped_column(String(128), nullable=False)
+    # JSON: {field: {"existing": ..., "incoming": ...}} for each mismatch.
+    detail: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    # Where the conflicting values came from (AE title / user / "stow-rs").
+    source: Mapped[str | None] = mapped_column(String(128))
+    resolved: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False, index=True
     )
 
 

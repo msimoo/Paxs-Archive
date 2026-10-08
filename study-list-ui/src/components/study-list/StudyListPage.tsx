@@ -10,6 +10,7 @@ import { ShareModal } from './ShareModal';
 import { ForwardModal } from './ForwardModal';
 import { DeleteModal } from './DeleteModal';
 import { PaxsFooter } from '../common/PaxsFooter';
+import { appBasePath } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Upload, Calendar, Network, LayoutGrid, List, Eye, FileText, LogOut } from 'lucide-react';
 import type { Study } from '@/types/study';
@@ -55,7 +56,7 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
-    fetch('/api/v1/auth/me', { headers, credentials: 'same-origin' })
+    fetch(`${appBasePath()}/api/v1/auth/me`, { headers, credentials: 'same-origin' })
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (data) setCurrentUser(data);
@@ -65,7 +66,7 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'same-origin' });
+      await fetch(`${appBasePath()}/api/v1/auth/logout`, { method: 'POST', credentials: 'same-origin' });
     } catch (err) {
       console.error('Logout error:', err);
     } finally {
@@ -122,11 +123,19 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
           <div className="flex flex-wrap items-center gap-3" data-paxs-react-user-chip="1">
             <Button
               onClick={() => {
-                const firstUid = studies[0]?.study_uid;
-                if (firstUid) (window as any).paxsOpenReportModal?.(firstUid);
-                else alert('No studies available to report.');
+                // H16: bound to the explicit selection — never to whatever
+                // happens to be first in the (sortable) list.
+                if (selectedStudy) {
+                  (window as any).paxsOpenReportModal?.(selectedStudy.study_uid);
+                }
               }}
-              className="bg-gradient-to-r from-emerald-600 to-teal-500 text-white font-bold hover:brightness-110 shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all cursor-pointer"
+              disabled={!selectedStudy}
+              title={
+                selectedStudy
+                  ? `Open report for ${selectedStudy.patient_name.replace(/\^/g, ' ')} — ${selectedStudy.study_uid}`
+                  : 'Select a study to open/create report'
+              }
+              className="bg-gradient-to-r from-emerald-600 to-teal-500 text-white font-bold hover:brightness-110 shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:brightness-100"
             >
               <FileText className="w-4 h-4 mr-2" />
               📝 Diagnostic Report

@@ -234,44 +234,141 @@ def _is_already_exists(exc: Exception) -> bool:
     return "already exists" in msg or msg.startswith("duplicate ")
 
 
-def run_migrations(url: str, stamp_on_exists: bool = True) -> tuple[list[str], bool]:
-    """Run every pending migration on *url* up to head.
+def schema_drift(url: str) -> list[str]:
+    """Objects the models declare but the database lacks (H11).
 
-    Alembic's env.py derives its connection from ``settings.DATABASE_URL``, so
-    we temporarily point the runtime settings object at the target URL, run
-    ``alembic upgrade head``, then restore. The app's own engines are already
-    bound to their original URL and are unaffected.
-
-    Returns ``(log_lines, stamped)``. When the target schema already contains
-    objects a pending migration would create (common on databases bootstrapped
-    with ``create_all`` where ``alembic_version`` lags reality) and
-    ``stamp_on_exists`` is set, the database is reconciled with ``stamp head``
-    instead of failing — exactly what an operator would do by hand.
+    The parity check that gates stamping: if this is non-empty the schema is
+    *incomplete*, so declaring it "at head" would strand those objects forever.
     """
-    from alembic import command
+    from sqlalchemy import create_engine, inspect
+
+    from app.db.models import Base
+
+    engine = create_engine(to_sync_url(url), poolclass=NullPool)
+    try:
+        inspector = inspect(engine)
+        present = set(inspector.get_table_names())
+        missing: list[str] = []
+        for table_name, table in Base.metadata.tables.items():
+            if table_name not in present:
+                missing.append(f"table {table_name}")
+                continue
+            columns = {c["name"] for c in inspector.get_columns(table_name)}
+            for column in table.columns:
+                if column.name not in columns:
+                    missing.append(f"column {table_name}.{column.name}")
+        return missing
+    finally:
+        engine.dispose()
+
+
+def _migration_config(url: str):
+    """An Alembic Config bound to *url* without touching global settings (H12)."""
     from alembic.config import Config
 
-    prev = settings.DATABASE_URL
-    settings.DATABASE_URL = url
+    cfg = Config(str(ALEMBIC_INI))
+    # env.py prefers this over settings.DATABASE_URL.
+    cfg.attributes["paxs_migration_url"] = url
+    return cfg
+
+
+def _advisory_lock(engine, name: str = "paxs_migrations") -> bool:
+    """Take a DB-level advisory lock where the backend supports one.
+
+    Serialises migrations across processes on MySQL; SQLite has no equivalent,
+    so the in-process lock is the only guard there.
+    """
+    if engine.dialect.name != "mysql":
+        return True
+    try:
+        with engine.connect() as conn:
+            got = conn.exec_driver_sql(
+                f"SELECT GET_LOCK('{name}', 30)"
+            ).scalar()
+        return bool(got)
+    except Exception:  # noqa: BLE001 - never block a migration on lock support
+        log.warning("advisory lock unavailable; continuing without it", exc_info=True)
+        return True
+
+
+def _release_advisory_lock(engine, name: str = "paxs_migrations") -> None:
+    if engine.dialect.name != "mysql":
+        return
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql(f"SELECT RELEASE_LOCK('{name}')")
+    except Exception:  # noqa: BLE001
+        log.warning("could not release the advisory lock", exc_info=True)
+
+
+def run_migrations(url: str, stamp_on_exists: bool = False) -> tuple[list[str], bool]:
+    """Run every pending migration on *url* up to head.
+
+    H11: Alembic is the single schema authority and there is **no automatic
+    stamping**. If the target already contains an object a pending migration
+    would create, the migration fails with the drift report instead of being
+    declared "at head" — a stamp on a partially-migrated database would strand
+    the remaining objects permanently.
+
+    H12: the target URL is passed to Alembic explicitly; the process-global
+    ``settings.DATABASE_URL`` is never mutated.
+
+    Returns ``(log_lines, stamped)``. ``stamped`` is always False here; stamping
+    is a separate, parity-checked operator action (:func:`stamp_head`).
+    """
+    from alembic import command
+
     buf = io.StringIO()
     handler = logging.StreamHandler(buf)
     handler.setFormatter(logging.Formatter("%(message)s"))
     mig_logger = logging.getLogger("alembic.runtime.migration")
     mig_logger.addHandler(handler)
-    cfg = Config(str(ALEMBIC_INI))
+    cfg = _migration_config(url)
+    engine = create_engine(to_sync_url(url), poolclass=NullPool)
+    locked = False
     try:
+        locked = _advisory_lock(engine)
         command.upgrade(cfg, "head")
         return [ln for ln in buf.getvalue().splitlines() if ln.strip()], False
     except Exception as exc:
-        if not (stamp_on_exists and _is_already_exists(exc)):
+        if not _is_already_exists(exc):
             raise
-        buf.write("Schema objects already present — alembic state drifted; "
-                  "stamping to head.\n")
-        command.stamp(cfg, "head")
-        return [ln for ln in buf.getvalue().splitlines() if ln.strip()], True
+        drift = schema_drift(url)
+        detail = ", ".join(drift[:10]) if drift else "no missing objects detected"
+        raise RuntimeError(
+            "Migration stopped: the target already contains objects a pending "
+            f"migration would create, so its schema state is ambiguous. "
+            f"Missing per the models: {detail}. "
+            "Reconcile manually (or run the explicit stamp procedure, which "
+            "requires a clean parity check) — this is never done automatically."
+        ) from exc
     finally:
+        if locked:
+            _release_advisory_lock(engine)
+        engine.dispose()
         mig_logger.removeHandler(handler)
-        settings.DATABASE_URL = prev
+
+
+def stamp_head(url: str) -> dict:
+    """Explicitly mark *url* as being at head — only when the schema is complete.
+
+    H11: stamping is an operator action that must pass the schema parity check
+    first. An incomplete schema is refused with the drift report, because a
+    stamp would otherwise declare missing objects as already applied.
+    """
+    from alembic import command
+
+    drift = schema_drift(url)
+    if drift:
+        return {
+            "ok": False,
+            "error": "Schema is incomplete — refusing to stamp.",
+            "missing": drift,
+            "missing_count": len(drift),
+        }
+    cfg = _migration_config(url)
+    command.stamp(cfg, "head")
+    return {"ok": True, "revision": current_revision(url), "missing": []}
 
 
 def ensure_database(url: str) -> bool:

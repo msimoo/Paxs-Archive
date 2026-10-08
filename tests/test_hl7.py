@@ -2,6 +2,9 @@
 STOW/C-STORE path (images for an HL7-registered MRN attach to that patient).
 """
 
+import pytest
+
+
 import socket
 import time
 
@@ -181,3 +184,14 @@ def test_c_store_attaches_to_hl7_patient(receiver):
         assert p.source == "his"
         assert p.patient_name == "Smith Jane"  # HIS name survives the C-STORE
         assert any(st.study_instance_uid == "1.2.3.777.1" for st in p.studies)
+
+
+# --------------------------------------------------------------------------- #
+# C03: the dashboard study list / stats endpoints require authentication.
+# Override the anonymous ``client`` for this module so its requests carry a
+# valid ADMIN bearer token. (No test here asserts anonymous behaviour.)
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

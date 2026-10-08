@@ -58,7 +58,50 @@ EDITABLE_KEYS: dict[str, dict[str, Any]] = {
         "label": "DICOMweb public access",
         "group": "sys",
         "type": "bool",
-        "description": "Allow QIDO/WADO/STOW without a login token.",
+        "description": "Allow QIDO/WADO/STOW without a login token. When off, DICOMweb requires a bearer token or session cookie (or a valid patient share link for that study).",
+    },
+    # ---- LDAP / Active Directory (plan_9_2026.md C02) ---------------------
+    "LDAP_ENABLED": {
+        "label": "LDAP / AD authentication",
+        "group": "security",
+        "type": "bool",
+        "description": "Enable directory login. Off by default; when off, /api/v1/ldap/login refuses every request.",
+    },
+    "LDAP_SERVER": {
+        "label": "LDAP server URL",
+        "group": "security",
+        "type": "str",
+        "description": "Directory endpoint, e.g. ldaps://dc01.hospital.org or ldap://dc01.hospital.org:389.",
+    },
+    "LDAP_BASE_DN": {
+        "label": "LDAP base DN",
+        "group": "security",
+        "type": "str",
+        "description": "Search base for user binds, e.g. DC=hospital,DC=org.",
+    },
+    "LDAP_USER_DN_TEMPLATE": {
+        "label": "LDAP user DN template",
+        "group": "security",
+        "type": "str",
+        "description": "DN template used to bind a user; {username} and {base_dn} are substituted.",
+    },
+    "LDAP_GROUP_ROLE_MAP": {
+        "label": "LDAP group → role map",
+        "group": "security",
+        "type": "str",
+        "description": 'Semicolon-separated "group=ROLE" pairs, e.g. CN=Radiologists=ADMIN;CN=Doctors=PHYSICIAN. Roles must be ADMIN, RADIOLOGIST, PHYSICIAN or TECHNOLOGIST.',
+    },
+    "LDAP_DEFAULT_ROLE": {
+        "label": "LDAP default role",
+        "group": "security",
+        "type": "str",
+        "description": "Role granted when no group matches. Leave empty to deny such users (fail closed).",
+    },
+    "STORAGE_ALLOW_LEGACY_PATHS": {
+        "label": "Allow legacy storage paths",
+        "group": "storage",
+        "type": "bool",
+        "description": "Resolve pre-B1 absolute / CWD-relative storage keys. Off by default; enable only to migrate an old archive.",
     },
     # ---- DICOM receiver ----------------------------------------------------
     "DICOM_AE_TITLE": {
@@ -165,6 +208,13 @@ EDITABLE_KEYS: dict[str, dict[str, Any]] = {
         "restart": True,
         "description": "Serve the /fhir REST API.",
     },
+    "FUSION_ENABLED": {
+        "label": "Image fusion (PET/CT, MR/CT)",
+        "group": "interop",
+        "type": "bool",
+        "restart": True,
+        "description": "Serve the fusion endpoints. Independent of FHIR (H18).",
+    },
     # ---- Storage -----------------------------------------------------------
     "STORAGE_BACKEND": {
         "label": "Storage backend",
@@ -237,6 +287,13 @@ EDITABLE_KEYS: dict[str, dict[str, Any]] = {
         "group": "security",
         "type": "bool",
         "description": "Let new users create accounts from the login panel.",
+    },
+    "TRUSTED_PROXIES": {
+        "label": "Trusted proxies",
+        "group": "security",
+        "type": "str",
+        "restart": False,
+        "description": "Comma-separated peers whose X-Forwarded-For is honoured for rate limiting (H07).",
     },
     "RATE_LIMIT_ENABLED": {
         "label": "Rate limiting",
@@ -325,6 +382,79 @@ EDITABLE_KEYS: dict[str, dict[str, Any]] = {
         "group": "workflow",
         "type": "int",
     },
+    # ---- Viewer Processing (roadmap #51) ---------------------------------
+    "VIEWER_PROCESSING_MODE": {
+        "label": "Viewer processing mode",
+        "group": "viewer",
+        "type": "select",
+        "options": ["hybrid", "server", "client"],
+        "description": (
+            "How DICOM decoding, MPR and 3D rendering are distributed. "
+            "'hybrid' auto-detects client capabilities; 'server' renders "
+            "all frames server-side (thin client); 'client' streams raw "
+            "voxels to the browser GPU (diagnostic workstation)."
+        ),
+    },
+    "HYBRID_CLIENT_SCORE_THRESHOLD": {
+        "label": "Hybrid: min client score (0-100)",
+        "group": "viewer",
+        "type": "int",
+        "description": "WebGL capability score below which the hybrid engine falls back to server mode.",
+    },
+    "HYBRID_SERVER_VOL_BUDGET_MB": {
+        "label": "Hybrid: server volume budget (MB)",
+        "group": "viewer",
+        "type": "int",
+        "description": "Maximum in-process volume cache size before new sessions are shifted to client mode.",
+    },
+    "HYBRID_RTT_THRESHOLD_MS": {
+        "label": "Hybrid: network RTT threshold (ms)",
+        "group": "viewer",
+        "type": "int",
+        "description": "Round-trip time above which client-side processing is preferred over per-slice server calls.",
+    },
+    "HYBRID_MAX_SERVER_MPR_SESSIONS": {
+        "label": "Hybrid: max server MPR sessions",
+        "group": "viewer",
+        "type": "int",
+        "description": "Concurrent server-side MPR sessions before new sessions are forced to client mode.",
+    },
+    # ---- Cache memory budgets (V1-2 / V3-6) ------------------------------
+    # Hard byte ceilings for the in-process decode caches. Independent of
+    # HYBRID_SERVER_VOL_BUDGET_MB (a negotiation input) so a tuning change there
+    # cannot silently raise the process's worst-case RSS.
+    "VOLUME_CACHE_BUDGET_MB": {
+        "label": "Volume cache budget (MB)",
+        "group": "viewer",
+        "type": "int",
+        "min": 64,
+        "max": 65536,
+        "description": (
+            "Hard ceiling for the L1 materialised-volume cache (float32 HU arrays; "
+            "~500 MB per 512x512x500 CT). LRU-evicted. Keep below "
+            "HYBRID_SERVER_VOL_BUDGET_MB, and large enough to hold one volume per "
+            "concurrent server MPR session or sessions will evict each other."
+        ),
+    },
+    "DICOM_FRAME_CACHE_MB": {
+        "label": "Decoded frame cache (MB)",
+        "group": "viewer",
+        "type": "int",
+        "min": 16,
+        "max": 16384,
+        "description": (
+            "Hard ceiling for the decoded-frame LRU in the WADO-RS bulk service "
+            "(raw pixel bytes). Bound by bytes rather than entry count so it scales "
+            "with image size; a 512x512 CT frame is ~0.5 MB, a 3072x2560 J2K frame "
+            "takes ~2.3 s to decode."
+        ),
+    },
+    "VIEWER_PROCESSING_ROLE_MAP": {
+        "label": "Per-role mode overrides (JSON)",
+        "group": "viewer",
+        "type": "str",
+        "description": "JSON map of role\u2192mode overrides, e.g. {\"RADIOLOGIST\":\"client\"}. Empty = global mode for all.",
+    },
 }
 
 GROUPS: dict[str, dict[str, str]] = {
@@ -334,6 +464,7 @@ GROUPS: dict[str, dict[str, str]] = {
     "storage": {"label": "Storage", "description": "Backend (local / S3) and compression policy."},
     "security": {"label": "Security", "description": "Sessions, registration, rate limits and anonymizer."},
     "workflow": {"label": "Workflow", "description": "Triage, lifecycle, routing and transfer acceleration."},
+    "viewer": {"label": "Viewer", "description": "Processing distribution, rendering modes and hybrid auto-detection thresholds."},
 }
 
 # ------------------------------------------------------------- coercion ----
@@ -365,6 +496,13 @@ def _coerce(key: str, value: Any) -> str:
             n = int(value)
         except (TypeError, ValueError) as exc:
             raise ValueError("expected an integer") from exc
+        # Optional per-key range (used by the cache memory budgets, where a 0 or
+        # a negative value would silently disable a cache).
+        lo, hi = spec.get("min"), spec.get("max")
+        if lo is not None and n < lo:
+            raise ValueError(f"must be >= {lo}")
+        if hi is not None and n > hi:
+            raise ValueError(f"must be <= {hi}")
         return str(n)
     if t == "float":
         try:

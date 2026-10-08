@@ -23,7 +23,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.api.v1.deps import get_optional_user, require_admin
+from app.api.v1.deps import get_current_user_any, require_admin
 from app.db.models import User
 from app.services import redis_service
 
@@ -61,7 +61,7 @@ class DeleteKeyBody(BaseModel):
 
 
 @router.get("/status")
-async def get_status(user: User | None = Depends(get_optional_user)):
+async def get_status(user: User | None = Depends(get_current_user_any)):
     """Retrieve full Redis metrics, memory usage, key stats, install state and L1 RAM status."""
     data = await asyncio.to_thread(redis_service.get_redis_status)
     data["admin"] = bool(user and user.role == "ADMIN")
@@ -96,7 +96,7 @@ async def configure_redis(body: ConfigureBody, _user: User = Depends(require_adm
 async def list_keys(
     pattern: str = Query(default="*", description="Glob pattern to search"),
     limit: int = Query(default=100, ge=1, le=500),
-    _user: User | None = Depends(get_optional_user),
+    _user: User | None = Depends(get_current_user_any),
 ):
     """Search and list keys from Redis and Tier-1 RAM cache."""
     return await asyncio.to_thread(redis_service.list_redis_keys, pattern, limit)
@@ -105,7 +105,7 @@ async def list_keys(
 @router.get("/key")
 async def get_key(
     key: str = Query(..., description="Exact key name"),
-    _user: User | None = Depends(get_optional_user),
+    _user: User | None = Depends(get_current_user_any),
 ):
     """View details and content preview of a specific key."""
     result = await asyncio.to_thread(redis_service.get_key_detail, key)
@@ -133,7 +133,7 @@ async def flush_cache(body: FlushBody, _user: User = Depends(require_admin)):
 
 
 @router.post("/ping")
-async def ping(_user: User | None = Depends(get_optional_user)):
+async def ping(_user: User | None = Depends(get_current_user_any)):
     """Measure real-time PING round-trip latency against Redis."""
     return await asyncio.to_thread(redis_service.ping_redis)
 

@@ -8,10 +8,15 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
 from collections import OrderedDict
 
 import numpy as np
 from pydicom.dataset import Dataset
+
+from app.core import cache_stats
+from app.core.config import settings
+from app.core.dicom_diagnostics import decode_context
 
 log = logging.getLogger("paxs.wado_bulk")
 
@@ -25,27 +30,80 @@ RAW_FRAME_CONTENT_TYPE = "application/octet-stream; transfer-syntax=1.2.840.1000
 
 # Server-side decode cache: keyed by (SOPInstanceUID, frame index) so repeated
 # viewer navigation / refreshes don't re-run the (expensive) pixel decode.
+#
+# V1-2: bounded by BYTES (settings.DICOM_FRAME_CACHE_MB), not entry count. The
+# old 16-entry cap was ~8 MB for 512x512 CT frames, so a 200-image study scrubbed
+# across three planes evicted continuously and re-decoded on nearly every revisit
+# (a 3072x2560 J2K frame costs ~2.3 s). A byte budget scales with image size
+# instead of assuming small frames.
+#
+# Locked: the warm service decodes on a background thread while request handlers
+# decode on the event loop, and byte accounting is a read-modify-write.
 _FRAME_CACHE: OrderedDict[tuple[str, int], bytes] = OrderedDict()
-_FRAME_CACHE_MAX = 16
+_FRAME_CACHE_LOCK = threading.Lock()
+
+
+def frame_cache_budget_bytes() -> int:
+    """Current budget from settings (re-read each call so an override applies live).
+
+    ``0`` means **caching disabled** and is returned as 0, not masked with a
+    default — an ``or`` fallback would silently turn a deliberate disable into
+    the full default budget.
+    """
+    raw = getattr(settings, "DICOM_FRAME_CACHE_MB", 256)
+    try:
+        mb = int(raw)
+    except (TypeError, ValueError):
+        mb = 256
+    return max(0, mb) * 1024 * 1024
+
+
+def frame_cache_stats() -> dict[str, int]:
+    """Counters + gauges for this cache (used by tests and /metrics)."""
+    return cache_stats.snapshot()["frame"]
 
 
 def _cache_get(key: tuple[str, int]) -> bytes | None:
-    val = _FRAME_CACHE.get(key)
-    if val is not None:
+    with _FRAME_CACHE_LOCK:
+        val = _FRAME_CACHE.get(key)
+        if val is None:
+            cache_stats.incr("frame", "misses")
+            return None
         _FRAME_CACHE.move_to_end(key)
-    return val
+        cache_stats.incr("frame", "hits")
+        return val
 
 
 def _cache_put(key: tuple[str, int], value: bytes) -> None:
-    _FRAME_CACHE[key] = value
-    _FRAME_CACHE.move_to_end(key)
-    while len(_FRAME_CACHE) > _FRAME_CACHE_MAX:
-        _FRAME_CACHE.popitem(last=False)
+    budget = frame_cache_budget_bytes()
+    if budget <= 0:
+        # Caching disabled (DICOM_FRAME_CACHE_MB=0): store nothing rather than
+        # retaining one oversized entry.
+        cache_stats.set_gauges("frame", bytes=0, entries=0)
+        return
+    with _FRAME_CACHE_LOCK:
+        _FRAME_CACHE.pop(key, None)
+        _FRAME_CACHE[key] = value
+        cache_stats.incr("frame", "inserts")
+        # Recompute from the dict rather than tracking a delta: another module
+        # (or a test) may clear the cache directly, and a stale running total
+        # would then evict everything or nothing.
+        total = sum(len(v) for v in _FRAME_CACHE.values())
+        # Never evict the entry just inserted: a single frame larger than the
+        # whole budget would otherwise be dropped immediately and the cache would
+        # do nothing at all.
+        while len(_FRAME_CACHE) > 1 and total > budget:
+            _evicted_key, evicted = _FRAME_CACHE.popitem(last=False)
+            total -= len(evicted)
+            cache_stats.incr("frame", "evictions")
+        cache_stats.set_gauges("frame", bytes=total, entries=len(_FRAME_CACHE))
 
 
 def clear_frame_cache() -> None:
     """Drop the decoded-frame cache (used by tests / storage re-import)."""
-    _FRAME_CACHE.clear()
+    with _FRAME_CACHE_LOCK:
+        _FRAME_CACHE.clear()
+        cache_stats.set_gauges("frame", bytes=0, entries=0)
 
 
 def extract_frame_bytes(
@@ -90,8 +148,15 @@ def extract_frame_bytes(
                 if 0 <= idx < len(all_frames):
                     frames.append((all_frames[idx], mime))
             return frames
-        except Exception:
-            log.warning("Encapsulated frame extraction fallback to pixel_array unpacking")
+        except Exception as exc:  # noqa: BLE001 — fall back to pixel_array
+            # Not necessarily an error, but the reason matters: this is the
+            # first place a transfer syntax the encapsulation layer cannot walk
+            # shows up, so record the syntax and the cause together.
+            log.warning(
+                "Encapsulated frame extraction failed (%s: %s); "
+                "falling back to pixel_array unpacking | %s",
+                type(exc).__name__, exc, decode_context(ds),
+            )
 
     # Case B: Uncompressed raw pixel array
     try:
@@ -117,7 +182,7 @@ def extract_frame_bytes(
                     frame_bytes = arr[idx].tobytes()
                     frames.append((frame_bytes, "application/octet-stream" + ts_param))
     except Exception as exc:
-        log.exception("Failed to extract pixel array frames")
+        log.exception("Failed to extract pixel array frames | %s", decode_context(ds))
         raise ValueError(f"Failed to extract frame bytes: {exc}") from exc
 
     return frames
@@ -175,9 +240,13 @@ def decode_frames_to_raw(
     try:
         arr = ds.pixel_array
     except Exception as exc:  # noqa: BLE001 - any decode failure falls back
+        # The primary codec-diagnosis site: an installed pylibjpeg plugin is
+        # missing or cannot handle this syntax. The context names the syntax and
+        # the pixel layout, so the gap is identifiable without opening the file.
         log.warning(
-            "decode_frames_to_raw: pixel_array failed (%s); serving raw codestream",
-            exc,
+            "decode_frames_to_raw: pixel_array failed (%s: %s); "
+            "serving raw codestream | %s",
+            type(exc).__name__, exc, decode_context(ds),
         )
         return extract_frame_bytes(ds, frame_indices)
 

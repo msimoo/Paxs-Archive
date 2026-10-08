@@ -8,6 +8,7 @@ unregistered series, tenant scoping, and the 404 for unknown studies.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from pydicom.uid import generate_uid
 
 from tests.helpers import build_stow_body, ds_bytes, make_instance, stow_headers
@@ -58,6 +59,16 @@ def _stow_study(client, *, study_uid, series_specs):
     assert resp.status_code == 200, resp.text
 
 
+def _reader_h(client):
+    """Admin headers for manifest reads.
+
+    C03: the fusion manifest describes patient studies, so it requires
+    authentication. Created lazily per test so this module keeps its own
+    first-user-becomes-ADMIN bootstrap semantics.
+    """
+    return _auth(client, "fus_reader")
+
+
 def test_fusion_pairs_same_for(client):
     """PET + CT sharing a FoR produce exactly one aligned pair with geometry."""
     study, ct_series, pet_series = generate_uid(), generate_uid(), generate_uid()
@@ -68,7 +79,7 @@ def test_fusion_pairs_same_for(client):
          "frame_of_reference": FOR_A, "desc": "PET WB"},
     ])
 
-    resp = client.get(f"/api/v1/fusion/{study}")
+    resp = client.get(f"/api/v1/fusion/{study}", headers=_reader_h(client))
     assert resp.status_code == 200
     m = resp.json()
     assert m["study_instance_uid"] == study
@@ -111,7 +122,7 @@ def test_fusion_multiple_for_groups(client):
         {"modality": "CR", "series_uid": no_for, "series_num": 5, "frame_of_reference": None},
     ])
 
-    m = client.get(f"/api/v1/fusion/{study}").json()
+    m = client.get(f"/api/v1/fusion/{study}", headers=_reader_h(client)).json()
     assert m["series_count"] == 5
     assert len(m["frames_of_reference"]) == 2
     assert len(m["pairs"]) == 2
@@ -131,14 +142,14 @@ def test_fusion_single_series_no_pairs(client):
         {"modality": "CT", "series_uid": series, "series_num": 1,
          "frame_of_reference": FOR_A},
     ])
-    m = client.get(f"/api/v1/fusion/{study}").json()
+    m = client.get(f"/api/v1/fusion/{study}", headers=_reader_h(client)).json()
     assert len(m["frames_of_reference"]) == 1
     assert len(m["frames_of_reference"][0]["series"]) == 1
     assert m["pairs"] == []
 
 
 def test_fusion_404_unknown_study(client):
-    resp = client.get(f"/api/v1/fusion/{generate_uid()}")
+    resp = client.get(f"/api/v1/fusion/{generate_uid()}", headers=_reader_h(client))
     assert resp.status_code == 404
 
 
@@ -219,7 +230,7 @@ def test_fusion_geometry_nonvolumetric_series(client):
         {"modality": "KO", "series_uid": ko, "series_num": 2,
          "frame_of_reference": FOR_A, "sop_class_uid": KO_SOP_CLASS},
     ])
-    m = client.get(f"/api/v1/fusion/{study}").json()
+    m = client.get(f"/api/v1/fusion/{study}", headers=_reader_h(client)).json()
     assert len(m["pairs"]) == 1
     pair = m["pairs"][0]
     geos = {pair["series_a"]["modality"]: pair["series_a"]["geometry"],

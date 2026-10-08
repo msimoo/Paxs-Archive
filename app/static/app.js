@@ -327,7 +327,13 @@ function viewerUrl(studyUid) {
   // (localhost vs 127.0.0.1 vs a reverse-proxy hostname), and falls back to the
   // current origin until the health payload lands. Deep-links go straight to
   // the viewer mode route (/viewer/viewer) which opens the study directly.
-  const base = (window.PAXS_PUBLIC_BASE_URL || location.origin).replace(/\/+$/, "");
+  //
+  // V2-4: the fallback also carries the sub-path. location.origin alone drops
+  // any path prefix, so behind https://host/paxs/ the link would point at
+  // https://host/viewer/viewer (404). PAXS_BASE_PATH is injected into the shell
+  // by the server; the server-provided PUBLIC_BASE_URL already includes it.
+  const prefix = (window.PAXS_BASE_PATH || '').replace(/\/+$/, "");
+  const base = (window.PAXS_PUBLIC_BASE_URL || (location.origin + prefix)).replace(/\/+$/, "");
   return `${base}/viewer/viewer?StudyInstanceUIDs=${encodeURIComponent(studyUid)}`;
 }
 
@@ -646,7 +652,7 @@ function switchView(view) {
 }
 
 /* ---------------- settings (editable config) ---------------- */
-const CFG_PANELS = ["sys", "dicom", "modality", "interop", "storage", "security", "workflow", "db"];
+const CFG_PANELS = ["sys", "dicom", "modality", "interop", "storage", "security", "workflow", "viewer", "db"];
 
 function cfgCtrlValue(f) {
   const c = document.querySelector(`[data-cfg="${f.key}"]`);

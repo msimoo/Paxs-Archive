@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
-import re
+from dataclasses import dataclass
 import time
 
 import pydicom
@@ -34,26 +34,89 @@ from pydicom.uid import ExplicitVRLittleEndian
 from app.core.config import settings
 from app.services.storage import get_storage_backend
 
-from app.services.quota_service import check_quota_before_write
+from app.services.quota_service import (
+    QuotaExceeded,
+    check_quota_before_write,
+    release_quota,
+    reserve_quota,
+)
 from app.services.storage.backend import StorageError
 
 log = logging.getLogger("paxs.storage")
 
-# DICOM UIDs are [0-9.] only; anything else is untrusted input that could
-# escape the storage root via path components (.., /, drive letters).
-_UID_OK = re.compile(r"^[0-9.]{1,64}$")
-_UID_STRIP = re.compile(r"[^0-9A-Za-z.-]")
+
+class InvalidStorageKey(StorageError):
+    """A UID/key component that cannot safely be used as a path segment (C05).
+
+    Raised instead of silently rewriting the value: ingest turns it into a 400
+    (STOW-RS) or a Processing Failure (C-STORE), so a malformed identifier is
+    rejected at the door rather than creating an object outside the root.
+    """
 
 
-def _safe_component(value: str, fallback: str = "unknown") -> str:
-    value = str(value or "").strip()
-    if _UID_OK.match(value):
-        return value
-    cleaned = _UID_STRIP.sub("_", value)[:64]
-    if not cleaned or cleaned in (".", ".."):
-        # Keep determinism + uniqueness for malformed values.
-        return f"{fallback}_{hashlib.sha1(value.encode('utf-8', 'replace')).hexdigest()[:20]}"
-    return cleaned
+# Characters that let a value change the *path* it names: separators, Windows
+# drive colons, NTFS alternate-data-stream colons, and shell/glob metacharacters
+# that some backends interpret.
+_UNSAFE_CHARS = frozenset('/\\:*?"<>|')
+
+# Windows reserves these device names in every directory (and silently strips
+# trailing dots/spaces), so they can never be a safe path segment.
+_WINDOWS_RESERVED = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
+# DICOM UIDs are capped at 64 characters (PS3.5); a longer value is either
+# corrupt or hostile.
+_MAX_COMPONENT_LEN = 64
+
+# Values that name a directory instead of a child of one.
+_DOT_SEGMENTS = frozenset([".", ".."])
+
+
+def unsafe_reason(value: str) -> str | None:
+    """Why ``value`` cannot be a path segment, or None when it is safe.
+
+    Deliberately conservative about *dangerous* input only: it does not enforce
+    DICOM UID syntax, because real archives contain non-standard-but-harmless
+    identifiers (e.g. hex-containing UIDs) that must keep working.
+    """
+    if value in _DOT_SEGMENTS:
+        return "dot segment"
+    bad = sorted({ch for ch in value if ch in _UNSAFE_CHARS or ord(ch) < 32 or ord(ch) == 127})
+    if bad:
+        printable = ", ".join(repr(ch) for ch in bad)
+        return f"illegal character(s) {printable}"
+    if len(value) > _MAX_COMPONENT_LEN:
+        return f"longer than {_MAX_COMPONENT_LEN} characters"
+    if value.endswith(".") or value.endswith(" "):
+        # Windows silently strips these, so "1.2.3." and "1.2.3" would collide.
+        return "trailing dot or space"
+    if value.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
+        return "reserved Windows device name"
+    return None
+
+
+def validate_component(value: str | None, *, field: str = "UID",
+                       fallback: str | None = None) -> str:
+    """Return ``value`` as a safe path component, or raise.
+
+    * empty/whitespace -> a deterministic ``{fallback}_{sha1}`` name when a
+      fallback is given (keeps existing behaviour for datasets that omit a UID),
+      otherwise ``InvalidStorageKey``;
+    * dangerous (dot segment, separator, control char, device name, overlong)
+      -> ``InvalidStorageKey`` — never silently rewritten (C05 hard-reject).
+    """
+    text = str(value if value is not None else "").strip()
+    if not text:
+        if fallback:
+            return f"{fallback}_{hashlib.sha1(text.encode('utf-8', 'replace')).hexdigest()[:20]}"
+        raise InvalidStorageKey(f"{field} is empty")
+    reason = unsafe_reason(text)
+    if reason:
+        raise InvalidStorageKey(f"{field} {text!r} is not a safe path segment ({reason})")
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -61,14 +124,14 @@ def _safe_component(value: str, fallback: str = "unknown") -> str:
 # --------------------------------------------------------------------------- #
 def instance_key(study_uid: str, series_uid: str, sop_uid: str) -> str:
     return (
-        f"{_safe_component(study_uid, 'study')}/"
-        f"{_safe_component(series_uid, 'series')}/"
-        f"{_safe_component(sop_uid, 'sop')}.dcm"
+        f"{validate_component(study_uid, field='StudyInstanceUID', fallback='study')}/"
+        f"{validate_component(series_uid, field='SeriesInstanceUID', fallback='series')}/"
+        f"{validate_component(sop_uid, field='SOPInstanceUID', fallback='sop')}.dcm"
     )
 
 
 def thumbnail_key(sop_uid: str) -> str:
-    return f".thumbnails/{_safe_component(sop_uid, 'sop')}.png"
+    return f".thumbnails/{validate_component(sop_uid, field='SOPInstanceUID', fallback='sop')}.png"
 
 
 # --------------------------------------------------------------------------- #
@@ -177,7 +240,11 @@ def delete_tree(prefix: str, backend_name: str | None = None) -> None:
 
 
 def delete_study_files(study_uid: str, backend_name: str | None = None) -> None:
-    _resolve(backend_name).delete_tree(_safe_component(study_uid, "study"))
+    # Validated, not sanitised: a destructive recursive delete must never run
+    # against a rewritten or dot-segment prefix (C05).
+    _resolve(backend_name).delete_tree(
+        validate_component(study_uid, field="StudyInstanceUID")
+    )
 
 
 def storage_usage_bytes(backend_name: str | None = None) -> int:
@@ -269,6 +336,112 @@ def save_bytes_with_quota(key: str, data: bytes, tenant_id: int | None,
         exceeded = [f"{i.scope_type}:{i.scope_id}" for i in infos if i.is_exceeded]
         raise StorageError(f"Storage quota exceeded for {', '.join(exceeded)}")
     _resolve(backend_name).save_bytes(key, data)
+
+
+@dataclass
+class StagedObject:
+    """An ingest object written to a temporary location (H08 + H09).
+
+    Nothing is published at the canonical key until :meth:`promote` runs, which
+    the ingest paths call *after* the database transaction commits. If anything
+    fails, :meth:`discard` removes the staged file and gives the reserved quota
+    back, leaving any pre-existing object untouched.
+    """
+
+    key: str
+    staged_path: str | None
+    sha256: str
+    size: int            # bytes *charged* to the quota (a delta on reimports)
+    tenant_id: int | None
+    backend_name: str | None
+    bytes_written: int = 0  # the object's actual size, measured while staging
+
+    def promote(self) -> None:
+        """Publish the staged bytes at the canonical key (no-op when unstaged)."""
+        if self.staged_path is None:
+            return
+        _resolve(self.backend_name).promote_staged(self.staged_path, self.key)
+        self.staged_path = None
+
+    def discard(self) -> None:
+        """Drop the staged file and release the reservation."""
+        if self.staged_path is not None:
+            try:
+                _resolve(self.backend_name).discard_staged(self.staged_path)
+            except Exception:  # noqa: BLE001 - cleanup must not mask the cause
+                log.warning("could not discard staged object %s", self.staged_path,
+                            exc_info=True)
+            self.staged_path = None
+        if self.size > 0:
+            try:
+                release_quota(self.tenant_id, self.backend_name, self.size)
+            except Exception:  # noqa: BLE001
+                log.warning("could not release quota reservation", exc_info=True)
+
+
+def stage_dataset_with_quota(ds: Dataset, tenant_id: int | None,
+                             backend_name: str | None = None,
+                             charge_bytes: int | None = None) -> StagedObject:
+    """Reserve quota, then stage a Dataset without publishing it.
+
+    Order matters: the quota reservation is taken **before** any bytes are
+    written, so a full archive refuses the object instead of filling the disk
+    first. `charge_bytes` lets a reimport charge only the size delta.
+    """
+    study_uid = str(getattr(ds, "StudyInstanceUID", "UNKNOWN"))
+    series_uid = str(getattr(ds, "SeriesInstanceUID", "UNKNOWN"))
+    sop_uid = str(getattr(ds, "SOPInstanceUID", "UNKNOWN"))
+
+    if getattr(ds, "file_meta", None) is None:
+        meta = FileMetaDataset()
+        meta.MediaStorageSOPClassUID = str(getattr(ds, "SOPClassUID", ""))
+        meta.MediaStorageSOPInstanceUID = sop_uid
+        meta.TransferSyntaxUID = ExplicitVRLittleEndian
+        ds.file_meta = meta
+
+    key = instance_key(study_uid, series_uid, sop_uid)
+    buf = io.BytesIO()
+    ds.save_as(buf, enforce_file_format=True)
+    data = buf.getvalue()
+
+    charge = len(data) if charge_bytes is None else max(0, charge_bytes)
+    if charge:
+        # Raises QuotaExceeded; nothing has been written at this point.
+        reserve_quota(tenant_id, backend_name, charge)
+
+    bk = _resolve(backend_name)
+    try:
+        if hasattr(bk, "stage_bytes"):
+            staged_path, sha = bk.stage_bytes(key, data)
+        else:
+            # Backends without staging (S3: put_object is atomic per object)
+            # write immediately; there is nothing to promote later.
+            bk.save_bytes(key, data)
+            staged_path, sha = None, bk.sha256(key)
+    except Exception:
+        # The write itself failed — give the reservation straight back.
+        if charge:
+            release_quota(tenant_id, backend_name, charge)
+        raise
+
+    return StagedObject(
+        key=key,
+        staged_path=staged_path,
+        sha256=sha,
+        size=charge,
+        tenant_id=tenant_id,
+        backend_name=backend_name,
+        bytes_written=len(data),
+    )
+
+
+def purge_stale_temp_files(backend_name: str | None = None,
+                           max_age_seconds: int = 3600) -> int:
+    """Sweep abandoned `.tmp_*` staged files (H09 maintenance helper)."""
+    bk = _resolve(backend_name)
+    if not hasattr(bk, "purge_stale_temp_files"):
+        return 0
+    return bk.purge_stale_temp_files(max_age_seconds)
 
 
 def save_dataset(ds: Dataset, backend_name: str | None = None) -> tuple[str, str]:

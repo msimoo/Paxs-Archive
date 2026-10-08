@@ -8,6 +8,8 @@ safe no-op when warm-on-open is disabled.
 
 from __future__ import annotations
 
+import pytest
+
 from tests.helpers import build_stow_body, ds_bytes, make_instance, stow_headers
 
 CT = "1.2.840.10008.5.1.4.1.1.2"
@@ -229,3 +231,13 @@ def test_warm_does_not_break_frame_requests(client, monkeypatch):
     assert resp.headers.get("content-type", "").startswith(
         "application/octet-stream"
     )
+
+
+# --------------------------------------------------------------------------- #
+# C03: DICOMweb is private by default, so this module's requests carry a valid
+# ADMIN bearer token. (No test here asserts anonymous behaviour.)
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

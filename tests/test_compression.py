@@ -144,11 +144,17 @@ def test_default_compression_htj2k_flows_through_worker(monkeypatch):
     method HTJ2K, the worker's _process_job compresses the stored instance,
     and the instance row + file both carry the HTJ2K transfer syntax."""
     monkeypatch.setattr(settings, "DEFAULT_COMPRESSION", "HTJ2K")
-    key, _ds = _ingest_one()
+    key, ds = _ingest_one()
 
     with SyncSessionLocal() as s:
+        # Select *this* test's job. Querying "any PENDING job" made the test
+        # order-dependent: a leftover row from an earlier test (queued with the
+        # default JPEG-LS) could win and fail the HTJ2K assertion below.
+        inst = s.execute(
+            select(Instance).where(Instance.sop_instance_uid == str(ds.SOPInstanceUID))
+        ).scalar_one()
         job = s.execute(
-            select(CompressionJob).where(CompressionJob.status == "PENDING")
+            select(CompressionJob).where(CompressionJob.instance_id == inst.id)
         ).scalars().first()
         assert job is not None
         assert job.method == "HTJ2K"  # job inherits DEFAULT_COMPRESSION

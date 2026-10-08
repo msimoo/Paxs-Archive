@@ -81,6 +81,9 @@ def _new_local(name, root, client, admin, is_default=False):
 # Auth gates
 # --------------------------------------------------------------------------- #
 def test_storage_requires_auth(client):
+    # The autouse `admin` fixture logged in on this client, and the API also
+    # accepts cookie sessions (C03), so clear the jar to be anonymous.
+    client.cookies.clear()
     assert client.get("/api/v1/storage/backends").status_code == 401
     assert client.post("/api/v1/storage/backends", json={}).status_code == 401
 

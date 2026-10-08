@@ -381,7 +381,10 @@ def test_rest_find_validation(client):
     _register_node(client, admin_h, "GHOST", "127.0.0.1", 1)
     r = client.post("/api/v1/nodes/GHOST/find", headers=admin_h, json={"level": "STUDY"})
     assert r.status_code == 502
-    # No auth -> 401
+    # No auth -> 401. Logging in above left a session cookie in the shared test
+    # client, and these routes also accept cookie sessions (C03), so the jar
+    # must be cleared for this request to be genuinely anonymous.
+    client.cookies.clear()
     r = client.post("/api/v1/nodes/PAXS_TEST_SCP/find", json={"level": "STUDY"})
     assert r.status_code == 401
 

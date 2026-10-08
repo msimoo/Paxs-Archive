@@ -28,7 +28,14 @@ def to_sync_url(url: str) -> str:
 
 
 config = context.config
-config.set_main_option("sqlalchemy.url", to_sync_url(settings.DATABASE_URL))
+# H12: a caller may pass the target URL explicitly (config.attributes), so a
+# migration never depends on — or mutates — the process-global settings.
+_override = None
+try:
+    _override = config.attributes.get("paxs_migration_url")
+except Exception:  # noqa: BLE001 - attributes is optional
+    _override = None
+config.set_main_option("sqlalchemy.url", to_sync_url(_override or settings.DATABASE_URL))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)

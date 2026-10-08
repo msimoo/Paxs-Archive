@@ -137,6 +137,11 @@ def _apply(stmt: Select, column, kind: str, value: str) -> Select:
 
 # --------------------------------------------------------------------------- #
 # VNA tenant scoping
+#
+# C04: `include_all` now defaults to **False** on every builder below. Tenant
+# scoping is the default and archive-wide access is the explicit opt-in, so a
+# caller that forgets the argument gets the safe behaviour instead of every
+# institution's data.
 # --------------------------------------------------------------------------- #
 def apply_study_tenant_scope(stmt: Select, tenant_id: int | None = None,
                              include_all: bool = False) -> Select:
@@ -155,14 +160,14 @@ def apply_study_tenant_scope(stmt: Select, tenant_id: int | None = None,
 # Convenience builders
 # --------------------------------------------------------------------------- #
 def study_query(filters: dict | None = None, tenant_id: int | None = None,
-                include_all: bool = True) -> Select:
+                include_all: bool = False) -> Select:
     stmt = select(Study).options(joinedload(Study.patient))
     stmt = apply_study_filters(stmt, filters or {})
     return apply_study_tenant_scope(stmt, tenant_id, include_all)
 
 
 def series_query(study_uid: str | None = None, filters: dict | None = None,
-                 tenant_id: int | None = None, include_all: bool = True) -> Select:
+                 tenant_id: int | None = None, include_all: bool = False) -> Select:
     if not include_all:
         # Scoped: join Study once (covers both the tenant filter and, when
         # given, the study-UID restriction).
@@ -176,7 +181,7 @@ def series_query(study_uid: str | None = None, filters: dict | None = None,
 
 def instance_query(study_uid: str | None = None, series_uid: str | None = None,
                    filters: dict | None = None, tenant_id: int | None = None,
-                   include_all: bool = True) -> Select:
+                   include_all: bool = False) -> Select:
     if not include_all:
         stmt = (
             select(Instance)

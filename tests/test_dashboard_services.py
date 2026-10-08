@@ -7,6 +7,9 @@ SOP class and roles, plus the web/integration layers, and ``/api/v1/stats``
 carries a compact ``features.dicom_services`` counter for the feature card.
 """
 
+import pytest
+
+
 from app.core.config import settings
 from app.api.v1.dashboard import DIMSE_SERVICES
 
@@ -89,3 +92,15 @@ def test_stats_feature_modules_still_present(client):
                 "routing", "lossy_compression", "migration", "kin",
                 "triage", "audit", "tenants"):
         assert key in f, f"missing feature module {key}"
+
+
+# --------------------------------------------------------------------------- #
+# C03: the volume / FHIR / GSPS / dashboard / metrics routes require
+# authentication. Override the anonymous ``client`` fixture for this module so
+# its requests carry a valid ADMIN bearer token. Tests that assert anonymous
+# rejection live in test_route_auth_matrix.py and use ``anonymous_client``.
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

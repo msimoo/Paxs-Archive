@@ -16,7 +16,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.core.config import settings
+from app.api.v1.deps import get_current_user_any, require_study_access, tenant_scope
+from app.core.config import resolve_public_base_url, settings
 from app.db.models import Patient, Series, Study
 from app.db.session import get_db
 from app.services import query_service
@@ -24,7 +25,7 @@ from app.services import query_service
 router = APIRouter(prefix="/fhir", tags=["FHIR R4"])
 
 FHIR_JSON = "application/fhir+json"
-SERVER_BASE = settings.PUBLIC_BASE_URL + "/fhir"
+SERVER_BASE = resolve_public_base_url() + "/fhir"
 
 
 def _fhir_response(data: dict, status: int = 200) -> Response:
@@ -62,6 +63,22 @@ def _fhir_gender(sex: str | None) -> str | None:
         return None
     s = sex.strip().upper()
     return {"M": "male", "F": "female", "O": "other", "U": "unknown"}.get(s, "unknown")
+
+
+def _tenant_predicate(column, tenant_id: int | None, include_all: bool):
+    """Tenant-isolation predicate matching ``query_service.apply_study_tenant_scope``.
+
+    * ``include_all`` (ADMIN)      -> ``None`` (no restriction, every tenant);
+    * ``tenant_id`` given          -> ``column == tenant_id``;
+    * ``tenant_id`` is None        -> ``column IS NULL`` (the legacy/unscoped bucket).
+
+    Using the same convention as the Study-scoped query builders (C04) is what
+    keeps a tenant user from ever seeing another institution's rows — including a
+    direct patient read by numeric id (C05).
+    """
+    if include_all:
+        return None
+    return column.is_(None) if tenant_id is None else column == tenant_id
 
 
 def _imagingstudy_resource(study: Study, patient: Patient,
@@ -128,9 +145,17 @@ async def search_patient(
     identifier: str | None = Query(None),
     name: str | None = Query(None),
     _count: int = Query(50, alias="_count", ge=1, le=500),
+    _user=Depends(get_current_user_any),
 ):
     stmt = select(Patient)
     conds = []
+    # C05: patient search is tenant-scoped, exactly like ImagingStudy search.
+    # Without this a tenant-A user could enumerate every institution's
+    # demographics (name / MRN / birth date / sex).
+    _tenant_id, _include_all = tenant_scope(_user)
+    _tp = _tenant_predicate(Patient.tenant_id, _tenant_id, _include_all)
+    if _tp is not None:
+        conds.append(_tp)
     if _id:
         try:
             conds.append(Patient.id == int(_id))
@@ -156,13 +181,20 @@ async def search_patient(
 
 
 @router.get("/Patient/{patient_id}", response_class=Response)
-async def read_patient(patient_id: str, db: AsyncSession = Depends(get_db)):
+async def read_patient(patient_id: str, db: AsyncSession = Depends(get_db),
+                       _user=Depends(get_current_user_any)):
     try:
         pid = int(patient_id)
     except ValueError:
         raise HTTPException(400, "Patient id must be numeric")
     patient = (await db.execute(select(Patient).where(Patient.id == pid))).scalar_one_or_none()
     if patient is None:
+        raise HTTPException(404, "Patient not found")
+    # C05: a direct id read must respect the tenant boundary. A cross-tenant
+    # patient — or a legacy NULL-tenant row seen by a tenant user — is a 404,
+    # never a 403, so existence is not disclosed.
+    _tenant_id, _include_all = tenant_scope(_user)
+    if not _include_all and patient.tenant_id != _tenant_id:
         raise HTTPException(404, "Patient not found")
     return _fhir_response(_patient_resource(patient))
 
@@ -173,6 +205,7 @@ async def search_imagingstudy(
     patient: str | None = Query(None),
     accession: str | None = Query(None),
     _count: int = Query(50, alias="_count", ge=1, le=500),
+    _user=Depends(get_current_user_any),
 ):
     stmt = (
         select(Study)
@@ -180,6 +213,12 @@ async def search_imagingstudy(
         .join(Patient, Study.patient_id == Patient.id)
     )
     conds = []
+    # C04: search results are tenant-scoped, not just direct reads. Added to
+    # `conds` so the page query and the total-count query agree.
+    _tenant_id, _include_all = tenant_scope(_user)
+    _tp = _tenant_predicate(Study.tenant_id, _tenant_id, _include_all)
+    if _tp is not None:
+        conds.append(_tp)
     if patient:
         if patient.startswith("Patient/"):
             try:
@@ -232,15 +271,15 @@ async def search_imagingstudy(
 
 
 @router.get("/ImagingStudy/{study_uid}", response_class=Response)
-async def read_imagingstudy(study_uid: str, db: AsyncSession = Depends(get_db)):
+async def read_imagingstudy(study_uid: str, db: AsyncSession = Depends(get_db),
+                            _user=Depends(get_current_user_any)):
+    # C04: a FHIR read is still a read of one institution's study.
+    study = await require_study_access(db, study_uid, _user)
     study = (
         await db.execute(
-            select(Study).options(joinedload(Study.patient))
-            .where(Study.study_instance_uid == study_uid)
+            select(Study).options(joinedload(Study.patient)).where(Study.id == study.id)
         )
-    ).scalar_one_or_none()
-    if study is None:
-        raise HTTPException(404, "ImagingStudy not found")
+    ).scalar_one()
     series_rows = (await db.execute(
         select(Series).where(Series.study_id == study.id)
     )).scalars().all()

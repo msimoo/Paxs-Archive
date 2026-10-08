@@ -22,7 +22,7 @@ from sqlalchemy import select
 
 from app.db.models import AuditLog, DicomNode, Study
 from app.db.session import SyncSessionLocal
-from tests.helpers import build_stow_body, ds_bytes, make_instance, stow_headers
+from tests.helpers import auth_for_role, build_stow_body, ds_bytes, make_instance, stow_headers
 from tests.test_receiver import _store_via_scu
 
 
@@ -87,6 +87,16 @@ def _stow(client, ds, boundary="cstore-1"):
     )
     assert r.status_code == 200, r.text
     return r
+
+
+def _set_study_tenant(study_uid: str, tenant_id: int) -> None:
+    """Move a stored study into ``tenant_id`` (C04 isolation fixtures)."""
+    with SyncSessionLocal() as s:
+        study = s.execute(
+            select(Study).where(Study.study_instance_uid == study_uid)
+        ).scalar_one()
+        study.tenant_id = tenant_id
+        s.commit()
 
 
 def _wait_stored(study_uid):
@@ -340,7 +350,10 @@ def test_rest_send_validation(client):
         r = client.post("/api/v1/nodes/PAXS_DEST/send", headers=admin_h,
                         json={"study_uids": ["1.2.3.4.999.999"]})
         assert r.status_code == 404
-        # Unauthenticated -> 401
+        # Unauthenticated -> 401. Logging in above left a session cookie in the
+        # shared test client, and these routes also accept cookie sessions
+        # (C03), so the jar must be cleared to be genuinely anonymous.
+        client.cookies.clear()
         r = client.post("/api/v1/nodes/PAXS_DEST/send",
                         json={"study_uids": ["1.2.3.4"]})
         assert r.status_code == 401
@@ -367,15 +380,23 @@ def test_rest_send_vna_scoped(client):
                     json={"name": "Tenant C", "code": "tc"})
     assert r.status_code == 201, r.text
     tenant_id = r.json()["id"]
-    rad_h = _auth(client, "dr.tenantc", role="RADIOLOGIST")
+    # H02: privileged roles cannot self-register, so the radiologist is
+    # provisioned through the admin API instead of /auth/register.
+    rad_h = auth_for_role(client, "dr.tenantc", role="RADIOLOGIST", admin=admin_h)
     assert client.post(f"/api/v1/tenants/{tenant_id}/users", headers=admin_h,
                        json={"username": "dr.tenantc"}).status_code == 200
 
-    # A study lands in the legacy unscoped scope (STOW by admin).
+    # A study is stored, then parked in ANOTHER tenant so the check below is a
+    # real cross-tenant isolation test: ingest attributes a study to its
+    # storing caller's tenant (here the default tenant, which is tenant C).
     study_uid = "1.2.840.113619.2.408.630"
     _stow(client, make_instance(study_uid=study_uid, series_uid="1.2.3.4.630",
                                 sop_uid="1.2.3.5.630.1"))
     _wait_stored(study_uid)
+    other = client.post("/api/v1/tenants", headers=admin_h,
+                        json={"name": "Tenant D", "code": "td"})
+    assert other.status_code == 201, other.text
+    _set_study_tenant(study_uid, other.json()["id"])
 
     dest_port = _free_port()
     dest_ae, received = _recording_scp(dest_port)

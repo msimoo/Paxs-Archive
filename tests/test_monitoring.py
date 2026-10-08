@@ -1,5 +1,8 @@
 """Tests for the Prometheus /metrics endpoint (deploy/MONITORING.md)."""
 
+import pytest
+
+
 from app.services.compression_service import codec_status
 from tests.test_dicomweb import _upload_study
 
@@ -86,3 +89,15 @@ def test_metrics_http_counter_increments(client):
             break
     else:  # pragma: no cover
         raise AssertionError("paxs_http_requests_total missing")
+
+
+# --------------------------------------------------------------------------- #
+# C03: the volume / FHIR / GSPS / dashboard / metrics routes require
+# authentication. Override the anonymous ``client`` fixture for this module so
+# its requests carry a valid ADMIN bearer token. Tests that assert anonymous
+# rejection live in test_route_auth_matrix.py and use ``anonymous_client``.
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

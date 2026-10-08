@@ -94,4 +94,5 @@ def test_physician_cannot_delete_or_destroy_shares(client):
     assert denied_share.status_code == 403
 
     # The study still exists.
-    assert client.get(f"/api/v1/studies/{study_uid}").status_code == 200
+    assert client.get(f"/api/v1/studies/{study_uid}",
+                      headers={"Authorization": f"Bearer {token}"}).status_code == 200

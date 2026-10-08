@@ -33,7 +33,9 @@ def set_session_cookie(response, token: str) -> None:
         token,
         max_age=COOKIE_MAX_AGE,
         httponly=True,
-        samesite="lax",
+        # H06: the SameSite policy is operator-configured (and validated at
+        # startup in production) instead of being hardcoded here.
+        samesite=settings.AUTH_COOKIE_SAMESITE,
         secure=settings.AUTH_COOKIE_SECURE,
         path="/",
     )

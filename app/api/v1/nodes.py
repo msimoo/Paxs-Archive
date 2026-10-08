@@ -174,7 +174,9 @@ async def ping_node(ae_title: str, db: AsyncSession = Depends(get_db),
     from app.dicom.sender import send_echo
 
     try:
-        result = send_echo(node.host, node.port, node.ae_title)
+        # Off the event loop: a C-ECHO opens a DIMSE association (up to ~30 s
+        # against an unreachable peer) and must not stall every other request.
+        result = await asyncio.to_thread(send_echo, node.host, node.port, node.ae_title)
     except Exception as exc:
         log.warning("C-ECHO to %s failed: %s", ae_title, exc)
         return {"ae_title": ae_title, "ok": False, "reason": str(exc)}

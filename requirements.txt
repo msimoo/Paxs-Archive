@@ -27,9 +27,12 @@ imagecodecs>=2024.1        # HTJ2K codec (bundles the openjph codec). Required f
                            # encodes HTJ2K itself via imagecodecs.htj2k_encode.
 
 # ---- Optional (install for richer compression / production scale) ----
-# boto3>=1.34                # S3/MinIO object-storage backend (STORAGE_BACKEND=s3)
+boto3>=1.34                 # S3/MinIO object-storage backend (STORAGE_BACKEND=s3)
+botocore>=1.34              # boto3 runtime dependency, declared explicitly so the
+                           # production image never resolves it implicitly
 # celery>=5.4               # distributed task queue
 # redis>=5.0
+# ldap3>=2.9                # LDAP / Active Directory login (LDAP_ENABLED=true)
 
 # ---- Dev / tests ----
 pytest>=8.2

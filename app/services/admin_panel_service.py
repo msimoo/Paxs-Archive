@@ -32,7 +32,7 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
-from app.core.config import settings
+from app.core.config import resolve_public_base_url, settings
 
 log = logging.getLogger("paxs.admin_panel")
 
@@ -329,7 +329,10 @@ class AdminPanelService:
     # ------------------------------------------------------------------ #
     def launch(self, target: str) -> dict:
         """open-viewer / open-admin: open the PAXS-hosted UI in a browser tab."""
-        url_map = {"viewer": f"{settings.PUBLIC_BASE_URL}/viewer/", "admin": f"{settings.PUBLIC_BASE_URL}/admin/"}
+        url_map = {
+            "viewer": f"{resolve_public_base_url()}/viewer/",
+            "admin": f"{resolve_public_base_url()}/admin/",
+        }
         url = url_map.get(target)
         if not url:
             return {"ok": False, "error": f"unknown target {target!r}"}

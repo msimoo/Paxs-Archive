@@ -64,8 +64,8 @@ echo ----------------------------------------------------------------
 echo.
 echo Health Endpoints:
 echo   - Backend & DICOM: http://0.0.0.0/health
-echo   - Web Dashboard:   http://0.0.0.0
-echo   - PaxsViewer:      http://0.0.0.0/viewer/
+echo   - Web Dashboard:   http://0.0.0.0:8000
+echo   - PaxsViewer:      http://0.0.0.0:8000/viewer/
 echo.
 echo ----------------------------------------------------------------
 echo Choose an option:
@@ -131,12 +131,14 @@ timeout /t 1 /nobreak >nul
 
 echo Starting PAXS Backend...
 cd /d "%~dp0"
+REM cmd /k keeps the window open on crash so the traceback stays readable.
+REM Explicit venv target; no silent fallback to a global "python".
 if exist "venv\Scripts\python.exe" (
-    start "PAXS Archive Server" venv\Scripts\python.exe run_paxs.py
+    start "PAXS Archive Server" cmd /k venv\Scripts\python.exe run_paxs.py
 ) else if exist "PAXS-Server.exe" (
     start "PAXS Archive Server" PAXS-Server.exe
 ) else (
-    start "PAXS Archive Server" python run_paxs.py
+    echo [!] Neither venv\Scripts\python.exe nor PAXS-Server.exe found - cannot start backend.
 )
 timeout /t 2 /nobreak >nul
 goto menu

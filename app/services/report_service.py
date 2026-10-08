@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
-from app.db.models import Patient, RadiologyReport, Study
+from app.db.models import Patient, RadiologyReport, ReportAddendum, Study
 from app.db.session import SyncSessionLocal
 
 log = logging.getLogger("paxs.report")
@@ -115,6 +115,41 @@ async def update_report(session, report: RadiologyReport, data: dict) -> Radiolo
             setattr(report, field, data[field])
     await session.flush()
     return report
+
+
+# --------------------------------------------------------------------------- #
+# Addenda (C06)
+#
+# A FINALIZED report is the signed record: its clinical fields are never
+# rewritten. Follow-up text goes into an append-only addendum, attributed to the
+# authenticated author, so the original stays intact and auditable.
+# --------------------------------------------------------------------------- #
+async def add_addendum(session, report: RadiologyReport, text: str,
+                       author: str) -> ReportAddendum:
+    """Append an addendum to a FINALIZED report. Raises ValueError otherwise."""
+    body = (text or "").strip()
+    if not body:
+        raise ValueError("Addendum text is required")
+    if report.status != "FINALIZED":
+        raise ValueError(
+            "Addenda can only be added to FINALIZED reports; edit the draft instead"
+        )
+    addendum = ReportAddendum(report_id=report.id, author=author or "", text=body)
+    session.add(addendum)
+    await session.flush()
+    return addendum
+
+
+async def list_addenda(session, report_id: int) -> list[ReportAddendum]:
+    """Addenda for a report, oldest first (the order they were signed in)."""
+    rows = (
+        await session.execute(
+            select(ReportAddendum)
+            .where(ReportAddendum.report_id == report_id)
+            .order_by(ReportAddendum.created_at, ReportAddendum.id)
+        )
+    ).scalars().all()
+    return list(rows)
 
 
 # --------------------------------------------------------------------------- #

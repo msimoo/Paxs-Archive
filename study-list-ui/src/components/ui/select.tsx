@@ -109,10 +109,25 @@ const SelectLabel = React.forwardRef<
 ))
 SelectLabel.displayName = SelectPrimitive.Label.displayName
 
+// H17: Radix reserves the empty string for "no selection", so an empty-value
+// SelectItem silently breaks the control. Fail loudly while developing.
+function assertNonEmptyValue(value: unknown) {
+  if (value === '') {
+    const msg =
+      'SelectItem received value="". Use a non-empty sentinel (e.g. "all") and ' +
+      'map it to an empty filter at the call site.';
+    if (import.meta.env?.DEV) throw new Error(msg);
+    console.warn(msg);
+  }
+}
+
 const SelectItem = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
->(({ className, children, ...props }, ref) => (
+>(({ className, children, ...props }, ref) => {
+  // H17: Radix reserves "" for the placeholder — refuse it loudly.
+  assertNonEmptyValue(props.value);
+  return (
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
@@ -129,7 +144,8 @@ const SelectItem = React.forwardRef<
 
     <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
   </SelectPrimitive.Item>
-))
+  );
+});
 SelectItem.displayName = SelectPrimitive.Item.displayName
 
 const SelectSeparator = React.forwardRef<

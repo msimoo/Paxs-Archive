@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import logging
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from http.cookies import SimpleCookie
 from urllib.parse import quote
@@ -163,8 +164,8 @@ DEFAULT_CACHE = "public, max-age=86400"
 _NO_CACHE_NAMES = {
     "index.html", "app-config.js", "manifest.json", "sw.js",
     "viewer-version.txt", "silent-refresh.html", "google.js",
-    "init-service-worker.js", "paxs-mpr.js", "paxs-study-list-enhance.js",
-    "paxs-study-list-theme.css",
+    "init-service-worker.js", "paxs-mpr.js", "paxs-mpr-geometry.js",
+    "paxs-study-list-enhance.js", "paxs-study-list-theme.css",
 }
 _HASH_STEM = re.compile(r"[0-9a-fA-F]{12,}")
 
@@ -189,6 +190,74 @@ def _cache_control_for(path: str) -> str:
     if re.fullmatch(r"index-[A-Za-z0-9_-]{8,}", stem):
         return IMMUTABLE_CACHE
     return DEFAULT_CACHE
+
+
+# --------------------------------------------------------------------------- #
+# SPA shell responses (V2-4 — sub-path / reverse-proxy support).
+#
+# Every SPA entry point is served through here. When the app is mounted under a
+# sub-path, the shell's root-absolute asset references are prefixed and a small
+# runtime boot shim is injected so runtime-built URLs (and the dashboard's
+# literal '/api/v1/...' calls) resolve too.
+#
+# With no prefix configured this is exactly FileResponse — same bytes, same
+# headers — so a root-mounted deployment is unchanged.
+# --------------------------------------------------------------------------- #
+_SHELL_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _read_shell(path: Path) -> str:
+    """Read a shell/config file, memoised on mtime (re-read on every page load)."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    key = str(path)
+    hit = _SHELL_CACHE.get(key)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    text = path.read_text(encoding="utf-8")
+    _SHELL_CACHE[key] = (mtime, text)
+    return text
+
+
+def _active_prefix(request: Request) -> str:
+    """The sub-path for this request: X-Forwarded-Prefix (via scope) else ROOT_PATH."""
+    from app.core.proxy_prefix import normalise_prefix
+
+    prefix = normalise_prefix(request.scope.get("root_path") or "")
+    return prefix or normalise_prefix(settings.ROOT_PATH or "")
+
+
+def _spa_shell(path: Path, request: Request, *, media_type: str = "text/html") -> Response:
+    """Serve an SPA entry HTML, prefix-aware when a sub-path is in play."""
+    prefix = _active_prefix(request)
+    if not prefix:
+        response = FileResponse(path, media_type=media_type)
+        response.headers["Cache-Control"] = NO_CACHE
+        return response
+    from app.core.config import resolve_public_base_url
+    from app.core.proxy_prefix import inject_boot
+
+    body = inject_boot(_read_shell(path), prefix, resolve_public_base_url(request))
+    response = HTMLResponse(body, media_type=media_type)
+    response.headers["Cache-Control"] = NO_CACHE
+    return response
+
+
+def _prefixed_text_asset(path: Path, request: Request, media_type: str) -> Response:
+    """Serve a text asset (e.g. app-config.js) with root-absolute paths prefixed."""
+    prefix = _active_prefix(request)
+    cache = _cache_control_for(path.name)
+    if not prefix:
+        response = FileResponse(path, media_type=media_type)
+        response.headers["Cache-Control"] = cache
+        return response
+    from app.core.proxy_prefix import prefix_markup
+
+    response = Response(prefix_markup(_read_shell(path), prefix), media_type=media_type)
+    response.headers["Cache-Control"] = cache
+    return response
 
 
 class CachedStaticFiles(StaticFiles):
@@ -314,8 +383,14 @@ class ViewerAuthGateMiddleware:
         }
         token = _cookie_value(headers.get("cookie", ""), settings.AUTH_COOKIE_NAME)
         if not token:
-            next_url = quote(path + (f"?{query}" if query else ""), safe="")
-            response = RedirectResponse(f"/login?next={next_url}", status_code=303)
+            # V2-4: browser-facing redirect, so it must carry the mount prefix
+            # (otherwise /paxs/studies-ui bounces to /login, outside the app).
+            from app.core.proxy_prefix import prefix_path
+            root = scope.get("root_path") or ""
+            next_url = quote(prefix_path(root, path) + (f"?{query}" if query else ""), safe="")
+            response = RedirectResponse(
+                f"{prefix_path(root, '/login')}?next={next_url}", status_code=303
+            )
             await response(scope, receive, send)
             return
         if path in _SPA_ENTRY_PATHS:
@@ -324,8 +399,12 @@ class ViewerAuthGateMiddleware:
             from starlette.requests import Request
             user = await get_current_user_from_cookie(Request(scope))
             if user is None:
-                next_url = quote(path + (f"?{query}" if query else ""), safe="")
-                response = RedirectResponse(f"/login?next={next_url}", status_code=303)
+                from app.core.proxy_prefix import prefix_path
+                root = scope.get("root_path") or ""
+                next_url = quote(prefix_path(root, path) + (f"?{query}" if query else ""), safe="")
+                response = RedirectResponse(
+                    f"{prefix_path(root, '/login')}?next={next_url}", status_code=303
+                )
                 await response(scope, receive, send)
                 return
         await self.app(scope, receive, send)
@@ -370,6 +449,30 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+async def _storage_sweep_loop() -> None:
+    """Periodically purge abandoned staged objects (H09).
+
+    A crash between staging and publishing leaves a `.tmp_*` file behind. The
+    sweeper only ever removes temporary files older than an hour — a published
+    object is never a candidate — so this cannot damage the archive.
+    """
+    from app.services import storage_service
+
+    interval = 3600
+    while True:
+        try:
+            removed = await asyncio.to_thread(
+                storage_service.purge_stale_temp_files, None, interval
+            )
+            if removed:
+                log.info("Storage sweep removed %d stale staged file(s)", removed)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning("Storage sweep failed", exc_info=True)
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # Widen the default executor before anything starts serving requests —
@@ -380,6 +483,17 @@ async def lifespan(_app: FastAPI):
     asyncio.get_running_loop().set_default_executor(
         ThreadPoolExecutor(max_workers=settings.IO_THREAD_POOL_WORKERS, thread_name_prefix="paxs-io")
     )
+    # H06: fail closed before serving anything if the configuration is
+    # insecure in production (default JWT secret, insecure cookies, ...).
+    from app.core.config import validate_memory_budgets, validate_production_settings
+
+    validate_production_settings(settings)
+    # Cache memory budgets (V1-2 / V3-6) are tuning, not security, so an
+    # incoherent combination is reported rather than fatal — a server that
+    # refuses to boot over a cache size would be worse than one that tells you
+    # the cache will thrash.
+    for _warning in validate_memory_budgets(settings):
+        log.warning("cache budget: %s", _warning)
     await init_db()
     # Replay persisted admin-settings overrides before any service binds, so
     # boot-consumed keys (AE title, ports, toggles) honor the last edit.
@@ -404,6 +518,8 @@ async def lifespan(_app: FastAPI):
                 log.warning("License background heartbeat error: %s", exc)
 
     _hb_task = asyncio.create_task(_heartbeat_loop()) if settings.LICENSE_AUTO_VALIDATE_ONLINE else None
+    # H09: sweep abandoned `.tmp_*` staged files hourly.
+    _sweep_task = asyncio.create_task(_storage_sweep_loop())
 
     log.info("%s v%s ready — API http://0.0.0.0  DICOM %s:%s%s",
              settings.APP_NAME, settings.APP_VERSION,
@@ -412,6 +528,7 @@ async def lifespan(_app: FastAPI):
     yield
     if _hb_task:
         _hb_task.cancel()
+    _sweep_task.cancel()
     shutdown_receiver()
     stop_worker()
     shutdown_hl7()
@@ -450,6 +567,15 @@ app.add_middleware(metrics_module.MetricsMiddleware)
 # Viewer auth gate — added late so it is the outermost middleware: it decides
 # /viewer + /studies-ui access before gzip / metrics / rate-limit ever run.
 app.add_middleware(ViewerAuthGateMiddleware)
+# Reverse-proxy prefix (V2-4) — must run OUTSIDE the auth gate, because the gate
+# matches on scope["path"]: a non-stripping proxy (Traefik without StripPrefix)
+# delivers "/paxs/viewer/..." and the gate would not recognise it. Added after
+# the gate so it is more outer; SecurityHeaders is still added last/outermost.
+from app.core.proxy_prefix import ForwardedPrefixMiddleware  # noqa: E402
+app.add_middleware(
+    ForwardedPrefixMiddleware,
+    trusted_hosts=settings.FORWARDED_ALLOW_IPS,
+)
 # Security headers — added last so they wrap everything (outermost).
 app.add_middleware(SecurityHeadersMiddleware)
 
@@ -553,6 +679,8 @@ from app.api.v1 import settings as settings_v1_router  # noqa: E402
 app.include_router(settings_v1_router.router)
 if settings.FHIR_ENABLED:
     app.include_router(fhir.router)
+# H18: registered independently — turning FHIR off must not remove fusion.
+if settings.FUSION_ENABLED:
     app.include_router(fusion.router)
 
 # Web dashboard + viewer
@@ -561,18 +689,39 @@ if STATIC_DIR.exists():
 
 
     @app.get("/", include_in_schema=False)
-    async def index():
-        response = FileResponse(STATIC_DIR / "index.html")
-        response.headers["Cache-Control"] = NO_CACHE
-        return response
+    async def index(request: Request):
+        return _spa_shell(STATIC_DIR / "index.html", request)
 else:  # pragma: no cover
     log.warning("static/ directory not found — dashboard UI disabled")
 
 # Single-page-app static mount: unknown paths under the mount (deep links the
 # client-side router handles) serve index.html instead of 404. Used by both
 # the PaxsViewer bundle (/viewer) and the Control Panel bundle (/admin).
+#
+# V1-5: the fallback must NOT swallow missing *assets*. Serving index.html for a
+# missing .wasm/.js/.css returns 200 with the wrong MIME type, which the browser
+# reports as a cryptic "WebAssembly.instantiateStreaming failed" or
+# "Unexpected token '<'" far from the real cause — that masking is what made a
+# genuinely absent codec file look like a decoding bug. Only extension-less
+# (navigation) paths fall back.
+_ASSET_EXTENSIONS = {
+    ".js", ".mjs", ".cjs", ".css", ".wasm", ".map", ".json", ".jsonld",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".ico", ".svg",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".txt", ".xml", ".pdf", ".csv", ".dcm", ".nii", ".npy",
+    ".mp4", ".webm", ".mp3", ".wav",
+    # Archives / raw binary — never a client-side navigation route.
+    ".gz", ".br", ".zip", ".7z", ".tar", ".bin", ".dat",
+}
+
+
 class SpaStaticFiles(CachedStaticFiles):
-    """StaticFiles with a single-page-app fallback to index.html on 404."""
+    """StaticFiles with a single-page-app fallback to index.html on 404.
+
+    The fallback applies only to navigation-style paths (no file extension), so
+    a missing bundle chunk / wasm / image still returns an honest 404 instead of
+    an HTML document with a 200 (V1-5).
+    """
 
     async def get_response(self, path: str, scope):
         try:
@@ -581,9 +730,13 @@ class SpaStaticFiles(CachedStaticFiles):
             # staticfiles raises starlette.exceptions.HTTPException, which is
             # the *base* of fastapi.HTTPException — catching only the fastapi
             # subclass would let the 404 escape and break client-side deep links.
-            if exc.status_code == 404:
-                return await super().get_response("index.html", scope)
-            raise
+            if exc.status_code != 404:
+                raise
+            # A path that names a file type is an asset request: 404 honestly.
+            ext = os.path.splitext(path.rsplit("/", 1)[-1])[1].lower()
+            if ext in _ASSET_EXTENSIONS:
+                raise
+            return await super().get_response("index.html", scope)
 
 # PaxsViewer (the PaxsViewer v3 fork) — DICOMweb-based study browser, served
 # same-origin from app/static/viewer so its QIDO/WADO/STOW requests to
@@ -602,20 +755,53 @@ if VIEWER_DIR.exists():
     @app.get("/viewer/viewer", include_in_schema=False)
     async def viewer_root_study_list(request: Request):
         """Serve the upgraded React + Tailwind + shadcn/ui PACS Study List for root /viewer.
-        
+
         Deep-links with ?StudyInstanceUIDs=... pass through to PAXs's DICOM image viewer.
+
+        Patient share links (?share=<token>) additionally receive a study-scoped
+        cookie, so the bundled viewer's DICOMweb/volume reads keep working when
+        DICOMWEB_PUBLIC is false (plan_9_2026.md C03).
         """
         if request.query_params.get("StudyInstanceUIDs") or request.query_params.get("study"):
-            response = FileResponse(VIEWER_DIR / "index.html")
-            response.headers["Cache-Control"] = NO_CACHE
-            return response
-        if STUDIES_UI_DIR.exists():
-            response = FileResponse(STUDIES_UI_DIR / "index.html")
-            response.headers["Cache-Control"] = NO_CACHE
-            return response
-        response = FileResponse(VIEWER_DIR / "index.html")
-        response.headers["Cache-Control"] = NO_CACHE
+            shell = VIEWER_DIR / "index.html"
+        elif STUDIES_UI_DIR.exists():
+            shell = STUDIES_UI_DIR / "index.html"
+        else:
+            shell = VIEWER_DIR / "index.html"
+        response = _spa_shell(shell, request)
+
+        share_token = request.query_params.get("share")
+        if share_token:
+            from app.api.v1.deps import SHARE_COOKIE_NAME, share_cookie_ttl
+
+            ttl = await share_cookie_ttl(share_token)
+            if ttl is not None:
+                response.set_cookie(
+                    SHARE_COOKIE_NAME,
+                    share_token,
+                    max_age=ttl,
+                    httponly=True,
+                    # Deliberately lax, not AUTH_COOKIE_SAMESITE: a share link
+                    # is followed from an external site, where SameSite=strict
+                    # would drop the cookie (and the share would not open).
+                    samesite="lax",
+                    secure=settings.AUTH_COOKIE_SECURE,
+                    path="/",
+                )
         return response
+
+    @app.get("/viewer/app-config.js", include_in_schema=False)
+    async def viewer_app_config(request: Request):
+        """PaxsViewer data-source config, prefix-aware under a sub-path (V2-4).
+
+        Registered before the /viewer mount so it wins route matching. The
+        viewer bundle derives its router basename and DICOMweb roots from this
+        file, so rewriting its root-absolute paths is what makes a sub-path
+        deployment work end to end.
+        """
+        return _prefixed_text_asset(
+            VIEWER_DIR / "app-config.js", request, "application/javascript"
+        )
 
     app.mount("/viewer", SpaStaticFiles(directory=VIEWER_DIR, html=True), name="viewer")
     log.info("PaxsViewer mounted at /viewer (v%s)",
@@ -641,9 +827,9 @@ if VIEWER_DIR.exists():
 else:
 
     @app.get("/viewer", include_in_schema=False)
-    async def viewer_fallback():
+    async def viewer_fallback(request: Request):
         """Built-in lightweight viewer while the PaxsViewer dist is absent."""
-        return FileResponse(STATIC_DIR / "viewer.html")
+        return _spa_shell(STATIC_DIR / "viewer.html", request)
 
     log.warning("app/static/viewer not found — using built-in viewer.html "
                 "(see deploy/PAXSVIEWER-INTEGRATION.md)")
@@ -655,8 +841,12 @@ if settings.ADMIN_PANEL_ENABLED and ADMIN_DIR.exists():
 
     @app.get("/admin", include_in_schema=False)
     @app.get("/admin/", include_in_schema=False)
-    async def admin_panel_page():
-        return FileResponse(ADMIN_DIR / "index.html")
+    async def admin_panel_page(request: Request):
+        # The Control Panel entry HTML embeds the hashed asset names, so it must
+        # revalidate on every load — the same policy the /viewer and /studies-ui
+        # entries apply. Without this the browser kept serving a stale shell that
+        # pointed at chunk files from a previous build.
+        return _spa_shell(ADMIN_DIR / "index.html", request)
 
     app.mount("/admin", SpaStaticFiles(directory=ADMIN_DIR, html=True), name="admin")
     log.info("PaxsViewer Control Panel mounted at /admin (v%s)",
@@ -668,8 +858,8 @@ STUDIES_UI_DIR = STATIC_DIR / "studies-ui"
 if STUDIES_UI_DIR.exists():
     @app.get("/studies-ui", include_in_schema=False)
     @app.get("/studies-ui/", include_in_schema=False)
-    async def studies_ui_page():
-        return FileResponse(STUDIES_UI_DIR / "index.html")
+    async def studies_ui_page(request: Request):
+        return _spa_shell(STUDIES_UI_DIR / "index.html", request)
 
     app.mount("/studies-ui", SpaStaticFiles(directory=STUDIES_UI_DIR, html=True), name="studies-ui")
     log.info("Upgraded PACS Study List UI (shadcn/ui) mounted at /studies-ui")
@@ -679,8 +869,8 @@ SETTINGS_UI_DIR = STATIC_DIR / "settings"
 if SETTINGS_UI_DIR.exists():
     @app.get("/settings", include_in_schema=False)
     @app.get("/settings/", include_in_schema=False)
-    async def settings_ui_page():
-        return FileResponse(SETTINGS_UI_DIR / "index.html")
+    async def settings_ui_page(request: Request):
+        return _spa_shell(SETTINGS_UI_DIR / "index.html", request)
 
     app.mount("/settings", SpaStaticFiles(directory=SETTINGS_UI_DIR, html=True), name="settings")
     log.info("Organization Settings Dashboard mounted at /settings")
@@ -702,19 +892,25 @@ async def login_page(request: Request):
     if user is not None:
         # Already signed in — jump straight to their landing (or ?next=).
         next_url = request.query_params.get("next")
-        return RedirectResponse(role_landing(user.role, next_url), status_code=303)
+        return RedirectResponse(
+            role_landing(user.role, next_url, request.scope.get("root_path") or ""),
+            status_code=303,
+        )
     if not LOGIN_PAGE.exists():
         raise HTTPException(404, "login page not built")
-    response = FileResponse(LOGIN_PAGE)
-    response.headers["Cache-Control"] = NO_CACHE
-    return response
+    # Prefix-aware so the sign-in form and its /api/v1/auth + /static assets
+    # resolve when the archive is mounted under a sub-path (V2-4).
+    return _spa_shell(LOGIN_PAGE, request)
 
 
 @app.get("/logout", include_in_schema=False)
-async def logout_page():
+async def logout_page(request: Request):
+    from app.core.proxy_prefix import prefix_path
     from app.core.security import clear_session_cookie
 
-    response = RedirectResponse("/login", status_code=303)
+    response = RedirectResponse(
+        prefix_path(request.scope.get("root_path") or "", "/login"), status_code=303
+    )
     clear_session_cookie(response)
     return response
 

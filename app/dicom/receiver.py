@@ -43,7 +43,8 @@ from app.services import (
     tenant_service,
     worklist_service,
 )
-from app.services.indexing_service import index_new_instance
+from app.services.indexing_service import CrossTenantIngestError, index_new_instance
+from app.services.quota_service import QuotaExceeded
 from app.services.node_service import get_node_sync
 
 log = logging.getLogger("paxs.dicom")
@@ -53,12 +54,19 @@ _ae: AE | None = None
 # --------------------------------------------------------------------------- #
 # C-STORE
 # --------------------------------------------------------------------------- #
+async def _resolve_tenant(source_ae: str | None) -> int | None:
+    """Tenant the calling AE maps to, resolved before any write (H08)."""
+    async with AsyncSessionLocal() as session:
+        return await tenant_service.resolve_tenant_id_for_ae(session, source_ae)
+
+
 def _calling_ae(event) -> str | None:
     return getattr(getattr(event.assoc, "requestor", None), "ae_title", None)
 
 
 async def _index_async(meta: dict, path: str, sha256: str, source_ae: str | None = None,
-                       backend: str | None = None) -> None:
+                       backend: str | None = None, read_path: str | None = None,
+                       ds=None, file_size_bytes: int | None = None) -> None:
     async with AsyncSessionLocal() as session:
         async with session.begin():
             # VNA: instances stored from a tenant-mapped AE title belong to it.
@@ -68,6 +76,9 @@ async def _index_async(meta: dict, path: str, sha256: str, source_ae: str | None
             await index_new_instance(
                 session, meta, path, sha256, performed_by="dicom-receiver",
                 tenant_id=tenant_id, storage_backend=backend,
+                read_path=read_path,
+                ds=ds,
+                file_size_bytes=file_size_bytes,
             )
 
 
@@ -76,18 +87,45 @@ def handle_store(event) -> int:
     if ds is None:
         return 0xC212  # Processing failure
     path: str | None = None
+    staged = None
+    backend: str | None = None
     try:
         ds.file_meta = event.file_meta
+        # C05: validate identifiers before they reach the storage key builder —
+        # a malformed UID must not create an object outside the storage root.
+        for _attr in ("StudyInstanceUID", "SeriesInstanceUID", "SOPInstanceUID"):
+            _value = getattr(ds, _attr, None)
+            if _value not in (None, ""):
+                storage_service.validate_component(str(_value), field=_attr)
         # Multi-storage: write new studies to the registered default backend
         # (None = env backend); late slices rejoin the study's recorded one.
         backend = storage_service.resolve_study_backend(
             str(getattr(ds, "StudyInstanceUID", "UNKNOWN"))
         )
-        path, sha256 = storage_service.save_dataset(ds, backend_name=backend)
+        source_ae = _calling_ae(event)
+        # H08: the quota is scoped to the tenant the AE maps to, so it must be
+        # resolved *before* the object is staged (nothing is written first).
+        tenant_id = asyncio.run(_resolve_tenant(source_ae))
+        staged = storage_service.stage_dataset_with_quota(
+            ds, tenant_id, backend_name=backend
+        )
         meta = parse_metadata(ds)
-        asyncio.run(_index_async(
-            meta, path, sha256, source_ae=_calling_ae(event), backend=backend
-        ))
+        try:
+            asyncio.run(_index_async(
+                meta, staged.key, staged.sha256, source_ae=source_ae, backend=backend,
+                read_path=staged.staged_path or staged.key,
+                ds=ds,
+                file_size_bytes=staged.bytes_written,
+            ))
+        except Exception:
+            # H09: the row never became durable — drop the staged file and give
+            # the reservation back. A pre-existing object is never touched.
+            staged.discard()
+            raise
+        # Indexing committed: publish the object.
+        staged.promote()
+        path = staged.key
+        sha256 = staged.sha256
         # Storage Commitment: if a modality asked (N-ACTION) before its images
         # were fully stored, each arriving instance re-verifies the pending
         # requests — the N-EVENT-REPORT fires automatically once the last
@@ -99,14 +137,30 @@ def handle_store(event) -> int:
         except Exception:
             log.exception("storage-commit hook failed (store already succeeded)")
         return 0x0000  # Success
+    except QuotaExceeded as exc:
+        # H08: Refused — Out of Resources (PS3.4). Nothing was written.
+        log.warning("C-STORE refused by quota: %s", exc)
+        return 0xA700
+    except storage_service.InvalidStorageKey as exc:
+        # C05: malformed identifier -> 0xC000 "Cannot understand" (PS3.4).
+        # Nothing was written (validation precedes the save), so no cleanup.
+        log.warning("C-STORE rejected, invalid identifier: %s", exc)
+        return 0xC000
+    except CrossTenantIngestError as exc:
+        # C04: refused a cross-tenant append; the object written above is removed
+        # by the generic handler's cleanup, so re-raise it as-is.
+        log.warning("C-STORE rejected, cross-tenant ingest: %s", exc)
+        raise
     except Exception:
         log.exception("C-STORE handler failed")
-        # Don't leave an orphaned file with no DB row.
-        if path:
+        # H09: compensation must never delete a pre-existing object. Only the
+        # staged file this call created is removed (a failed reimport used to
+        # delete the *existing* instance via this path).
+        if staged is not None:
             try:
-                storage_service.delete_file(path, backend_name=backend)
-            except OSError:
-                log.warning("Could not clean up %s", path)
+                staged.discard()
+            except Exception:
+                log.warning("Could not discard staged object", exc_info=True)
         return 0xC212  # Processing failure
 
 

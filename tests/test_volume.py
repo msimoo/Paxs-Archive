@@ -279,3 +279,15 @@ def test_service_helpers():
     header = volume_service.npy_header("uint16", (2, 32, 32))
     assert header[:6] == b"\x93NUMPY"
     assert np.lib.format.read_magic(io.BytesIO(header)) == (1, 0)
+
+
+# --------------------------------------------------------------------------- #
+# C03: the volume / FHIR / GSPS / dashboard / metrics routes require
+# authentication. Override the anonymous ``client`` fixture for this module so
+# its requests carry a valid ADMIN bearer token. Tests that assert anonymous
+# rejection live in test_route_auth_matrix.py and use ``anonymous_client``.
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

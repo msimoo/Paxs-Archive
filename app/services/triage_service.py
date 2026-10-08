@@ -59,9 +59,18 @@ class PneumothoraxHeuristicDetector:
             sop_uid = str(getattr(ds, "SOPInstanceUID", "")) or sop_uid
             try:
                 arr = ds.pixel_array.astype(np.float64)
-            except Exception:
+            except Exception as exc:
                 # Compressed transfer syntax without a decode handler, or a
-                # dataset with no pixel data — best-effort, skip silently.
+                # dataset with no pixel data — best-effort, skip. Logged at
+                # DEBUG (not silently dropped) with the transfer syntax so a
+                # systematic codec gap is diagnosable without flooding the log
+                # for a whole series: this runs once per instance of a study.
+                from app.core.dicom_diagnostics import decode_context
+
+                log.debug(
+                    "triage: skipping instance (%s: %s) | %s",
+                    type(exc).__name__, exc, decode_context(ds),
+                )
                 continue
             # Multi-frame: analyze the middle frame.
             if arr.ndim == 3:

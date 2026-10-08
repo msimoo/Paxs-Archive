@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.services.storage_service import (
     cached_storage_usage_bytes,
     invalidate_usage_cache,
@@ -235,3 +237,13 @@ def test_qido_keyset_respects_filters(client):
     assert len(r2) == 1
     assert r2[0]["00100020"]["Value"] == ["P100"]
     assert page2.headers.get("x-next-cursor") is None
+
+
+# --------------------------------------------------------------------------- #
+# C03: DICOMweb is private by default, so this module's requests carry a valid
+# ADMIN bearer token. (No test here asserts anonymous behaviour.)
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

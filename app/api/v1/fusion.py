@@ -16,7 +16,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_optional_user
+from app.api.v1.deps import get_current_user_any
 from app.db.models import User
 from app.db.session import get_db
 from app.services import fusion_service, tenant_service
@@ -30,7 +30,7 @@ router = APIRouter(prefix="/api/v1/fusion", tags=["Fusion"])
 async def fusion_manifest(
     study_uid: str,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_optional_user),
+    user: User = Depends(get_current_user_any),
 ):
     """FoR groups + aligned series pairs + per-series geometry for a study."""
     tenant_id, include_all = tenant_service.scope_from_user(user)

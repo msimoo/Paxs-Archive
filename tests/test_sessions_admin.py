@@ -20,8 +20,6 @@ def _register(client, username, role=None):
     if role:
         body["role"] = role
     return client.post("/api/v1/auth/register", json=body)
-
-
 def _login(client, username):
     return client.post("/api/v1/auth/login",
                        json={"username": username, "password": "secret123"})
@@ -135,9 +133,12 @@ def test_admin_lists_active_sessions(client):
 
 
 def test_sessions_requires_admin(client):
-    _register(client, "root")            # ADMIN
-    non_admin = _register(client, "dr.badr", role="RADIOLOGIST")
-    token = non_admin.json()["access_token"]
+    from tests.helpers import create_user
+
+    root = _register(client, "root")            # ADMIN
+    create_user(client, {"Authorization": f"Bearer {root.json()['access_token']}"},
+                "dr.badr", "RADIOLOGIST")
+    token = _login(client, "dr.badr").json()["access_token"]
 
     res = client.get("/api/v1/users/sessions", headers=_bearer(token))
     assert res.status_code == 403

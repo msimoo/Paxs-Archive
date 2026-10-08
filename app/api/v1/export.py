@@ -14,7 +14,7 @@ from sqlalchemy.orm import joinedload
 
 from app.db.models import AuditLog, Instance, Series, Study, User
 from app.db.session import get_db
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import get_current_user, require_study_access
 from app.services import anonymizer
 
 router = APIRouter(prefix="/api/v1", tags=["export"])
@@ -30,11 +30,8 @@ async def export_anonymized(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    study = (
-        await db.execute(select(Study).where(Study.study_instance_uid == study_uid))
-    ).scalar_one_or_none()
-    if study is None:
-        raise HTTPException(404, "Study not found")
+    # C04: an export is a bulk read — resolve it through the tenant guard.
+    study = await require_study_access(db, study_uid, user)
 
     instances = (
         await db.execute(

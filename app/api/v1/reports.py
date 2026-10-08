@@ -8,6 +8,8 @@ drafting and viewing require any authenticated user.
 
 from __future__ import annotations
 
+import html
+
 import asyncio
 import logging
 
@@ -15,7 +17,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user, require_destructive_role
+from app.api.v1.deps import (
+    get_current_user,
+    get_current_user_any,
+    require_destructive_role,
+    require_study_access,
+)
+from app.core.roles import DESTRUCTIVE_ROLES
 from app.db.models import RadiologyReport, User
 from app.db.session import get_db
 from app.services import report_service
@@ -59,6 +67,16 @@ def _report_out(r: RadiologyReport) -> dict:
     }
 
 
+def _addendum_out(a) -> dict:
+    return {
+        "id": a.id,
+        "report_id": a.report_id,
+        "author": a.author,
+        "text": a.text,
+        "created_at": a.created_at.isoformat() if a.created_at else None,
+    }
+
+
 @router.post("", status_code=201)
 async def create_report(body: ReportIn, db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
@@ -93,7 +111,8 @@ async def get_report(report_id: int, db: AsyncSession = Depends(get_db),
     report = await report_service.get_report(db, report_id)
     if report is None:
         raise HTTPException(404, "Report not found")
-    return _report_out(report)
+    addenda = await report_service.list_addenda(db, report_id)
+    return {**_report_out(report), "addenda": [_addendum_out(a) for a in addenda]}
 
 
 @router.patch("/{report_id}")
@@ -158,8 +177,11 @@ class SaveReportIn(BaseModel):
 
 
 @router.get("/study/{study_instance_uid}")
-async def get_study_report(study_instance_uid: str, db: AsyncSession = Depends(get_db)):
+async def get_study_report(study_instance_uid: str, db: AsyncSession = Depends(get_db),
+                           user: User = Depends(get_current_user_any)):
     """Check if report exists for study UID; if new, returns pre-filled DICOM metadata."""
+    # C04: a report carries patient data — resolve it through the tenant guard.
+    await require_study_access(db, study_instance_uid, user)
     try:
         data = await report_service.get_study_report_metadata(db, study_instance_uid)
         return data
@@ -167,66 +189,119 @@ async def get_study_report(study_instance_uid: str, db: AsyncSession = Depends(g
         raise HTTPException(404, str(exc)) from exc
 
 
-from app.api.v1.deps import get_current_user, get_optional_user, require_destructive_role
-
 
 @router.post("/save")
 async def save_report(
     body: SaveReportIn,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_optional_user),
+    user: User = Depends(get_current_user_any),
 ):
-    """Create or update a diagnostic report (Save Draft / Finalize Report)."""
-    study_uid = body.study_instance_uid.strip()
-    existing_meta = await report_service.get_study_report_metadata(db, study_uid)
-    report_dict = existing_meta.get("report")
+    """Create/edit a DRAFT report, or finalize it (C06).
 
-    radiologist_name = body.radiologist or (user.username if user else None) or "Dr. Radiologist"
+    This route is the UI's Save/Finalize entry point and now delegates to the
+    one supported service contract rather than mutating rows directly:
 
-    if not report_dict:
-        # Create new report
-        report = await report_service.create_report(
-            db,
-            {
-                "study_instance_uid": study_uid,
-                "clinical_history": body.clinical_history,
-                "findings": body.findings,
-                "impression": body.impression,
-                "radiologist": radiologist_name,
-            },
-            performed_by=radiologist_name,
+    * the radiologist identity is always the **authenticated actor** — a
+      client-supplied name is discarded;
+    * ordinary edits are DRAFT-only; a FINALIZED report is immutable, so
+      follow-up text must go through the addendum endpoint;
+    * finalizing requires a destructive role and goes through
+      ``report_service.finalize_report``, which locks the record and delivers the
+      ORU^R01 idempotently (a second finalize never duplicates it in the EMR);
+    * an unknown study is a clean 404 rather than a 500.
+    """
+    study_uid = (body.study_instance_uid or "").strip()
+    wants_final = (body.status or "").strip().upper() in ("FINALIZED", "SIGNED")
+    actor = user.username
+
+    if wants_final and user.role not in DESTRUCTIVE_ROLES:
+        raise HTTPException(
+            403, "Finalizing a report requires a radiologist or admin role"
         )
-        if body.status.upper() in ("FINALIZED", "SIGNED"):
-            report.status = "FINALIZED"
-            report.finalized_at = report_service._now()
+
+    try:
+        meta = await report_service.get_study_report_metadata(db, study_uid)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    existing = meta.get("report")
+
+    fields = {
+        "clinical_history": body.clinical_history,
+        "findings": body.findings,
+        "impression": body.impression,
+        # The signed identity is the authenticated actor, never the request body.
+        "radiologist": actor,
+    }
+
+    if not existing:
+        try:
+            report = await report_service.create_report(
+                db, {"study_instance_uid": study_uid, **fields}, performed_by=actor
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         await db.commit()
         await db.refresh(report)
-        return _report_out(report)
     else:
-        # Update existing report
-        report_id = report_dict["id"]
-        report = await report_service.get_report(db, report_id)
-        if not report:
+        report = await report_service.get_report(db, existing["id"])
+        if report is None:
             raise HTTPException(404, "Report not found")
+        if not wants_final:
+            try:
+                report = await report_service.update_report(db, report, fields)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            await db.commit()
+            await db.refresh(report)
 
-        report.clinical_history = body.clinical_history
-        report.findings = body.findings
-        report.impression = body.impression
-        report.radiologist = radiologist_name
-
-        if body.status.upper() in ("FINALIZED", "SIGNED"):
-            report.status = "FINALIZED"
-            if not report.finalized_at:
-                report.finalized_at = report_service._now()
-
-        await db.commit()
-        await db.refresh(report)
+    if not wants_final:
         return _report_out(report)
+
+    # Finalize through the single supported path (lock + idempotent ORU delivery).
+    result = await asyncio.to_thread(
+        report_service.finalize_report, report.id, performed_by=actor
+    )
+    if not result.get("ok"):
+        raise HTTPException(404, result.get("error", "Report not found"))
+    await db.refresh(report)
+    return {**_report_out(report), "delivery": result.get("delivery")}
+
+
+class AddendumIn(BaseModel):
+    text: str = Field(min_length=1, max_length=20000)
+
+
+@router.post("/{report_id}/addendum", status_code=201)
+async def add_report_addendum(
+    report_id: int,
+    body: AddendumIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_destructive_role),
+):
+    """Append an addendum to a FINALIZED report (C06).
+
+    The original clinical fields are never modified — the addendum is stored
+    beside them and attributed to the authenticated author.
+    """
+    report = await report_service.get_report(db, report_id)
+    if report is None:
+        raise HTTPException(404, "Report not found")
+    try:
+        addendum = await report_service.add_addendum(
+            db, report, body.text, author=user.username
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await db.commit()
+    await db.refresh(addendum)
+    return _addendum_out(addendum)
 
 
 @router.get("/print/{study_instance_uid}", response_class=HTMLResponse)
-async def print_report(study_instance_uid: str, db: AsyncSession = Depends(get_db)):
+async def print_report(study_instance_uid: str, db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user_any)):
     """Generate and render a clean, professional printable HTML report."""
+    await require_study_access(db, study_instance_uid, user)
     try:
         data = await report_service.get_study_report_metadata(db, study_instance_uid)
     except ValueError as exc:
@@ -235,14 +310,37 @@ async def print_report(study_instance_uid: str, db: AsyncSession = Depends(get_d
     org = await report_service.get_or_create_org_settings(db)
     rpt = data.get("report") or {}
 
-    header_html = org.header_html_text or f"<h2>{org.org_name_en or 'PAXS Archive'}</h2><p>Diagnostic Imaging Department</p>"
-    footer_html = org.footer_html_text or f"<p>{org.org_name_en or 'PAXS Archive'} · Electronic Report</p>"
-    logo_src = org.logo_path or "/viewer/assets/Paxs-logo.png"
+    # H05: the print page is HTML rendered in a browser, so every value
+    # interpolated into it is escaped — clinical text, patient/study metadata
+    # and organization branding alike. Nothing reaching the template is treated
+    # as markup, which removes the stored-XSS path through report bodies and
+    # admin-set org names. (Escaping the branding templates is deliberate: they
+    # are no longer a raw-HTML injection point. If rich templates are wanted
+    # later they need an explicit allowlist sanitizer, not raw interpolation.)
+    esc = html.escape
 
-    findings = rpt.get("findings") or "No findings recorded."
-    impression = rpt.get("impression") or "No impression recorded."
-    radiologist = rpt.get("radiologist") or "Authorized Radiologist"
-    finalized_date = rpt.get("finalized_at") or rpt.get("created_at") or ""
+    header_html = (
+        esc(org.header_html_text) if org.header_html_text
+        else f"<h2>{esc(org.org_name_en or 'PAXS Archive')}</h2>"
+             f"<p>Diagnostic Imaging Department</p>"
+    )
+    footer_html = (
+        esc(org.footer_html_text) if org.footer_html_text
+        else f"<p>{esc(org.org_name_en or 'PAXS Archive')} · Electronic Report</p>"
+    )
+    logo_src = esc(org.logo_path or "/viewer/assets/Paxs-logo.png")
+
+    findings = esc(rpt.get("findings") or "No findings recorded.")
+    impression = esc(rpt.get("impression") or "No impression recorded.")
+    radiologist = esc(rpt.get("radiologist") or "Authorized Radiologist")
+    finalized_date = esc(rpt.get("finalized_at") or rpt.get("created_at") or "")
+
+    # Patient/study metadata is interpolated all over the template; escaping the
+    # mapping once covers every `{data[...]}` use.
+    data = {
+        key: (esc(value) if isinstance(value, str) else value)
+        for key, value in data.items()
+    }
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">

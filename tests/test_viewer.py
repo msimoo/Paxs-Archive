@@ -14,6 +14,8 @@ when the dist is present, and the archive falls back to the built-in
 
 from __future__ import annotations
 
+import pytest
+
 import asyncio
 from pathlib import Path
 
@@ -225,3 +227,12 @@ def test_studies_ui_mount(client):
     assert b"PAXS Archive" in res.content
     assert b"<div id=\"root\">" in res.content
 
+
+# --------------------------------------------------------------------------- #
+# C03: DICOMweb is private by default, so this module's requests carry a valid
+# ADMIN bearer token. (No test here asserts anonymous behaviour.)
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

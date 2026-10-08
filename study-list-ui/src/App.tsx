@@ -1,18 +1,13 @@
-import { useState } from 'react';
 import { StudyListPage } from '@/components/study-list/StudyListPage';
-import { PacsViewerDashboard } from '@/components/viewer/PacsViewerDashboard';
 import { TooltipProvider } from '@/components/ui/tooltip';
 
 export default function App() {
-  const [view, setView] = useState<'list' | 'viewer'>('list');
-
+  // C07: the mock viewer dashboard (invented AI CAD findings and synthetic HU
+  // values) was removed — production must not ship fabricated clinical content.
+  // The real viewer is opened in its own window (see getViewerUrl).
   return (
     <TooltipProvider>
-      {view === 'viewer' ? (
-        <PacsViewerDashboard onBack={() => setView('list')} />
-      ) : (
-        <StudyListPage onOpenViewer={() => setView('viewer')} />
-      )}
+      <StudyListPage />
     </TooltipProvider>
   );
 }

@@ -434,3 +434,15 @@ def test_enhanced_ct_dimension_index_missing_frames_falls_back(client):
     vol = np.frombuffer(resp.content, dtype="<u2").reshape(3, 16, 16)
     # frames built without a bright core: uniform 100/110/120 per frame
     assert vol[0, 0, 0] == 100 and vol[1, 8, 8] == 110 and vol[2, 8, 8] == 120
+
+
+# --------------------------------------------------------------------------- #
+# C03: the volume / FHIR / GSPS / dashboard / metrics routes require
+# authentication. Override the anonymous ``client`` fixture for this module so
+# its requests carry a valid ADMIN bearer token. Tests that assert anonymous
+# rejection live in test_route_auth_matrix.py and use ``anonymous_client``.
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

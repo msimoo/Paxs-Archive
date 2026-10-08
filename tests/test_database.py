@@ -23,16 +23,9 @@ from app.db.session import to_sync_url
 
 
 def _auth(client, username="db_admin", password="secret123", role="ADMIN"):
-    if role != "ADMIN":
-        client.post("/api/v1/auth/register",
-                    json={"username": "admin", "password": "secret123"})
-    reg = client.post("/api/v1/auth/register",
-                      json={"username": username, "password": password, "role": role})
-    token = (reg.json().get("access_token") if reg.status_code == 201
-             else client.post("/api/v1/auth/login",
-                              json={"username": username, "password": password})
-             .json()["access_token"])
-    return {"Authorization": f"Bearer {token}"}
+    from tests.helpers import auth_for_role
+
+    return auth_for_role(client, username, role=role or "ADMIN", password=password)
 
 
 @pytest.fixture(autouse=True)
@@ -242,8 +235,15 @@ def test_db_init_is_idempotent(client, _isolate_db_admin):
         eng.dispose()
 
 
-def test_db_init_stamps_drifted_schema(client, _isolate_db_admin):
-    """A DB whose schema is current but alembic_version lags gets stamped to head."""
+def test_db_init_refuses_a_drifted_schema_instead_of_stamping(client, _isolate_db_admin):
+    """H11: a drifted database is reported, never silently stamped to head.
+
+    This replaces an earlier test that asserted the opposite (an automatic
+    `stamp head` on an `already exists` error). That behaviour was removed: a
+    stamp on a partially-migrated database declares the remaining objects as
+    applied and they are never created. Stamping is now an explicit,
+    parity-checked operator action — see tests/test_schema_authority.py.
+    """
     from app.services.db_admin import head_revision
 
     h = _auth(client)
@@ -251,25 +251,26 @@ def test_db_init_stamps_drifted_schema(client, _isolate_db_admin):
     url = f"sqlite+aiosqlite:///{fresh.as_posix()}"
     eng = create_engine(to_sync_url(url), poolclass=NullPool)
     with eng.begin() as conn:
-        # drift: a table a pending migration would create already exists, and
-        # alembic_version points behind it
+        # Drift: a table a pending migration would create already exists, while
+        # alembic_version points behind it (the create_all-bootstrap scenario).
         conn.execute(text("CREATE TABLE reports (id INTEGER PRIMARY KEY)"))
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
         conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('v1234567w8x9')"))
     eng.dispose()
 
     res = client.post("/api/v1/db/init", headers=h, json={"url": url, "seed_admin": False})
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["ok"] is True
-    assert body["stamped"] is True
-    assert body["head_revision"] == head_revision()
+    assert res.status_code == 500, res.text
+    detail = res.json()["detail"]
+    assert "already contains objects" in str(detail)
+    assert "never done automatically" in str(detail)
 
+    # The decisive assertion: the revision was NOT advanced to head.
     eng = create_engine(to_sync_url(url), poolclass=NullPool)
     try:
         with eng.connect() as conn:
             rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert rev == head_revision()
+        assert rev == "v1234567w8x9", "a drifted database must not be stamped"
+        assert rev != head_revision()
     finally:
         eng.dispose()
 

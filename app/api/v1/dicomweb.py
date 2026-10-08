@@ -25,11 +25,19 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_optional_user
+from app.api.v1.deps import (
+    current_scope,
+    get_optional_user,
+    get_share_scope,
+    require_dicomweb_access,
+    require_study_access,
+)
+from app.core.config import settings
 from app.db.models import Instance, Series, Study, User
 from app.db.session import get_db
 from app.dicom.parser import parse_metadata
 from app.services import query_service, storage_service, tenant_service, warm_service
+from app.services.quota_service import QuotaExceeded
 from app.services.dicomweb_service import (
     StowPartTooLarge,
     build_multipart,
@@ -41,11 +49,20 @@ from app.services.dicomweb_service import (
     series_to_dicom_json,
     study_to_dicom_json,
 )
-from app.services.indexing_service import index_new_instance
+from app.services.indexing_service import CrossTenantIngestError, index_new_instance
 
 log = logging.getLogger("paxs.api.dicomweb")
 
-router = APIRouter(prefix="/dicom-web", tags=["DICOMweb"])
+router = APIRouter(
+    prefix="/dicom-web",
+    tags=["DICOMweb"],
+    # C03: the whole DICOMweb surface is guarded here, so every current and
+    # future route is covered by construction. With DICOMWEB_PUBLIC=false reads
+    # require a bearer token or session cookie — or a valid patient share token,
+    # which only ever grants read access to the study it names. Writes (STOW-RS)
+    # always require a real identity in private mode.
+    dependencies=[Depends(require_dicomweb_access)],
+)
 
 MAX_LIMIT = 1000
 
@@ -153,15 +170,41 @@ async def wado_uri(request: Request, db: AsyncSession = Depends(get_db)):
     if not object_uid:
         raise HTTPException(400, "Missing objectUID (SOP Instance UID)")
 
+    _tenant_id, _include_all = current_scope()
     inst = (
         await db.execute(
             query_service.instance_query(
-                study_uid or None, series_uid or None, {"SOPInstanceUID": object_uid}
+                study_uid or None,
+                series_uid or None,
+                {"SOPInstanceUID": object_uid},
+                tenant_id=_tenant_id,
+                include_all=_include_all,
             )
         )
     ).scalar_one_or_none()
     if inst is None or not await asyncio.to_thread(storage_service.exists, inst.file_path, backend_name=_bk(inst)):
         raise HTTPException(404, "Instance not found")
+
+    # C04: WADO-URI takes the object UID from the query string, so the owning
+    # study is resolved here and the caller's tenant (or share scope) is
+    # enforced against it — a share link must never retrieve another study's
+    # instance, and a tenant user must not reach across institutions.
+    owning_study = (
+        await db.execute(
+            select(Study.study_instance_uid)
+            .join(Series, Series.study_id == Study.id)
+            .join(Instance, Instance.series_id == Series.id)
+            .where(Instance.id == inst.id)
+        )
+    ).scalar_one_or_none()
+    _wado_user = await get_optional_user(request, None)
+    if owning_study is not None and not (_wado_user is None and settings.DICOMWEB_PUBLIC):
+        await require_study_access(
+            db,
+            owning_study,
+            _wado_user,
+            share_scope=None if settings.DICOMWEB_PUBLIC else await get_share_scope(request),
+        )
 
     content_type = params.get("contentType", "application/dicom").lower()
     if content_type in ("image/jpeg", "image/jpg", "image/png"):
@@ -191,6 +234,57 @@ async def wado_uri(request: Request, db: AsyncSession = Depends(get_db)):
     return response
 
 
+async def _anonymous_share_scope(request: Request, user) -> str | None:
+    """Share scope for an anonymous caller in private DICOMweb mode, else None.
+
+    A share token is a *fallback identity* for people with no account, never an
+    override: an authenticated user keeps full visibility, and public mode is
+    unchanged (so a stale share cookie cannot narrow a normal viewer session).
+    """
+    if settings.DICOMWEB_PUBLIC or user is not None:
+        return None
+    return await get_share_scope(request)
+
+
+async def _reject_cross_tenant_ingest(db: AsyncSession, study_uid: str, user) -> None:
+    """C04: refuse to append an instance to another tenant's study.
+
+    Checked *before* the object is written, so a rejected ingest leaves nothing
+    behind on disk. Mirrors the tenant STOW derives for the study itself
+    (admins and unassigned users stay in the legacy unscoped scope).
+    """
+    if user is None or user.role == "ADMIN" or user.tenant_id is None:
+        return
+    existing = (
+        await db.execute(
+            select(Study.tenant_id).where(Study.study_instance_uid == study_uid)
+        )
+    ).scalar_one_or_none()
+    if existing is not None and existing != user.tenant_id:
+        raise CrossTenantIngestError(
+            f"study {study_uid} belongs to another tenant; refusing to append to it"
+        )
+
+
+def _validate_ingest_uids(ds) -> None:
+    """Reject dangerous UIDs in an incoming dataset before it is stored (C05).
+
+    Only *path-dangerous* values are refused (dot segments, separators, control
+    characters, Windows device names, overlong values). Technically
+    non-standard-but-harmless UIDs that real archives contain are still accepted,
+    so legitimate clinical data keeps ingesting.
+
+    Raises:
+        storage_service.InvalidStorageKey: when a present UID is unsafe.
+    """
+    for attr in ("StudyInstanceUID", "SeriesInstanceUID", "SOPInstanceUID"):
+        value = getattr(ds, attr, None)
+        if value in (None, ""):
+            # Missing UIDs keep the pre-existing deterministic fallback.
+            continue
+        storage_service.validate_component(str(value), field=attr)
+
+
 # --------------------------------------------------------------------------- #
 # QIDO-RS
 # --------------------------------------------------------------------------- #
@@ -200,6 +294,13 @@ async def qido_studies(request: Request, db: AsyncSession = Depends(get_db),
     params = {k: v for k, v in request.query_params.items()}
     limit, offset = _paginate(params)
     params.pop("includefield", None)
+    # A patient share token may only ever see the study it names, so an
+    # explicit StudyInstanceUID filter is forced rather than trusted (C03).
+    # Only for an *anonymous* caller in private mode: an authenticated user (or
+    # public mode) must not be narrowed by a leftover share cookie.
+    share_scope = await _anonymous_share_scope(request, user)
+    if share_scope:
+        params["StudyInstanceUID"] = share_scope
     # The viewer's deep-link / study-open flow queries QIDO with a specific
     # StudyInstanceUID — warm that study's thumbnails + frame caches in the
     # background so scrolling and re-opens are instant (fire-and-forget).
@@ -261,6 +362,11 @@ async def qido_series(request: Request, study_uid: str | None = None,
     params = {k: v for k, v in request.query_params.items()}
     limit, offset = _paginate(params)
     params.pop("includefield", None)
+    share_scope = await _anonymous_share_scope(request, user)
+    if share_scope:
+        if study_uid is not None and study_uid != share_scope:
+            raise HTTPException(404, "Study not found")
+        study_uid = share_scope
     tenant_id, include_all = tenant_service.scope_from_user(user)
     stmt = (
         query_service.series_query(study_uid, params, tenant_id=tenant_id, include_all=include_all)
@@ -284,6 +390,11 @@ async def qido_instances(request: Request, study_uid: str | None = None,
     params = {k: v for k, v in request.query_params.items()}
     limit, offset = _paginate(params)
     params.pop("includefield", None)
+    share_scope = await _anonymous_share_scope(request, user)
+    if share_scope:
+        if study_uid is not None and study_uid != share_scope:
+            raise HTTPException(404, "Study not found")
+        study_uid = share_scope
     tenant_id, include_all = tenant_service.scope_from_user(user)
     stmt = (
         query_service.instance_query(study_uid, series_uid, params,
@@ -301,8 +412,14 @@ async def qido_instances(request: Request, study_uid: str | None = None,
 # WADO-RS
 # --------------------------------------------------------------------------- #
 async def _instances_of(db: AsyncSession, study_uid: str, series_uid: str | None = None):
+    # C04: the router-level guard published the caller's scope for this request.
+    tenant_id, include_all = current_scope()
     return (
-        await db.execute(query_service.instance_query(study_uid, series_uid))
+        await db.execute(
+            query_service.instance_query(
+                study_uid, series_uid, tenant_id=tenant_id, include_all=include_all
+            )
+        )
     ).scalars().all()
 
 
@@ -388,9 +505,16 @@ async def wado_series(study_uid: str, series_uid: str, db: AsyncSession = Depend
 
 
 async def _get_instance(db: AsyncSession, study_uid: str, series_uid: str, sop_uid: str) -> Instance:
+    tenant_id, include_all = current_scope()
     inst = (
         await db.execute(
-            query_service.instance_query(study_uid, series_uid, {"SOPInstanceUID": sop_uid})
+            query_service.instance_query(
+                study_uid,
+                series_uid,
+                {"SOPInstanceUID": sop_uid},
+                tenant_id=tenant_id,
+                include_all=include_all,
+            )
         )
     ).scalar_one_or_none()
     if inst is None:
@@ -679,7 +803,13 @@ async def wado_frame(
 
     # Fast memory cache key for this exact frame / transfer-syntax combination
     transcode = str(request.query_params.get("transcode", "")).lower() in ("1", "true", "yes")
-    viewer_mode = "transfer-syntax=*" in accept
+    # OHIF's own generateAcceptHeader QUOTES the parameter it emits
+    # (`multipart/related; type="application/octet-stream"; transfer-syntax="*"`),
+    # so a bare `"transfer-syntax=*" in accept` test never matched the header the
+    # viewer actually sends. Normalise away the quotes (and whitespace) before
+    # testing so the wildcard is recognised in both spellings.
+    accept_norm = accept.replace('"', "").replace(" ", "")
+    viewer_mode = "transfer-syntax=*" in accept_norm
     cache_mode = "raw" if transcode else ("native" if viewer_mode else "def")
     # Key on the RESOLVED 1-based file indices (after ?zorder=1 translation),
     # not the raw URL list: `frames/2?zorder=1` may translate to file frame #1,
@@ -724,10 +854,13 @@ async def wado_frame(
     if data is None or media_type is None:
         raise HTTPException(404, f"Requested frame(s) {frame_list} not found")
 
-    # Store in high-speed RAM cache and Redis for fast subsequent slice scrubbing
+    # Store in high-speed RAM cache and Redis for fast subsequent slice scrubbing.
+    # The key MUST stay mode-qualified: the bare "paxs:frame:{sop}:{idx}" namespace
+    # belongs to the decoded RAW-PIXEL cache (wado_rs_bulk_service / warm_service).
+    # Writing a formatted body (multipart or native codestream) there made a later
+    # ?transcode=1 request serve that body as if it were raw pixels.
     if len(data) <= 16 * 1024 * 1024:
         cache_set(frame_cache_key, data + b"||PAXS_MT||" + media_type.encode("utf-8"), expire_seconds=1800)
-        cache_set(f"paxs:frame:{sop_uid}:{resolved}", data, expire_seconds=1800)
 
     return _cached_response(request, data, media_type)
 
@@ -763,7 +896,8 @@ async def wado_bulk_data(
 # STOW-RS
 # --------------------------------------------------------------------------- #
 def _stow_response(stored: list[dict], failed: list[dict], study_uid: str | None,
-                   study_existed: dict[str, bool] | None = None) -> JSONResponse:
+                   study_existed: dict[str, bool] | None = None,
+                   status_code: int = 200) -> JSONResponse:
     base_uri = f"/dicom-web/studies/{study_uid}" if study_uid else "/dicom-web/studies"
     payload = {
         "00081190": {"vr": "UR", "Value": [base_uri]},
@@ -797,7 +931,8 @@ def _stow_response(stored: list[dict], failed: list[dict], study_uid: str | None
             "studies_existed": sum(1 for s in studies if s["existed"]),
             "studies": studies,
         }
-    status = 200 if stored else 409
+    # H08: a quota refusal reports 507 Insufficient Storage for the batch.
+    status = status_code if status_code != 200 else (200 if stored else 409)
     return JSONResponse(payload, status_code=status, media_type="application/dicom+json")
 
 
@@ -815,8 +950,6 @@ async def stow_studies(request: Request, study_uid: str | None = None,
     saved, indexed and reported, so a single malformed part fails in
     isolation without aborting the rest of the upload.
     """
-    from app.core.config import settings
-
     content_type = request.headers.get("content-type", "")
     stream = request.stream()
     # Empty-body guard: stream() yields nothing for an empty request. Pull the
@@ -836,6 +969,8 @@ async def stow_studies(request: Request, study_uid: str | None = None,
 
     stored: list[dict] = []
     failed: list[dict] = []
+    quota_refused = False
+    staged = None
     target_study_uid = study_uid
     # Whether each study UID already existed in the archive before this upload
     # started — checked once per unique study, so the response can tell the UI
@@ -857,7 +992,11 @@ async def stow_studies(request: Request, study_uid: str | None = None,
                     continue
             try:
                 ds = dataset_from_bytes(data)
+                # C05: hard-reject dangerous identifiers at the door (400) so
+                # they can never reach the storage key builder.
+                _validate_ingest_uids(ds)
                 study_uid_meta = str(getattr(ds, "StudyInstanceUID", "")) or "UNKNOWN"
+                await _reject_cross_tenant_ingest(db, study_uid_meta, user)
                 if study_uid_meta not in study_existed:
                     exists = (
                         await db.execute(
@@ -873,7 +1012,16 @@ async def stow_studies(request: Request, study_uid: str | None = None,
                 backend = storage_service.resolve_study_backend(
                     str(getattr(ds, "StudyInstanceUID", "UNKNOWN"))
                 )
-                path, sha256 = storage_service.save_dataset(ds, backend_name=backend)
+                # H08 + H09: reserve quota, stage the object, index, commit,
+                # and only then publish it. A failure discards the staged file
+                # and releases the reservation, leaving any existing object
+                # untouched.
+                staged = storage_service.stage_dataset_with_quota(
+                    ds,
+                    tenant_id=(user.tenant_id if user and user.role != "ADMIN" else None),
+                    backend_name=backend,
+                )
+                path, sha256 = staged.key, staged.sha256
                 meta = parse_metadata(ds)
                 if target_study_uid is None and meta.get("study_instance_uid"):
                     target_study_uid = meta["study_instance_uid"]
@@ -883,14 +1031,48 @@ async def stow_studies(request: Request, study_uid: str | None = None,
                     db, meta, path, sha256, performed_by="stow-rs",
                     tenant_id=(user.tenant_id if user and user.role != "ADMIN" else None),
                     storage_backend=backend,
+                    read_path=staged.staged_path or staged.key,
+                    # H09: hand over the dataset we already parsed — the object
+                    # is still staged, so nothing may re-read the canonical key.
+                    ds=ds,
+                    # …and the size measured while staging.
+                    file_size_bytes=staged.bytes_written,
                 )
+                # Commit per part, then publish: the object only becomes visible
+                # once its row is durable, and a later part cannot roll this one
+                # back after the file has been published.
+                await db.commit()
+                staged.promote()
                 stored.append({
                     "00081150": {"vr": "UI", "Value": [meta.get("sop_class_uid") or "1.2.840.10008.1.1"]},
                     "00081155": {"vr": "UI", "Value": [meta.get("sop_instance_uid") or "unknown"]},
                     "0020000D": {"vr": "UI", "Value": [meta.get("study_instance_uid") or "unknown"]},
                 })
+            except QuotaExceeded as exc:
+                # H08: Out of Resources — recorded per part with 0x0111 and
+                # surfaced as HTTP 507 once the batch completes.
+                log.warning("STOW part refused by quota: %s", exc)
+                quota_refused = True
+                failed.append({
+                    "00081150": {"vr": "UI", "Value": ["1.2.840.10008.1.1"]},
+                    "00081155": {"vr": "UI", "Value": ["unknown"]},
+                    "00081197": {"vr": "US", "Value": [0x0111]},
+                })
+            except storage_service.InvalidStorageKey as exc:
+                # C05: a malformed identifier is a bad request, never a partial
+                # failure — refuse the whole STOW rather than store anything.
+                raise HTTPException(400, f"Invalid DICOM identifier: {exc}") from exc
+            except CrossTenantIngestError as exc:
+                # C04: writing into another institution's study is refused too.
+                raise HTTPException(400, str(exc)) from exc
             except Exception as exc:
                 log.warning("STOW part failed: %s", exc)
+                # H09: compensate — drop the staged file and release quota. A
+                # pre-existing canonical object is never touched.
+                if staged is not None:
+                    await db.rollback()
+                    staged.discard()
+                    staged = None
                 failed.append({
                     "00081150": {"vr": "UI", "Value": ["1.2.840.10008.1.1"]},
                     "00081155": {"vr": "UI", "Value": ["unknown"]},
@@ -898,8 +1080,18 @@ async def stow_studies(request: Request, study_uid: str | None = None,
                 })
     except StowPartTooLarge as exc:
         raise HTTPException(413, str(exc)) from exc
+    except HTTPException:
+        # Already a precise client error (e.g. the invalid-identifier 400 above).
+        raise
     except Exception as exc:
         log.warning("STOW stream error: %s", exc)
         raise HTTPException(400, f"Malformed multipart body: {exc}") from exc
 
-    return _stow_response(stored, failed, target_study_uid, study_existed)
+    return _stow_response(
+        stored,
+        failed,
+        target_study_uid,
+        study_existed,
+        # 507 Insufficient Storage when any part was refused for quota.
+        status_code=507 if quota_refused else 200,
+    )

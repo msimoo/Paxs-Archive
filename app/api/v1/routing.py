@@ -22,7 +22,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user, require_destructive_role
+from app.api.v1.deps import (
+    get_current_user,
+    require_admin,
+    require_destructive_role,
+)
 from app.db.models import RoutingRule, User
 from app.db.session import get_db
 from app.services import routing_service
@@ -81,7 +85,7 @@ def _rule_to_dict(rule: RoutingRule) -> dict[str, Any]:
 async def create_routing_rule(
     req: CreateRoutingRuleRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Create a new auto-routing rule."""
     try:
@@ -123,7 +127,7 @@ async def update_routing_rule(
     rule_id: int,
     req: UpdateRoutingRuleRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Update an auto-routing rule."""
     rule = await routing_service.get_rule(db, rule_id)
@@ -143,7 +147,7 @@ async def update_routing_rule(
 async def delete_routing_rule(
     rule_id: int,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Delete an auto-routing rule."""
     deleted = await routing_service.delete_rule(db, rule_id)
@@ -157,7 +161,7 @@ async def delete_routing_rule(
 async def evaluate_study_routing(
     study_uid: str,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_destructive_role),
 ):
     """Manually evaluate auto-routing rules for a study and enqueue dispatch."""
     count = await routing_service.evaluate_and_route_study(study_uid)

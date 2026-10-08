@@ -177,3 +177,15 @@ def test_mip_guards(client):
         assert client.get(f"/api/v1/volume/{series}/mip").status_code == 503
     finally:
         settings.VOLUME_STREAMING_ENABLED = prev
+
+
+# --------------------------------------------------------------------------- #
+# C03: the volume / FHIR / GSPS / dashboard / metrics routes require
+# authentication. Override the anonymous ``client`` fixture for this module so
+# its requests carry a valid ADMIN bearer token. Tests that assert anonymous
+# rejection live in test_route_auth_matrix.py and use ``anonymous_client``.
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

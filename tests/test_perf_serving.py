@@ -10,6 +10,8 @@ pydicom read + PIL render per request.
 
 from __future__ import annotations
 
+import pytest
+
 import gzip
 from pathlib import Path
 
@@ -285,3 +287,13 @@ def test_thumbnail_pre_generated_bypasses_redis(client, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.content == storage_service.read_bytes(thumb_key)
+
+
+# --------------------------------------------------------------------------- #
+# C03: DICOMweb is private by default, so this module's requests carry a valid
+# ADMIN bearer token. (No test here asserts anonymous behaviour.)
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

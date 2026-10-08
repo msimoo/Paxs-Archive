@@ -14,7 +14,7 @@ from sqlalchemy import case, delete as sa_delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.core.config import settings
+from app.core.config import resolve_public_base_url, settings
 from app.services.compression_service import codec_status
 from app.db.models import (
     AuditLog,
@@ -48,13 +48,18 @@ from app.services import (
     storage_service,
     tenant_service,
     thumbnail_service,
+    volume_service,
 )
 from app.services.audit_service import add_audit
 from app.api.v1.deps import (
     get_current_user,
     get_current_user_any,
-    get_optional_user,
+    require_admin,
     require_destructive_role,
+    require_instance_access,
+    require_series_access,
+    require_study_access,
+    tenant_scope,
 )
 
 log = logging.getLogger("paxs.api.dashboard")
@@ -140,8 +145,15 @@ async def health_ready():
     return {"status": "ready", "instance": settings.PAXS_INSTANCE_ID}
 
 
-@router.get("/health")
-async def health():
+async def health_payload(request: Request | None = None) -> dict:
+    """The health/status payload.
+
+    ``request`` is **optional** so in-process callers that reuse this shape
+    (``/api/v1/config`` renders it as the read-only block) do not have to
+    synthesise one. When absent, ``public_base_url`` falls back to the
+    configured ``PUBLIC_BASE_URL`` / loopback default instead of the request's
+    host — see ``resolve_public_base_url``.
+    """
     db_ok = False
     try:
         async with AsyncSessionLocal() as s:
@@ -157,8 +169,8 @@ async def health():
         # Public base URL the dashboard uses to build absolute viewer/share
         # deep-links, so they resolve to the same origin regardless of which
         # host the operator opened the dashboard from (localhost vs 127.0.0.1
-        # vs a reverse-proxy hostname).
-        "public_base_url": settings.PUBLIC_BASE_URL,
+        # vs a reverse-proxy hostname). Never a bind address (V2-2).
+        "public_base_url": resolve_public_base_url(request),
         "database": "ok" if db_ok else "error",
         "dicom": {
             "ae_title": settings.DICOM_AE_TITLE,
@@ -220,8 +232,16 @@ async def health():
     }
 
 
+@router.get("/health")
+async def health(request: Request, user: User = Depends(require_admin)):
+    """Admin health/status. Delegates to ``health_payload`` so the shape has a
+    single definition (``/api/v1/config`` reuses it as its read-only block)."""
+    return await health_payload(request)
+
+
 @router.get("/stats")
-async def stats(db: AsyncSession = Depends(get_read_db)):
+async def stats(db: AsyncSession = Depends(get_read_db),
+                user: User = Depends(get_current_user_any)):
     async def _count(model, *where):
         stmt = select(func.count(model.id))
         if where:
@@ -309,6 +329,34 @@ async def stats(db: AsyncSession = Depends(get_read_db)):
         "active": await _count(Tenant, Tenant.is_active.is_(True)),
     }
 
+    # Viewer processing distribution (roadmap #51, Phase 5 §5.2). These counters
+    # are in-process module state, not DB rows: `active_server_sessions` is the
+    # live thin-client count the hybrid engine load-balances on, and
+    # `server_vol_cache_mb` is the currently materialised volume cache. Reading
+    # them here makes the engine's own inputs observable — without this the
+    # dashboard could only show the *configuration*, never the actual load.
+    try:
+        viewer_processing = {
+            "active_server_sessions": volume_service.active_server_session_count(),
+            "server_vol_cache_mb": volume_service.estimated_vol_cache_mb(),
+            "configured_mode": settings.VIEWER_PROCESSING_MODE,
+            "max_server_sessions": settings.HYBRID_MAX_SERVER_MPR_SESSIONS,
+            "vol_budget_mb": settings.HYBRID_SERVER_VOL_BUDGET_MB,
+            "streaming_enabled": settings.VOLUME_STREAMING_ENABLED,
+            "client_score_threshold": settings.HYBRID_CLIENT_SCORE_THRESHOLD,
+            "rtt_threshold_ms": settings.HYBRID_RTT_THRESHOLD_MS,
+            "role_overrides": _role_override_summary(),
+        }
+    except Exception:  # pragma: no cover — never let telemetry fail the dashboard
+        log.exception("viewer processing telemetry failed")
+        viewer_processing = {
+            "active_server_sessions": 0,
+            "server_vol_cache_mb": 0,
+            "configured_mode": settings.VIEWER_PROCESSING_MODE,
+            "max_server_sessions": settings.HYBRID_MAX_SERVER_MPR_SESSIONS,
+            "vol_budget_mb": settings.HYBRID_SERVER_VOL_BUDGET_MB,
+        }
+
     # storage usage walks the storage tree (O(objects)) — serve from the TTL
     # cache, and never block the event loop on a cold cache (to_thread).
     storage_bytes = await asyncio.to_thread(
@@ -379,8 +427,28 @@ async def stats(db: AsyncSession = Depends(get_read_db)):
                 "enabled": True,
                 "endpoint": "/api/v1/fusion/{study_uid}",
             },
+            "viewer_processing": viewer_processing,
         },
     }
+
+
+def _role_override_summary() -> dict:
+    """Count of roles pinned by ``VIEWER_PROCESSING_ROLE_MAP``, by mode.
+
+    Returns counts only — the admin dashboard needs "how many roles are pinned
+    and to what", not the full map, and a count cannot leak a role name into a
+    lower-privileged view of this endpoint.
+    """
+    try:
+        from app.api.v1.volume import parse_role_map
+
+        role_map = parse_role_map()
+    except Exception:  # pragma: no cover
+        return {"total": 0, "by_mode": {}}
+    by_mode: dict[str, int] = {}
+    for mode in role_map.values():
+        by_mode[mode] = by_mode.get(mode, 0) + 1
+    return {"total": len(role_map), "by_mode": by_mode}
 
 
 @router.get("/audit")
@@ -414,7 +482,7 @@ async def list_audit(limit: int = 60, db: AsyncSession = Depends(get_db),
 
 @router.get("/studies")
 async def list_studies(request: Request, db: AsyncSession = Depends(get_read_db),
-                      user: User | None = Depends(get_optional_user)):
+                      user: User = Depends(get_current_user_any)):
     params = dict(request.query_params)
     page = max(int(params.get("page", 1)), 1)
     limit = min(max(int(params.get("limit", 20)), 1), 100)
@@ -612,6 +680,9 @@ async def list_studies(request: Request, db: AsyncSession = Depends(get_read_db)
             "patient_name": s.patient.patient_name,
             "patient_id": s.patient.patient_id,
             "patient_source": s.patient.source,
+            # C07: real demographics for the study drawer (never fabricated).
+            "patient_birth_date": s.patient.patient_birth_date if s.patient else None,
+            "patient_sex": s.patient.patient_sex if s.patient else None,
             "tenant_id": s.tenant_id,
             "tenant_name": tenant_names.get(s.tenant_id),
             "study_date": s.study_date,
@@ -695,15 +766,16 @@ async def review_triage(flag_id: int, db: AsyncSession = Depends(get_db),
 
 
 @router.get("/studies/{study_uid}")
-async def study_detail(study_uid: str, db: AsyncSession = Depends(get_db)):
+async def study_detail(study_uid: str, db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user_any)):
+    # C04: direct UID access must respect the tenant boundary.
+    study = await require_study_access(db, study_uid, user)
     study = (
         await db.execute(
             select(Study).options(joinedload(Study.patient))
-            .where(Study.study_instance_uid == study_uid)
+            .where(Study.id == study.id)
         )
-    ).scalar_one_or_none()
-    if study is None:
-        raise HTTPException(404, "Study not found")
+    ).scalar_one()
 
     series_list = (
         await db.execute(
@@ -749,10 +821,16 @@ async def study_detail(study_uid: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/studies/{study_uid}/series/{series_uid}/instances")
-async def series_instances(study_uid: str, series_uid: str, db: AsyncSession = Depends(get_db)):
+async def series_instances(study_uid: str, series_uid: str, db: AsyncSession = Depends(get_db),
+                           user: User = Depends(get_current_user_any)):
+    # C04: series-addressed access resolves through the study's tenant.
+    await require_series_access(db, series_uid, user)
+    tenant_id, include_all = tenant_scope(user)
     instances = (
         await db.execute(
-            query_service.instance_query(study_uid, series_uid)
+            query_service.instance_query(
+                study_uid, series_uid, tenant_id=tenant_id, include_all=include_all
+            )
             .order_by(Instance.instance_number.is_not(None).desc(), Instance.instance_number, Instance.id)
         )
     ).scalars().all()
@@ -772,10 +850,15 @@ async def series_instances(study_uid: str, series_uid: str, db: AsyncSession = D
 
 @router.get("/studies/{study_uid}/series/{series_uid}/thumbnail.png")
 async def series_thumbnail(study_uid: str, series_uid: str,
-                           db: AsyncSession = Depends(get_db)):
+                           db: AsyncSession = Depends(get_db),
+                           user: User = Depends(get_current_user_any)):
+    await require_series_access(db, series_uid, user)
+    tenant_id, include_all = tenant_scope(user)
     inst = (
         await db.execute(
-            query_service.instance_query(study_uid, series_uid)
+            query_service.instance_query(
+                study_uid, series_uid, tenant_id=tenant_id, include_all=include_all
+            )
             .order_by(Instance.instance_number.is_not(None).desc(), Instance.instance_number, Instance.id)
             .limit(1)
         )
@@ -811,17 +894,14 @@ async def presign_instance(study_uid: str, series_uid: str, sop_uid: str,
     WADO-URI endpoint (served directly). Lets heavy downloads bypass the API
     process when object storage is enabled.
     """
-    inst = (
-        await db.execute(
-            query_service.instance_query(study_uid, series_uid, {"SOPInstanceUID": sop_uid})
-        )
-    ).scalar_one_or_none()
-    if inst is None or not storage_service.exists(inst.file_path):
+    # C04: a presigned URL is direct object access — guard it like any read.
+    inst = await require_instance_access(db, study_uid, series_uid, sop_uid, user)
+    if not storage_service.exists(inst.file_path):
         raise HTTPException(404, "Instance not found")
 
     url = storage_service.presigned_url(inst.file_path, backend_name=inst.storage_backend)
     if url is None:
-        url = (f"{settings.PUBLIC_BASE_URL}/dicom-web/wado"
+        url = (f"{resolve_public_base_url()}/dicom-web/wado"
                f"?requestType=WADO&objectUID={inst.sop_instance_uid}")
     return {
         "sop_instance_uid": inst.sop_instance_uid,
@@ -834,11 +914,8 @@ async def presign_instance(study_uid: str, series_uid: str, sop_uid: str,
 @router.delete("/studies/{study_uid}", status_code=204)
 async def delete_study(study_uid: str, db: AsyncSession = Depends(get_db),
                        user=Depends(require_destructive_role)):
-    study = (
-        await db.execute(select(Study).where(Study.study_instance_uid == study_uid))
-    ).scalar_one_or_none()
-    if study is None:
-        raise HTTPException(404, "Study not found")
+    # C04: a destructive role authorises the *action*, not another tenant's data.
+    study = await require_study_access(db, study_uid, user)
 
     instances = (
         await db.execute(select(Instance).where(Instance.series_id.in_(

@@ -57,10 +57,15 @@ class LicenseCrypto {
     }
 
     /**
-     * Signs license data with RSA-2048 private key and embeds base64 signature.
+     * Signs license data with the configured RSA-2048 private key.
+     *
+     * The key comes from the caller, or from paxs_vendor_private_key()
+     * (environment / config.local.php). It is never bundled in source control:
+     * when nothing is configured this throws instead of signing with a
+     * committed key (plan_9_2026.md C01).
      */
     public static function signLicense(array &$data, ?string $privateKeyPem = null): array {
-        $privKey = $privateKeyPem ?: PAXS_VENDOR_PRIVATE_KEY;
+        $privKey = $privateKeyPem ?: paxs_vendor_private_key();
         $canonical = self::getCanonicalJson($data);
 
         $signature = '';

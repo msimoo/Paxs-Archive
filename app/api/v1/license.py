@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
-from app.api.v1.deps import get_current_user, require_admin
+from app.api.v1.deps import get_current_user, get_current_user_any, require_admin
 from app.core.licensing import (
     LicenseManager,
     get_hardware_info,
@@ -49,13 +49,14 @@ class LicenseStatusResponse(BaseModel):
 @router.get("/status", response_model=LicenseStatusResponse)
 async def get_license_status(
     lic: LicenseManager = Depends(get_license_manager),
+    _user=Depends(get_current_user_any),
 ) -> Any:
     """Returns current server license status, edition, features, and expiration."""
     return lic.get_summary()
 
 
 @router.get("/fingerprint")
-async def get_server_fingerprint() -> dict[str, Any]:
+async def get_server_fingerprint(_admin=Depends(require_admin)) -> dict[str, Any]:
     """Returns the host machine hardware fingerprint and system identifiers."""
     return {
         "fingerprint": get_machine_fingerprint(),

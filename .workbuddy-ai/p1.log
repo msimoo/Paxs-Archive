@@ -1,0 +1,224 @@
+..............................................F................F........ [  6%]
+...F..............s............................F.F...................... [ 12%]
+.......................F................................................ [ 18%]
+........................................................................ [ 24%]
+....................................F................................... [ 30%]
+........................................................................ [ 36%]
+.............F.............................F......................F..... [ 42%]
+.....................................................................F.. [ 48%]
+........................................................................ [ 54%]
+........................................................................ [ 60%]
+...........................F....................F....F.................. [ 66%]
+........................................................................ [ 72%]
+........................................................................ [ 78%]
+........................................................................ [ 84%]
+........................................................................ [ 90%]
+........................................................................ [ 96%]
+.......................................                                  [100%]DEBUG [paxs.commit-sender] commit sweep skipped (DB unavailable)
+DEBUG [paxs.commit-sender] commit sweep skipped (DB unavailable)
+
+============================== warnings summary ===============================
+venv\Lib\site-packages\fastapi\testclient.py:1
+  D:\Paxs Archive\venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/test_cfind.py::test_query_remote_node_study_level
+tests/test_split_merge.py::test_split_series_to_new_study_service[asyncio]
+  D:\Paxs Archive\scripts\unified_gateway_server.py:153: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event('startup')
+
+tests/test_cfind.py::test_query_remote_node_study_level
+tests/test_split_merge.py::test_split_series_to_new_study_service[asyncio]
+  D:\Paxs Archive\venv\Lib\site-packages\fastapi\applications.py:4681: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)  # ty: ignore[deprecated]
+
+tests/test_database.py: 10 warnings
+  D:\Paxs Archive\venv\Lib\site-packages\alembic\config.py:604: DeprecationWarning: No path_separator found in configuration; falling back to legacy splitting on spaces, commas, and colons for prepend_sys_path.  Consider adding path_separator=os to Alembic config.
+    util.warn_deprecated(
+
+tests/test_dicomdir.py::test_create_dicomdir_dataset
+tests/test_dicomdir.py::test_export_dicomdir_package_service[asyncio]
+tests/test_dicomdir.py::test_dicomdir_api
+tests/test_dicomdir.py::test_dicomdir_api
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\dataset.py:1378: DeprecationWarning: 'FileDataset.is_little_endian' will be removed in v4.0, set the Transfer Syntax UID or use the 'little_endian' argument with FileDataset.save_as() or dcmwrite() instead
+    warn_and_log(
+
+tests/test_dicomdir.py::test_create_dicomdir_dataset
+tests/test_dicomdir.py::test_export_dicomdir_package_service[asyncio]
+tests/test_dicomdir.py::test_dicomdir_api
+tests/test_dicomdir.py::test_dicomdir_api
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\dataset.py:1337: DeprecationWarning: 'FileDataset.is_implicit_VR' will be removed in v4.0, set the Transfer Syntax UID or use the 'implicit_vr' argument with FileDataset.save_as() or dcmwrite() instead
+    warn_and_log(
+
+tests/test_dicomweb.py: 15 warnings
+  D:\Paxs Archive\venv\Lib\site-packages\openjpeg\utils.py:693: DeprecationWarning: PyImport_ImportModuleNoBlock() is deprecated and scheduled for removal in Python 3.15. Use PyImport_ImportModule() instead.
+    return_code, buffer = _openjpeg.encode_buffer(
+
+tests/test_gsps.py::TestGSPSParser::test_parse_rotation_and_flip
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\dataset.py:2710: UserWarning: Camel case attribute 'SpatialTransformationSequence' used which is not in the element keyword data dictionary
+    warn_and_log(msg)
+
+tests/test_mysql_default.py::test_default_database_is_mysql
+  D:\Paxs Archive\tests\test_mysql_default.py:35: PydanticDeprecatedSince211: Accessing the 'model_fields' attribute on the instance is deprecated. Instead, you should access this attribute from the model class. Deprecated in Pydantic V2.11 to be removed in V3.0.
+    default = Settings().model_fields["DATABASE_URL"].default
+
+tests/test_route_auth_matrix.py::test_expired_or_unknown_share_token_does_not_authorise
+tests/test_route_auth_matrix.py::test_share_cookie_does_not_narrow_an_authenticated_user
+tests/test_route_auth_matrix.py::test_public_mode_ignores_a_stale_share_cookie
+tests/test_tenant_isolation.py::test_share_token_does_not_widen_a_tenant_users_access
+  D:\Paxs Archive\venv\Lib\site-packages\starlette\testclient.py:454: DeprecationWarning: Setting per-request cookies=<...> is being deprecated, because the expected behaviour on cookie persistence is ambiguous. Set cookies directly on the client instance instead.
+    return super().request(
+
+tests/test_scalability.py::test_worker_claims_atomically
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.3.claim'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_scalability.py::test_worker_claim_handles_partial_pending
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.3.claim2'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_storage_containment.py::test_stow_rejects_a_dot_segment_study_uid
+tests/test_storage_containment.py::test_stow_rejects_a_dot_segment_series_uid
+tests/test_storage_containment.py::test_cstore_returns_cannot_understand_for_a_malformed_uid
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '..'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_storage_containment.py::test_stow_rejects_a_separator_in_a_uid
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '../evil'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_storage_containment.py::test_stow_still_accepts_a_non_standard_but_harmless_uid
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.36e54e6b4c93400d8e4fcd3e9f169760'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_pregenerates_thumbnails_and_redis_keys
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.1344f0f6f09a4ca3961b0bd0427112be'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_pregenerates_thumbnails_and_redis_keys
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.840.113619.2.8d22ca77ea4945b78eeb1be5'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_pregenerates_thumbnails_and_redis_keys
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.10.511.2026.298dd116c93143b99415'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_pregenerates_thumbnails_and_redis_keys
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.28e75b6db311443aad58ed73a767d873'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_pregenerates_thumbnails_and_redis_keys
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.9e8af923e5dc49c6b9e1a075f47c2582'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_bounds_instances_and_decodes_first_frames
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.8fbc9585344945678bfc412d38999c3a'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_bounds_instances_and_decodes_first_frames
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.840.113619.2.ca1318514e7341eb814fa3b4'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_bounds_instances_and_decodes_first_frames
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.10.511.2026.5e1c8a6f25da41be9eb8'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_bounds_instances_and_decodes_first_frames
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.21653a48d67c42048ec1a9858d729049'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_bounds_instances_and_decodes_first_frames
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.30317cb34453424abf0f98c80f2f3408'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_idempotent_and_safe_on_missing_files
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.b7b2121298e34a41b02df8d5b9d535a9'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_idempotent_and_safe_on_missing_files
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.840.113619.2.1f68b0820d9f4ad9adac284b'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_idempotent_and_safe_on_missing_files
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.10.511.2026.5de27b59bcf545c0b3e4'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_idempotent_and_safe_on_missing_files
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.da75344f773f4bdc9af5f5e5372217d8'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_qido_with_study_uid_triggers_warm
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.d41dc16b5b374a90b66909bcb59555f7'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_qido_with_study_uid_triggers_warm
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.840.113619.2.2ec1a7d0778d40bda0ad1bc3'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_qido_with_study_uid_triggers_warm
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.10.511.2026.5a62fd5d44d843a6bafe'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_qido_list_does_not_warm_every_study
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.a6e61b43511146e48c26554a6266f91d'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_qido_list_does_not_warm_every_study
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.840.113619.2.a2014440463247b2ac145dd4'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_qido_list_does_not_warm_every_study
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.10.511.2026.c33b5f013498494780dd'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_study_metadata_triggers_warm
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.e108a2e0aaec4ed5b6bdd01a640aa6a7'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_study_metadata_triggers_warm
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.840.113619.2.a8c35dd78ba84c26b313f5e9'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_study_metadata_triggers_warm
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.10.511.2026.562f241131bd43168690'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_does_not_break_frame_requests
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.8.498.9dc12aa0b6df44dc84a0603c5a1b7ac4'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_does_not_break_frame_requests
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.840.113619.2.5696d4ef28d24820a7c77d0b'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+tests/test_warm_service.py::test_warm_does_not_break_frame_requests
+  D:\Paxs Archive\venv\Lib\site-packages\pydicom\valuerep.py:440: UserWarning: Invalid value for VR UI: '1.2.826.0.1.3680043.10.511.2026.5ee6927a4abb4f7d9187'. Please see <https://dicom.nema.org/medical/dicom/current/output/html/part05.html#table_6.2-1> for allowed values for each VR.
+    warn_and_log(msg)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_auth_defenses.py::test_security_headers_on_api_response - K...
+FAILED tests/test_cfind.py::test_rest_find_validation - assert 502 == 401
+FAILED tests/test_cget.py::test_rest_pull_error_paths - assert 502 == 401
+FAILED tests/test_cstore.py::test_rest_send_validation - assert 404 == 401
+FAILED tests/test_cstore.py::test_rest_send_vna_scoped - KeyError: 'access_to...
+FAILED tests/test_dicomweb.py::test_wado_frames_viewer_serves_native_codestream
+FAILED tests/test_multi_storage.py::test_storage_requires_auth - AssertionErr...
+FAILED tests/test_perf_serving.py::test_admin_hashed_asset_immutable - assert...
+FAILED tests/test_redis_panel.py::test_redis_ping - AssertionError: assert 'l...
+FAILED tests/test_replication.py::test_api_requires_auth - AssertionError: as...
+FAILED tests/test_scripting.py::test_api_requires_auth - AssertionError: asse...
+FAILED tests/test_users.py::test_users_requires_auth - AssertionError: assert...
+FAILED tests/test_vna.py::test_tenant_crud_and_permissions - KeyError: 'acces...
+FAILED tests/test_vna.py::test_rest_and_qido_scoping - assert 2 is None
+14 failed, 1176 passed, 1 skipped, 77 warnings in 2342.25s (0:39:02)

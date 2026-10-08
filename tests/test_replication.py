@@ -172,6 +172,9 @@ def test_new_instance_requeues_replicated_study(client, admin, tmp_path, monkeyp
 # Admin API
 # --------------------------------------------------------------------------- #
 def test_api_requires_auth(client):
+    # The autouse `admin` fixture logged in on this client, and the API also
+    # accepts cookie sessions (C03), so clear the jar to be anonymous.
+    client.cookies.clear()
     assert client.get("/api/v1/replication").status_code == 401
     assert client.post("/api/v1/replication/sweep").status_code == 401
 
@@ -239,5 +242,5 @@ def test_health_live_ready(client, admin):
     assert ready.status_code == 200
     assert ready.json()["status"] == "ready"
 
-    full = client.get("/api/v1/health").json()
+    full = client.get("/api/v1/health", headers=admin).json()
     assert full["instance"] == settings.PAXS_INSTANCE_ID

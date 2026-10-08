@@ -14,7 +14,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import (
+    get_current_user,
+    require_admin,
+    require_destructive_role,
+)
 from app.db.models import User
 from app.db.session import get_db
 from app.services import split_merge_service
@@ -41,7 +45,7 @@ class MergeStudyRequest(BaseModel):
 async def split_study(
     req: SplitStudyRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_destructive_role),
 ):
     """Split specific series from a study into a new study."""
     if not req.series_instance_uids:
@@ -77,7 +81,7 @@ async def split_study(
 async def merge_studies(
     req: MergeStudyRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_destructive_role),
 ):
     """Merge source studies into a target study."""
     if not req.source_study_uids:

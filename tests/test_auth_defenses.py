@@ -129,13 +129,29 @@ def test_audit_records_theft_detection(client):
 # --------------------------------------------------------------------------- #
 def test_security_headers_on_api_response(client):
     res = client.get("/api/v1/auth/me")
-    assert res.headers["strict-transport-security"] == "max-age=31536000; includeSubDomains"
     assert res.headers["x-frame-options"] == "DENY"
     assert res.headers["x-content-type-options"] == "nosniff"
     assert res.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert "default-src 'self'" in res.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in res.headers["content-security-policy"]
     assert "camera=()" in res.headers["permissions-policy"]
+    # H06 / RFC 6797 §7.2: HSTS is only advertised over HTTPS. The test client
+    # speaks plain HTTP, so sending it here would be wrong (it can break LAN
+    # access after a protocol switch).
+    assert ("strict-transport-security" in res.headers) is bool(settings.HTTPS_ENABLED)
+
+
+def test_hsts_is_registered_exactly_when_https_is_enabled():
+    """H06: the HSTS header follows the HTTPS_ENABLED switch, not a constant."""
+    import app.main as main_app
+
+    assert ("Strict-Transport-Security" in main_app._SECURITY_HEADERS) is bool(
+        settings.HTTPS_ENABLED
+    )
+    if settings.HTTPS_ENABLED:
+        assert main_app._SECURITY_HEADERS["Strict-Transport-Security"] == (
+            "max-age=31536000; includeSubDomains"
+        )
 
 
 def test_security_headers_on_static_page(client):

@@ -41,6 +41,12 @@ async def test_find_prior_studies_service():
 
 
 def _get_auth_headers(client, username="admin_priors"):
+    from tests.helpers import auth_for_role
+
+    return auth_for_role(client, username, role="ADMIN", password="adminpassword")
+
+
+def _legacy_get_auth_headers(client, username="admin_priors"):
     reg = client.post(
         "/api/v1/auth/register",
         json={"username": username, "password": "adminpassword", "full_name": "Admin Priors"},

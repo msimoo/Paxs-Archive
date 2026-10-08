@@ -763,6 +763,7 @@
         <button data-stab="storage">Storage</button>
         <button data-stab="security">Security</button>
         <button data-stab="workflow">Workflow</button>
+        <button data-stab="viewer">Viewer</button>
         <button data-stab="db">Database</button>
         <button data-stab="redis">Redis</button>
       </div>
@@ -794,6 +795,16 @@
 
       <div class="settings-panel" id="spanel-workflow" hidden>
         <div class="cfg-form" id="set-workflow"><p class="sub">Loading…</p></div>
+      </div>
+
+      <div class="settings-panel" id="spanel-viewer" hidden>
+        <p class="sub" style="margin:0 0 12px">
+          Controls where DICOM decoding, MPR and 3D rendering run — <b>Server</b> (thin client),
+          <b>Client</b> (diagnostic workstation GPU) or <b>Hybrid</b> (auto-detected per session).
+          Per-role overrides win over the global mode. Changes apply immediately and persist in the
+          <code>server_settings</code> table.
+        </p>
+        <div class="cfg-form" id="set-viewer"><p class="sub">Loading…</p></div>
       </div>
 
       <div class="settings-panel" id="spanel-db" hidden>

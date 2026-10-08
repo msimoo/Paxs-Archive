@@ -27,7 +27,7 @@ from sqlalchemy import select
 
 from app.db.models import Study, User
 from app.db.session import SyncSessionLocal
-from tests.helpers import build_stow_body, ds_bytes, make_instance, stow_headers
+from tests.helpers import auth_for_role, build_stow_body, ds_bytes, make_instance, stow_headers
 
 
 def _store_as(host, port, datasets: list[bytes], calling_ae: str) -> list[int]:
@@ -120,12 +120,9 @@ def test_tenant_crud_and_permissions(client):
                        json={"name": "Other", "code": "rad-a"}).status_code == 409
 
     # Radiologist may list but not create/modify (ADMIN-only writes).
-    client.post("/api/v1/auth/register", json={
-        "username": "dr.rad", "password": "secret123", "role": "RADIOLOGIST",
-    })
-    res = client.post("/api/v1/auth/login",
-                      json={"username": "dr.rad", "password": "secret123"})
-    rad_h = {"Authorization": f"Bearer {res.json()['access_token']}"}
+    # H02: a privileged role cannot self-register, so it is provisioned by the
+    # admin (same helper the user-management tests use).
+    rad_h = auth_for_role(client, "dr.rad", role="RADIOLOGIST", admin=admin_h)
     assert client.get("/api/v1/tenants", headers=rad_h).status_code == 200
     assert client.post("/api/v1/tenants", headers=rad_h,
                        json={"name": "No", "code": "no"}).status_code == 403
@@ -149,7 +146,10 @@ def test_tenant_crud_and_permissions(client):
     assert client.delete(f"/api/v1/tenants/{t1['id']}", headers=admin_h).status_code == 204
     assert client.get("/api/v1/tenants", headers=admin_h).json() == []
 
-    # Unauthenticated -> 401
+    # Unauthenticated -> 401. The logins above left a session cookie in the
+    # shared client and the API also accepts cookie sessions (C03), so clear
+    # the jar to make this request genuinely anonymous.
+    client.cookies.clear()
     assert client.get("/api/v1/tenants").status_code == 401
 
 
@@ -345,6 +345,10 @@ def test_rest_and_qido_scoping(client):
                                 sop_uid="1.2.3.5.502.1"), headers=dr_a_h)
     _stow(client, make_instance(study_uid=sb, series_uid="1.2.3.4.502.2",
                                 sop_uid="1.2.3.5.502.2"), headers=dr_b_h)
+    # A guest STOW must be genuinely unauthenticated: the logins above left a
+    # session cookie in the shared client, and ingest attributes a study to the
+    # authenticated caller's tenant (C04).
+    client.cookies.clear()
     _stow(client, make_instance(study_uid=sx, series_uid="1.2.3.4.502.3",
                                 sop_uid="1.2.3.5.502.3"))  # guest STOW -> legacy
 
@@ -360,11 +364,17 @@ def test_rest_and_qido_scoping(client):
         assert r.status_code == 200
         return {i["study_uid"] for i in r.json()["items"]}
 
-    # Tenant user A sees only A; user B only B; guest only legacy; admin all.
+    # Tenant user A sees only A; user B only B; admin all.
     assert _study_uids(headers=dr_a_h) == {sa}
     assert _study_uids(headers=dr_b_h) == {sb}
-    assert _study_uids() == {sx}
     assert _study_uids(headers=admin_h) == {sa, sb, sx}
+    # C03: the REST study list is authenticated-only, so an anonymous caller is
+    # refused; a signed-in user *without* a tenant keeps the legacy scope (the
+    # anonymous path for legacy data is DICOMweb QIDO, checked below).
+    client.cookies.clear()
+    assert client.get("/api/v1/studies").status_code == 401
+    legacy_h = auth_for_role(client, "dr.legacy", role="PHYSICIAN", admin=admin_h)
+    assert _study_uids(headers=legacy_h) == {sx}
     # Admin tenant filter
     assert _study_uids(headers=admin_h, params={"tenant": t_a["id"]}) == {sa}
     assert _study_uids(headers=admin_h, params={"tenant": "none"}) == {sx}

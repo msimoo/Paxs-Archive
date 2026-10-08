@@ -2,8 +2,9 @@ import type { Study } from '@/types/study';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Forward, Server } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { fetchNodes, forwardStudy, type DicomNode } from '@/lib/api';
 
 interface ForwardModalProps {
   study: Study | null;
@@ -13,23 +14,56 @@ interface ForwardModalProps {
 }
 
 export function ForwardModal({ study, isOpen, onClose, onToast }: ForwardModalProps) {
-  const [node, setNode] = useState('ARCHIVE_A');
-  const [syntax, setSyntax] = useState('implicit');
+  const [nodes, setNodes] = useState<DicomNode[]>([]);
+  const [node, setNode] = useState('');
+  const [loadingNodes, setLoadingNodes] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // H01: destinations come from the archive's own node registry — the previous
+  // hardcoded list (with invented IPs) is gone.
+  useEffect(() => {
+    if (!isOpen) return;
+    const controller = new AbortController();
+    setLoadingNodes(true);
+    setError(null);
+    fetchNodes(controller.signal)
+      .then((list) => {
+        const usable = list.filter((n) => n.enabled);
+        setNodes(usable);
+        setNode(usable.length ? usable[0].ae_title : '');
+      })
+      .catch((err: unknown) => {
+        if (!controller.signal.aborted) {
+          setError(err instanceof Error ? err.message : 'Could not load DICOM nodes');
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingNodes(false);
+      });
+    return () => controller.abort();
+  }, [isOpen]);
 
   if (!study) return null;
 
-  const handleForward = () => {
+  const handleForward = async () => {
+    if (!node) return;
     setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
-      onToast(`Successfully forwarded study to ${node}`);
+    setError(null);
+    try {
+      await forwardStudy(study.study_uid, node);
+      // H01: the backend queues the job, so the wording must not claim delivery.
+      onToast(`Queued for forwarding to ${node}`);
       onClose();
-    }, 1500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Forward failed');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+    <Dialog open={isOpen} onOpenChange={(open) => !open && !loading && onClose()}>
       <DialogContent className="bg-[#0c1424] border-slate-700 text-slate-200 sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="text-xl font-bold flex items-center gap-2">
@@ -37,7 +71,7 @@ export function ForwardModal({ study, isOpen, onClose, onToast }: ForwardModalPr
             C-STORE Forward
           </DialogTitle>
         </DialogHeader>
-        
+
         <div className="space-y-6 py-4">
           <div className="space-y-2">
             <label className="text-sm text-slate-400">Study to Forward</label>
@@ -49,38 +83,40 @@ export function ForwardModal({ study, isOpen, onClose, onToast }: ForwardModalPr
 
           <div className="space-y-2">
             <label className="text-sm text-slate-400">Destination Node</label>
-            <Select value={node} onValueChange={setNode}>
-              <SelectTrigger className="bg-[#070c18] border-slate-700 text-white">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="bg-[#0c1424] border-slate-700 text-slate-200">
-                <SelectItem value="ARCHIVE_A">ARCHIVE_A (10.0.0.5:104)</SelectItem>
-                <SelectItem value="ORTHANC_REMOTE">ORTHANC_REMOTE (192.168.1.50:4242)</SelectItem>
-                <SelectItem value="PACS_BACKUP">PACS_BACKUP (10.0.0.9:11112)</SelectItem>
-              </SelectContent>
-            </Select>
+            {loadingNodes ? (
+              <div className="text-sm text-slate-500 p-3">Loading nodes…</div>
+            ) : nodes.length === 0 ? (
+              <div className="text-sm text-amber-300 p-3 bg-amber-950/20 border border-amber-900/40 rounded">
+                No enabled DICOM nodes are configured on this server.
+              </div>
+            ) : (
+              <Select value={node} onValueChange={setNode}>
+                <SelectTrigger className="bg-[#070c18] border-slate-700 text-white">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0c1424] border-slate-700 text-slate-200">
+                  {nodes.map((n) => (
+                    <SelectItem key={n.ae_title} value={n.ae_title}>
+                      {n.ae_title} ({n.host}:{n.port})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           </div>
 
-          <div className="space-y-2">
-            <label className="text-sm text-slate-400">Transfer Syntax</label>
-            <Select value={syntax} onValueChange={setSyntax}>
-              <SelectTrigger className="bg-[#070c18] border-slate-700 text-white">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="bg-[#0c1424] border-slate-700 text-slate-200">
-                <SelectItem value="implicit">Implicit VR Little Endian</SelectItem>
-                <SelectItem value="explicit">Explicit VR Little Endian</SelectItem>
-                <SelectItem value="jpeg_lossless">JPEG Lossless</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          {error && (
+            <div className="p-3 bg-rose-950/40 border border-rose-800 rounded-lg text-sm text-rose-200">
+              {error}
+            </div>
+          )}
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} className="border-slate-700 text-slate-300 hover:bg-slate-800">
+          <Button variant="outline" onClick={onClose} disabled={loading} className="border-slate-700 text-slate-300 hover:bg-slate-800">
             Cancel
           </Button>
-          <Button onClick={handleForward} disabled={loading} className="bg-teal-600 hover:bg-teal-500 text-white">
+          <Button onClick={handleForward} disabled={loading || !node} className="bg-teal-600 hover:bg-teal-500 text-white">
             {loading ? (
               <span className="flex items-center gap-2">
                 <Server className="w-4 h-4 animate-spin" /> Sending...

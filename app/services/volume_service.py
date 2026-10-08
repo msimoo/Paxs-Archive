@@ -26,13 +26,17 @@ import io
 import logging
 import math
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from collections import OrderedDict
+from typing import TYPE_CHECKING
 
 import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import cache_stats
 from app.core.config import settings
 from app.db.models import Instance, Series, Study
 from app.services import query_service, storage_service
@@ -102,6 +106,26 @@ def dominant_axis(iop: list[float] | None) -> int:
             "OBLIQUE": 2, "UNKNOWN": 2}[orientation_label(iop)]
 
 
+def strided_dim(n: int, step: int) -> int:
+    """Samples a strided read (``x[::step]``) yields for ``n`` items.
+
+    This mirrors Python/numpy slicing exactly — ``len(range(0, n, step))`` is
+    ``ceil(n / step)`` — and is the single source of truth for the downsampled
+    geometry of ``/api/v1/volume/{series}/data``: the declared
+    ``X-Volume-Rows``/``X-Volume-Cols``, the ``.npy`` header shape and the
+    ``Content-Length`` must all agree with ``sampled_array.shape``.
+
+    Mixing this with floor division made odd dimensions declare 2x3 while the
+    sampler produced 3x4 (see ``plan_9_2026.md`` H13).  ``step < 1`` is clamped
+    to 1 (an un-downsampled read).
+    """
+    n = int(n)
+    step = max(1, int(step or 1))
+    if n <= 0:
+        return 0
+    return -(-n // step)  # ceil without float rounding
+
+
 def npy_header(dtype: str, shape: tuple[int, ...]) -> bytes:
     """NumPy 1.0 file-format header for ``shape`` of ``dtype`` (streaming-safe).
 
@@ -142,14 +166,18 @@ class VolumeSlice:
         return self.position is not None
 
 
-async def series_slices(db: AsyncSession, series_uid: str) -> list[VolumeSlice]:
+async def series_slices(db: AsyncSession, series_uid: str, *,
+                        tenant_id: int | None = None,
+                        include_all: bool = False) -> list[VolumeSlice]:
     """All readable image instances of a series, sorted into stack order.
 
     Ordering: by ImagePositionPatient along the dominant axis when positions
     are present (stable for ties), else by InstanceNumber / row id.
     """
     stmt = (
-        query_service.instance_query(None, series_uid)
+        query_service.instance_query(
+            None, series_uid, tenant_id=tenant_id, include_all=include_all
+        )
         .order_by(
             Instance.instance_number.is_not(None).desc(),
             Instance.instance_number,
@@ -393,13 +421,17 @@ _BUNDLE_CACHE: dict[str, tuple[dict, list[VolumeSlice]]] = {}
 _BUNDLE_CACHE_MAX = 32
 
 
-async def volume_bundle(db: AsyncSession, series_uid: str) -> tuple[dict, list[VolumeSlice]] | None:
+async def volume_bundle(db: AsyncSession, series_uid: str, *,
+                        tenant_id: int | None = None,
+                        include_all: bool = False) -> tuple[dict, list[VolumeSlice]] | None:
     """``(info_dict, sorted_slices)`` for a series, or None when it has no
     readable volumetric instances."""
     if series_uid in _BUNDLE_CACHE:
         return _BUNDLE_CACHE[series_uid]
 
-    slices = await series_slices(db, series_uid)
+    slices = await series_slices(
+        db, series_uid, tenant_id=tenant_id, include_all=include_all
+    )
     if not slices:
         return None
 
@@ -494,8 +526,12 @@ async def volume_bundle(db: AsyncSession, series_uid: str) -> tuple[dict, list[V
     return info, slices
 
 
-async def volume_info(db: AsyncSession, series_uid: str) -> dict | None:
-    bundle = await volume_bundle(db, series_uid)
+async def volume_info(db: AsyncSession, series_uid: str, *,
+                      tenant_id: int | None = None,
+                      include_all: bool = False) -> dict | None:
+    bundle = await volume_bundle(
+        db, series_uid, tenant_id=tenant_id, include_all=include_all
+    )
     return bundle[0] if bundle else None
 
 
@@ -554,6 +590,18 @@ def iter_volume_bytes(
         try:
             arr = _frame_array(s, cache)
         except Exception as exc:  # noqa: BLE001 - surface any decode failure
+            from app.core.dicom_diagnostics import decode_context
+
+            # `_frame_array` caches the Dataset it read, so on a decode failure
+            # the dataset is usually still available for context. When it is not
+            # (the read itself failed) fall back to the slice identity.
+            ds = cache.get(s.file_path) if cache else None
+            log.error(
+                "cannot decode slice %s (%s: %s) | %s",
+                s.sop_uid, type(exc).__name__, exc,
+                decode_context(ds, frame=s.frame) if ds is not None
+                else f"sop={s.sop_uid} frame={s.frame} dataset_unreadable",
+            )
             raise ValueError(f"cannot decode slice {s.sop_uid}: {exc}") from exc
         if tuple(arr.shape) != expected_shape:
             raise ValueError(
@@ -585,23 +633,19 @@ def volume_byte_length(slices: list[VolumeSlice], dtype: str,
                        rows: int, cols: int, samples: int,
                        start: int = 0, end: int | None = None,
                        downsample: int = 1) -> int:
-    """Total payload bytes for the given slice range (no rescale)."""
+    """Total payload bytes for the given slice range (no rescale).
+
+    Must stay byte-exact with ``iter_volume_bytes`` for the same arguments
+    (H13): the sampler strides with ``arr[::step, ::step]``, so the output
+    geometry is ``strided_dim`` — never floor division.
+    """
     end = len(slices) if end is None else min(end, len(slices))
     step = max(1, int(downsample or 1))
     count = len(slices[start:end:step])
-    out_rows = max(1, math.ceil(rows / step)) if step > 1 else rows
-    out_cols = max(1, math.ceil(cols / step)) if step > 1 else cols
+    out_rows = strided_dim(rows, step)
+    out_cols = strided_dim(cols, step)
     per_slice = out_rows * out_cols * samples * np.dtype(dtype).itemsize
     return count * per_slice
-
-
-def write_npy(buf: io.BytesIO, dtype: str, shape: tuple[int, ...],
-              slices: list[VolumeSlice], rescale: bool = False,
-              start: int = 0, end: int | None = None) -> None:
-    """Stream an ``.npy`` file (header + per-slice payload chunks) into ``buf``."""
-    buf.write(npy_header(dtype if not rescale else "float32", shape))
-    for chunk in iter_volume_bytes(slices, rescale=rescale, start=start, end=end):
-        buf.write(chunk)
 
 
 # ---------------------------------------------------------------------------
@@ -613,11 +657,19 @@ def write_npy(buf: io.BytesIO, dtype: str, shape: tuple[int, ...],
 # values. This is the thin-client fallback for browsers that cannot run the
 # WebGL2 reslicing module: the server does the geometry.
 #
-# Plane definitions:
+# Plane definitions — the CANONICAL orientation convention shared with the
+# WebGL viewer (app/static/viewer/paxs-mpr.js + paxs-mpr-geometry.js):
 #   * native planes  — plane=axial|sagittal|coronal & index=N
-#       axial    index over the slice stack   (data[j, i] = vol[k, j, i])
-#       sagittal index over columns           (data[j, k] = vol[k, j, i])
-#       coronal  index over rows              (data[i, k] = vol[k, j, i])
+#       axial    (const k)  data[j, i] = vol[k, j, i]   rows=ny cols=nx
+#                           u = i (X) horizontal, v = j (Y) vertical
+#       sagittal (const i)  data[k, j] = vol[k, j, i]   rows=nz cols=ny
+#                           u = j (Y) horizontal, v = k (Z) vertical
+#       coronal  (const j)  data[k, i] = vol[k, j, i]   rows=nz cols=nx
+#                           u = i (X) horizontal, v = k (Z) vertical
+#     (Earlier revisions of this comment wrote the sagittal/coronal indices in
+#      the transposed order, contradicting the implementation below. The
+#      ResliceResult.spacing of each plane — [vertical, horizontal] mm — is the
+#      machine-readable statement of the same convention.)
 #   * oblique       — origin=x,y,z & row=dx,dy,dz & col=dx,dy,dz (patient
 #       coordinates, mm). row/col are unit direction cosines; the plane is
 #       sampled on a grid centred on `origin` whose per-pixel spacing comes
@@ -634,12 +686,522 @@ def write_npy(buf: io.BytesIO, dtype: str, shape: tuple[int, ...],
 # and server-side slice extraction do not re-read and re-decode all DICOM instances from disk.
 # Accessed from the worker thread pool (MPR/MIP run via asyncio.to_thread), so
 # mutations are guarded by a lock — a racing eviction must never corrupt the dict.
-_VOL_CACHE: dict[str, np.ndarray] = {}
-_VOL_CACHE_MAX = 8
+# L1 volume cache. An OrderedDict so eviction is LEAST-RECENTLY-USED rather than
+# insertion-ordered (V3-6): the old `dict` + `next(iter(...))` evicted the oldest
+# *inserted* volume, so a series in constant use could be dropped ahead of one
+# touched once long ago. `_TILE_CACHE` below already works this way.
+#
+# Bounded by BYTES (settings.VOLUME_CACHE_BUDGET_MB), not entry count. The old
+# 8-entry cap was smaller than HYBRID_MAX_SERVER_MPR_SESSIONS (20), so the cache
+# was guaranteed to thrash under exactly the load it was built for.
+_VOL_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
 _VOL_CACHE_LOCK = threading.Lock()
+
+
+def volume_cache_budget_bytes() -> int:
+    """Current budget from settings (re-read each call so an override applies live).
+
+    ``0`` means **caching disabled** and is returned as 0, not masked with a
+    default: an ``or`` fallback would silently turn a deliberate disable into the
+    full default budget.
+    """
+    raw = getattr(settings, "VOLUME_CACHE_BUDGET_MB", 1024)
+    try:
+        mb = int(raw)
+    except (TypeError, ValueError):
+        mb = 1024
+    return max(0, mb) * 1024 * 1024
+
+
+def volume_cache_stats() -> dict[str, int]:
+    """Counters + gauges for the L1 volume cache (used by tests and /metrics)."""
+    return cache_stats.snapshot()["volume"]
+
+
+def _vol_cache_put_locked(cache_key: str, vol: np.ndarray) -> None:
+    """Insert into L1 with byte accounting + LRU eviction. Caller holds the lock.
+
+    The total is recomputed from the dict rather than tracked as a running
+    delta: ``_VOL_CACHE.clear()`` is called directly by tests and by cache
+    resets, and a stale counter would then evict everything or nothing.
+    """
+    budget = volume_cache_budget_bytes()
+    if budget <= 0:
+        # Caching disabled (VOLUME_CACHE_BUDGET_MB=0): store nothing and report
+        # an empty cache rather than retaining one oversized entry.
+        cache_stats.set_gauges("volume", bytes=0, entries=0)
+        return
+
+    _VOL_CACHE.pop(cache_key, None)
+    _VOL_CACHE[cache_key] = vol
+    cache_stats.incr("volume", "inserts")
+
+    total = sum(int(v.nbytes) for v in _VOL_CACHE.values())
+    # Never evict the entry just inserted: one volume larger than the whole
+    # budget would otherwise be dropped immediately, so the cache would never
+    # hold anything and every request would re-decode.
+    while len(_VOL_CACHE) > 1 and total > budget:
+        _evicted_key, evicted = _VOL_CACHE.popitem(last=False)
+        total -= int(evicted.nbytes)
+        cache_stats.incr("volume", "evictions")
+    cache_stats.set_gauges("volume", bytes=total, entries=len(_VOL_CACHE))
+
+# --------------------------------------------------------------------------- #
+# V3-1 — in-flight volume materialisation registry.
+#
+# The L1/L2 lookup in load_volume_array is cheap and locked, but the decode loop
+# beneath it is neither: it re-reads and re-decodes every slice from disk and
+# stacks the result into a fresh float32 array (~500 MB for a 512x512x500 CT).
+# Without a registry, N concurrent /mpr/slice or /tiles requests for one
+# uncached series all miss the cache and all pay that cost in parallel.
+#
+# Callers run load_volume_array via asyncio.to_thread, i.e. on a worker thread,
+# so the synchronisation primitive must be a threading.Event (not asyncio.Event,
+# which is not thread-safe and cannot be waited on from the pool).
+# --------------------------------------------------------------------------- #
+_IN_FLIGHT_VOLUMES: dict[str, threading.Event] = {}
+_IN_FLIGHT_VOLUMES_LOCK = threading.Lock()
+
+# How long a waiter will block for the owner before giving up and decoding the
+# volume itself. Generous (a large series over slow storage is genuinely slow)
+# but finite, so a crashed owner can never wedge every later request.
+_IN_FLIGHT_WAIT_SECONDS = 180.0
+
+# How many times one caller will wait for somebody else's materialisation before
+# decoding the volume itself. Bounds the loop when an owner repeatedly fails, so
+# a pathological series cannot spin its callers forever.
+_IN_FLIGHT_MAX_WAITS = 3
+
+# Rendered-tile caches (plan_viewer_process.md §5.4, server mode).
+#
+# A server-mode viewer requests one PNG per slice per window, so the same plane
+# is rasterized repeatedly as the user scrolls back and forth.  L1 keeps whole
+# PNGs keyed by series+plane+index+window (``tile_cache_key``); L2 is the Redis
+# tier shared across nodes.  The LRU holds rendered tiles only — it is not a
+# second volume cache, and it is bounded independently of ``_VOL_CACHE`` so a
+# long server-mode session cannot evict the volumes other sessions depend on.
+_TILE_CACHE: "OrderedDict[str, RenderedPlane]" = OrderedDict()
+_TILE_CACHE_MAX = 256
+_TILE_REDIS_TTL = 600          # matches the plan's rendered-image tier
+_TILE_REDIS_MAX_BYTES = 4 * 1024 * 1024
+_TILE_INFLIGHT_WAIT_SECONDS = 20.0
 
 # Redis payload header: 3 x int32 (nz, ny, nx) then float32 voxels.
 _VOL_REDIS_TTL = 3600
+
+# ---------------------------------------------------------------------------
+# Server-side MPR session tracking (plan_viewer_process.md §5.3)
+#
+# Lightweight bookkeeping so the hybrid negotiation endpoint can gauge server
+# load.  Entries auto-expire after _SESSION_TIMEOUT seconds of inactivity.
+# Thread-safe: mutations are guarded by the same _VOL_CACHE_LOCK.
+# ---------------------------------------------------------------------------
+_ACTIVE_SERVER_SESSIONS: dict[str, float] = {}
+_SESSION_TIMEOUT = 300  # seconds
+
+# Server-mode tile stampede guard.  Volume materialization is already cached by
+# load_volume_array (L1 + L2), but concurrent requests for the *same* slice
+# would still each materialize the full volume and rasterize the same PNG.
+# Request coalescing here means N concurrent viewers of one slice pay for one
+# render.  Bounded by _TILE_INFLIGHT_MAX so a hostile fan-out cannot pin
+# unbounded heap (entries are keyed by series+plane+slice, not by caller).
+_TILE_INFLIGHT: dict[tuple, "_TileInFlight"] = {}
+_TILE_INFLIGHT_LOCK = threading.Lock()
+_TILE_INFLIGHT_MAX = 64
+
+
+class _TileInFlight:
+    """One in-progress tile render shared by every waiter for the same key.
+
+    Duplicated rather than imported (``ThreadPoolExecutor`` subclasses ``Future``
+    only when concurrent.futures provides it) — this carries the PNG payload and
+    the outcome timestamp the *waiters* need, which a bare Future does not.
+    """
+
+    __slots__ = ("event", "png", "error", "done_at")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.png: bytes | None = None
+        self.error: BaseException | None = None
+        self.done_at = 0.0
+
+    def resolve(self, png: bytes | None, error: BaseException | None) -> None:
+        self.png = png
+        self.error = error
+        self.done_at = time.monotonic()
+        self.event.set()
+
+    def wait(self, timeout: float) -> "bytes | None":
+        """Block until the owner finishes; None if it finished with an error."""
+        self.event.wait(timeout)
+        if not self.event.is_set():
+            # The owner is still grinding.  Callers fall through to their own
+            # render rather than blocking a request thread indefinitely.
+            return None
+        return self.png
+
+
+def _tile_inflight_begin(key: tuple):
+    """Return ``(owner, shared)`` — owner True means this caller renders."""
+    now = time.monotonic()
+    with _TILE_INFLIGHT_LOCK:
+        # Reap completed / abandoned entries so the dict cannot grow without
+        # bound when a renderer dies without resolving its entry.
+        for dead in [k for k, shared in _TILE_INFLIGHT.items()
+                     if shared.event.is_set() and now - shared.done_at > 1.0]:
+            _TILE_INFLIGHT.pop(dead, None)
+        shared = _TILE_INFLIGHT.get(key)
+        if shared is not None and not shared.event.is_set():
+            return False, shared
+        if len(_TILE_INFLIGHT) >= _TILE_INFLIGHT_MAX:
+            oldest = min(_TILE_INFLIGHT, key=lambda k: _TILE_INFLIGHT[k].done_at)
+            _TILE_INFLIGHT.pop(oldest, None)
+        owner = _TileInFlight()
+        _TILE_INFLIGHT[key] = owner
+        return True, owner
+
+
+def _tile_inflight_abort(key: tuple) -> None:
+    """Owner path: drop the entry without publishing a payload."""
+    with _TILE_INFLIGHT_LOCK:
+        _TILE_INFLIGHT.pop(key, None)
+
+
+def tile_cache_key(
+    series_uid: str,
+    plane: str,
+    index: int,
+    window_center: float | None = None,
+    window_width: float | None = None,
+) -> str:
+    """Stable identity of a rendered slice tile.
+
+    Window values are rounded to one decimal so a slider drag does not mint a
+    new key on every mouse-move sample.  ``auto`` keeps an un-windowed render
+    (the series window resolved by :func:`window_for`) distinct from an
+    explicitly requested window that happens to equal it.
+    """
+    if window_center is None or window_width is None:
+        window = "auto"
+    else:
+        window = f"{round(float(window_center), 1)}:{round(float(window_width), 1)}"
+    return f"paxs:tile:{series_uid}:{plane}:{int(index)}:{window}"
+
+
+def render_plane_tile(
+    slices: list[VolumeSlice],
+    info: dict,
+    plane: str,
+    index: int,
+    window_center: float | None = None,
+    window_width: float | None = None,
+) -> "RenderedPlane":
+    """Reslice ONE native plane and rasterize it to PNG (L1 + L2 cached).
+
+    Returns the PNG bytes together with the *resolved* window and the reslice
+    geometry, so a caller never has to recompute ``window_for`` (an autoscale
+    over the whole plane) just to report the window it displayed.
+
+    Raises ``ValueError`` for an unknown plane and ``IndexError`` for an index
+    outside the volume — both are turned into HTTP 400/416 by the router.
+    """
+    plane = str(plane).lower()
+    if plane not in ("axial", "sagittal", "coronal"):
+        raise ValueError("plane must be 'axial', 'sagittal' or 'coronal'")
+    index = int(index)
+    if plane == "axial" and not 0 <= index < int(info["slices"]):
+        raise IndexError(f"axial index {index} out of range 0-{int(info['slices']) - 1}")
+    if plane == "sagittal" and not 0 <= index < int(info["columns"]):
+        raise IndexError(f"sagittal index {index} out of range 0-{int(info['columns']) - 1}")
+    if plane == "coronal" and not 0 <= index < int(info["rows"]):
+        raise IndexError(f"coronal index {index} out of range 0-{int(info['rows']) - 1}")
+
+    series_uid = info.get("series_instance_uid") or ""
+    key = tile_cache_key(series_uid, plane, index, window_center, window_width)
+
+    # L1: in-process tile cache.
+    with _VOL_CACHE_LOCK:
+        hit = _TILE_CACHE.get(key)
+        if hit is not None:
+            _TILE_CACHE.move_to_end(key)
+            return hit
+
+    # L2: Redis tile cache, shared across nodes.
+    if getattr(settings, "REDIS_CACHE_ENABLED", False):
+        png = _redis_get_bytes(key)
+        if png:
+            rendered = _tile_from_cache(png, info, plane, index, window_center)
+            _tile_cache_put(key, rendered)
+            return rendered
+
+    # Coalesce concurrent identical renders (one raster, N waiters).
+    inflight_key = key
+    owner, shared = _tile_inflight_begin(inflight_key)
+    if not owner:
+        png = shared.wait(_TILE_INFLIGHT_WAIT_SECONDS)
+        if png:
+            return _tile_from_cache(png, info, plane, index, window_center)
+        # Owner failed or is slow: fall through and render independently rather
+        # than propagating someone else's failure to this caller.
+
+    try:
+        result = reslice_plane(slices, info, plane, index=index)
+        center, width = window_for(info, result.data, window_center, window_width)
+        png = render_plane_png(result.data, center, width)
+    except BaseException:
+        if owner:
+            _tile_inflight_abort(inflight_key)
+            shared.resolve(None, None)
+        raise
+
+    rendered = RenderedPlane(
+        png=png, plane=plane, index=index, center=center, width=width,
+        rows=result.rows, cols=result.cols,
+        spacing=list(result.spacing) if result.spacing else [1.0, 1.0],
+        origin=list(result.origin) if result.origin else None,
+    )
+    _tile_cache_put(key, rendered)
+    if getattr(settings, "REDIS_CACHE_ENABLED", False) and len(png) <= _TILE_REDIS_MAX_BYTES:
+        _redis_set_bytes(key, png, _TILE_REDIS_TTL)
+    if owner:
+        shared.resolve(png, None)
+    return rendered
+
+
+def _tile_from_cache(
+    png: bytes,
+    info: dict,
+    plane: str,
+    index: int,
+    window_center: float | None,
+) -> "RenderedPlane":
+    """Rebuild a RenderedPlane for a cached PNG.
+
+    Geometry is derivable from the volume metadata without touching voxels;
+    the window is echoed back from the request that produced the cache entry
+    (an explicit window) or left to the caller when it was auto-resolved.
+    """
+    rows, cols = plane_dims(info, plane)
+    spacing = plane_spacing(info, plane)
+    return RenderedPlane(
+        png=png, plane=plane, index=int(index),
+        center=None if window_center is None else float(window_center),
+        width=None,
+        rows=rows, cols=cols, spacing=spacing, origin=None,
+    )
+
+
+def _tile_cache_put(key: str, rendered: "RenderedPlane") -> None:
+    with _VOL_CACHE_LOCK:
+        _TILE_CACHE[key] = rendered
+        _TILE_CACHE.move_to_end(key)
+        while len(_TILE_CACHE) > _TILE_CACHE_MAX:
+            _TILE_CACHE.popitem(last=False)
+
+
+def _redis_get_bytes(key: str) -> bytes | None:
+    """Best-effort binary GET on the shared pooled Redis client."""
+    from app.services.redis_service import get_redis_client
+
+    client = get_redis_client()
+    if client is None:
+        return None
+    try:
+        return client.get(key)
+    except Exception:
+        return None
+
+
+def _redis_set_bytes(key: str, payload: bytes, ttl: int) -> None:
+    """Best-effort binary SET on the shared pooled Redis client."""
+    from app.services.redis_service import get_redis_client
+
+    client = get_redis_client()
+    if client is None:
+        return
+    try:
+        client.set(key, payload, ex=ttl)
+    except Exception:
+        pass
+
+
+def plane_dims(info: dict, plane: str) -> tuple[int, int]:
+    """``(n_v, n_u)`` of a native plane — the shape the server reslices.
+
+    axial: u = i (cols), v = j (rows)      → (rows,  cols)
+    sagittal: u = j (rows), v = k (slices) → (slices, rows)
+    coronal: u = i (cols), v = k (slices)  → (slices, cols)
+    """
+    plane = str(plane).lower()
+    if plane == "axial":
+        return int(info["rows"]), int(info["columns"])
+    if plane == "sagittal":
+        return int(info["slices"]), int(info["rows"])
+    if plane == "coronal":
+        return int(info["slices"]), int(info["columns"])
+    raise ValueError("plane must be 'axial', 'sagittal' or 'coronal'")
+
+
+def plane_spacing(info: dict, plane: str) -> list[float]:
+    """``[row_mm, col_mm]`` of a resliced native plane, in the same (v, u)
+    order as :func:`plane_dims` — mirrors ``ResliceResult.spacing``."""
+    row_sp, col_sp = _patient_transform_spacing(info)
+    slice_sp = float(info.get("slice_spacing") or info.get("slice_thickness") or 1.0)
+    plane = str(plane).lower()
+    if plane == "axial":
+        return [row_sp, col_sp]
+    if plane == "sagittal":
+        return [slice_sp, row_sp]
+    if plane == "coronal":
+        return [slice_sp, col_sp]
+    raise ValueError("plane must be 'axial', 'sagittal' or 'coronal'")
+
+
+def _patient_transform_spacing(info: dict) -> tuple[float, float]:
+    """``(row_spacing, col_spacing)`` in mm, defaulting to 1.0 like the MPR path."""
+    spacing = info.get("pixel_spacing") or [1.0, 1.0]
+    row_sp = float(spacing[0]) if len(spacing) > 0 else 1.0
+    col_sp = float(spacing[1]) if len(spacing) > 1 else row_sp
+    return row_sp, col_sp
+
+
+def plane_index_max(info: dict, plane: str) -> int:
+    """Highest valid slice index for a native plane."""
+    plane = str(plane).lower()
+    if plane == "axial":
+        return int(info["slices"]) - 1
+    if plane == "sagittal":
+        return int(info["columns"]) - 1
+    if plane == "coronal":
+        return int(info["rows"]) - 1
+    raise ValueError("plane must be 'axial', 'sagittal' or 'coronal'")
+
+
+def render_tiles(
+    series_uid: str,
+    plane: str,
+    start_idx: int,
+    end_idx: int,
+    window_center: float,
+    window_width: float,
+    size: int,
+    slices: list[VolumeSlice],
+    info: dict,
+) -> list[bytes]:
+    """Batch-render PNG slice frames for a prefetch window (plan §5.4).
+
+    Returns one PNG per slice in the **inclusive** ``[start_idx, end_idx]``
+    range, in ascending index order.  Each frame is served from — and written
+    to — the shared L1 tile cache and the Redis L2 cache, so a scroll through a
+    previously prefetched range costs no volume materialization.
+
+    Frames are rasterized at the plane's *native* resolution.  ``render_plane_png``
+    deliberately performs no resampling — a diagnostic viewer must never be shown
+    an interpolated up-sample — so ``size`` is a bounded hint: it selects the
+    viewer's requested viewport but never up-scales beyond the real data.
+
+    ``slices``/``info`` are passed in rather than re-queried, so the router
+    performs its tenant/ACL check exactly once for the whole batch.
+    """
+    plane = str(plane).lower()
+    if plane not in ("axial", "sagittal", "coronal"):
+        raise ValueError("plane must be 'axial', 'sagittal' or 'coronal'")
+
+    start = max(0, int(start_idx))
+    max_index = plane_index_max(info, plane)
+    end = min(int(end_idx), max_index)
+    if start > max_index:
+        raise IndexError(f"{plane} index {start} out of range 0-{max_index}")
+    if end < start:
+        end = start
+
+    # A single range request is capped so one HTTP call cannot flatten the
+    # node: VOLUME_MAX_SLICES is the same budget /data enforces per request.
+    limit = max(1, int(getattr(settings, "VOLUME_MAX_SLICES", 512)))
+    if end - start + 1 > limit:
+        end = start + limit - 1
+
+    return [
+        render_plane_tile(
+            slices, info, plane, index,
+            window_center=window_center, window_width=window_width,
+        ).png
+        for index in range(start, end + 1)
+    ]
+
+
+def log_mode_decision(
+    series_uid: str,
+    configured_mode: str,
+    effective_mode: str,
+    role: str | None,
+    reason: str,
+) -> None:
+    """Emit one structured audit line for a viewer mode negotiation (§5.4).
+
+    Deliberately narrow: series UID, mode vocabulary, role name and a
+    machine-greppable reason token.  **No patient identifiers** (name, MRN,
+    birth date) and **no filesystem paths** are ever passed here, because this
+    fires on every viewer open and the application log is not a clinical
+    record — writing PHI into it would create an uncontrolled copy outside the
+    audit trail's own retention and access rules.
+
+    A ``logging`` record is also not the place for the raw series UID at DEBUG
+    verbosity, so this is a single INFO line with no ``extra`` payload.
+    """
+    log.info(
+        "Viewer mode negotiated: series=%s, configured=%s, effective=%s, "
+        "role=%s, reason=%s",
+        series_uid,
+        configured_mode,
+        effective_mode,
+        role or "anonymous",
+        reason,
+    )
+
+
+def register_server_session(series_uid: str) -> None:
+    """Mark *series_uid* as having an active server-side MPR session."""
+    with _VOL_CACHE_LOCK:
+        _ACTIVE_SERVER_SESSIONS[series_uid] = time.monotonic()
+        _evict_expired_sessions_locked()
+
+
+def release_server_session(series_uid: str) -> None:
+    """Remove the session entry for *series_uid* (if present)."""
+    with _VOL_CACHE_LOCK:
+        _ACTIVE_SERVER_SESSIONS.pop(series_uid, None)
+
+
+def active_server_session_count() -> int:
+    """Return the number of non-expired server-side MPR sessions."""
+    with _VOL_CACHE_LOCK:
+        _evict_expired_sessions_locked()
+        return len(_ACTIVE_SERVER_SESSIONS)
+
+
+def _evict_expired_sessions_locked() -> None:
+    """Remove entries older than ``_SESSION_TIMEOUT``.  Caller must hold lock."""
+    now = time.monotonic()
+    expired = [k for k, ts in _ACTIVE_SERVER_SESSIONS.items()
+               if now - ts > _SESSION_TIMEOUT]
+    for k in expired:
+        _ACTIVE_SERVER_SESSIONS.pop(k, None)
+
+
+def estimated_vol_cache_mb() -> int:
+    """Estimated total size of the in-process materialised volume cache (MB).
+
+    Public name used by the hybrid engine (§7.1) and the load headers (§7.3).
+    """
+    with _VOL_CACHE_LOCK:
+        return sum(v.nbytes for v in _VOL_CACHE.values()) // (1024 * 1024)
+
+
+# Spec-name alias (plan_viewer_process.md §5.1 spells it `_estimated_vol_cache_mb`).
+# Kept so code written against the plan — and the plan's own snippets — resolve.
+_estimated_vol_cache_mb = estimated_vol_cache_mb
 
 
 def _vol_redis_get(r_key: str) -> np.ndarray | None:
@@ -681,19 +1243,36 @@ def load_volume_array(slices: list[VolumeSlice], series_uid: str | None = None) 
     / Enhanced instances are expanded into per-frame slices, so each entry here
     is one frame of the source instance. This is CPU + disk heavy (every slice
     is read and decoded); callers run it via ``asyncio.to_thread``.
+
+    Concurrent callers for the *same* series are coalesced (V3-1): the first one
+    materialises the volume and the rest block on a ``threading.Event`` and then
+    read the finished array out of ``_VOL_CACHE``, instead of each re-reading and
+    re-stacking ~500 MB of voxels in parallel.
     """
     if not slices:
         return np.empty((0, 0, 0), dtype=np.float32)
     cache_key = f"array:{series_uid}:{len(slices)}" if series_uid else f"array:{slices[0].sop_uid}:{len(slices)}"
     alt_cache_key = f"array:{slices[0].sop_uid}:{len(slices)}"
 
+    def _cached_any() -> np.ndarray | None:
+        with _VOL_CACHE_LOCK:
+            # Resolve WHICH key hit before touching recency: move_to_end raises
+            # KeyError for an absent key, and the hit may have come via the
+            # alternate key.
+            key = cache_key if cache_key in _VOL_CACHE else (
+                alt_cache_key if alt_cache_key in _VOL_CACHE else None
+            )
+            if key is None:
+                cache_stats.incr("volume", "misses")
+                return None
+            _VOL_CACHE.move_to_end(key, last=True)   # V3-6: LRU, not insertion order
+            cache_stats.incr("volume", "hits")
+            return _VOL_CACHE[key]
+
     # 1. Check local fast LRU cache
-    with _VOL_CACHE_LOCK:
-        cached = _VOL_CACHE.get(cache_key)
-        if cached is None and alt_cache_key != cache_key:
-            cached = _VOL_CACHE.get(alt_cache_key)
-        if cached is not None:
-            return cached
+    cached = _cached_any()
+    if cached is not None:
+        return cached
 
     # 2. Check Redis cluster cache if available (shared pooled client)
     if getattr(settings, "REDIS_CACHE_ENABLED", False):
@@ -702,45 +1281,81 @@ def load_volume_array(slices: list[VolumeSlice], series_uid: str | None = None) 
             vol = _vol_redis_get(f"paxs:vol:{alt_cache_key}")
         if vol is not None:
             with _VOL_CACHE_LOCK:
-                if len(_VOL_CACHE) >= _VOL_CACHE_MAX:
-                    _VOL_CACHE.pop(next(iter(_VOL_CACHE)))
-                _VOL_CACHE[cache_key] = vol
+                _vol_cache_put_locked(cache_key, vol)
             return vol
 
-    first = storage_service.read_dataset(
-        slices[0].file_path, backend_name=slices[0].backend
-    )
-    expected_shape = _expected_shape(first)
-    arrays: list[np.ndarray] = []
-    cache: dict = {}
-    for s in slices:
-        arr = _frame_array(s, cache)
-        if tuple(arr.shape) != expected_shape:
-            raise ValueError(
-                f"slice {s.sop_uid} shape {tuple(arr.shape)} diverges from "
-                f"stack shape {expected_shape} — not a uniform volume"
-            )
-        ds = cache.get(s.file_path) or storage_service.read_dataset(
-            s.file_path, backend_name=s.backend
+    # 3. Single-flight (V3-1): claim ownership of this cache_key, or wait for
+    #    the thread that already owns it. The loop matters — after a waiter is
+    #    woken it must RE-CHECK the cache and, if the owner failed without
+    #    caching anything, try to claim the key itself. Exactly one thread
+    #    materialises per round; the rest read the finished array out of
+    #    _VOL_CACHE. (Unconditionally re-claiming on wake made every waiter an
+    #    owner and re-introduced the parallel decode this exists to prevent.)
+    owns_event = False
+    event: threading.Event | None = None
+    waits = 0
+    while True:
+        with _IN_FLIGHT_VOLUMES_LOCK:
+            current = _IN_FLIGHT_VOLUMES.get(cache_key)
+            if current is None:
+                event = threading.Event()
+                _IN_FLIGHT_VOLUMES[cache_key] = event
+                owns_event = True
+                break
+            event = current
+        if waits >= _IN_FLIGHT_MAX_WAITS:
+            # The owner keeps failing. Stop coalescing and decode it ourselves
+            # rather than spinning (and without touching the other owner's event).
+            owns_event = False
+            break
+        waits += 1
+        event.wait(timeout=_IN_FLIGHT_WAIT_SECONDS)
+        cached = _cached_any()
+        if cached is not None:
+            return cached
+
+    try:
+        first = storage_service.read_dataset(
+            slices[0].file_path, backend_name=slices[0].backend
         )
-        slope = _float(getattr(ds, "RescaleSlope", 1), 1.0)
-        intercept = _float(getattr(ds, "RescaleIntercept", 0), 0.0)
-        arrays.append(arr.astype(np.float32) * np.float32(slope) + np.float32(intercept))
+        expected_shape = _expected_shape(first)
+        arrays: list[np.ndarray] = []
+        cache: dict = {}
+        for s in slices:
+            arr = _frame_array(s, cache)
+            if tuple(arr.shape) != expected_shape:
+                raise ValueError(
+                    f"slice {s.sop_uid} shape {tuple(arr.shape)} diverges from "
+                    f"stack shape {expected_shape} — not a uniform volume"
+                )
+            ds = cache.get(s.file_path) or storage_service.read_dataset(
+                s.file_path, backend_name=s.backend
+            )
+            slope = _float(getattr(ds, "RescaleSlope", 1), 1.0)
+            intercept = _float(getattr(ds, "RescaleIntercept", 0), 0.0)
+            arrays.append(arr.astype(np.float32) * np.float32(slope) + np.float32(intercept))
 
-    vol = np.stack(arrays, axis=0)
-    with _VOL_CACHE_LOCK:
-        if len(_VOL_CACHE) >= _VOL_CACHE_MAX:
-            # Evict the oldest entry
-            _VOL_CACHE.pop(next(iter(_VOL_CACHE)))
-        _VOL_CACHE[cache_key] = vol
+        vol = np.stack(arrays, axis=0)
+        with _VOL_CACHE_LOCK:
+            _vol_cache_put_locked(cache_key, vol)
 
-    # Populate Redis cluster cache (best-effort, shared pooled client)
-    if getattr(settings, "REDIS_CACHE_ENABLED", False):
-        _vol_redis_set(f"paxs:vol:{cache_key}", vol)
-        if series_uid and alt_cache_key != cache_key:
-            _vol_redis_set(f"paxs:vol:{alt_cache_key}", vol)
+        # Populate Redis cluster cache (best-effort, shared pooled client)
+        if getattr(settings, "REDIS_CACHE_ENABLED", False):
+            _vol_redis_set(f"paxs:vol:{cache_key}", vol)
+            if series_uid and alt_cache_key != cache_key:
+                _vol_redis_set(f"paxs:vol:{alt_cache_key}", vol)
 
-    return vol
+        return vol
+    finally:
+        # Always release waiters and drop the claim, success or failure — an
+        # exception here must not leave every later caller blocked until the
+        # timeout expires. Only the thread that REGISTERED the event may release
+        # it, so a non-owner can never prematurely wake another owner's waiters.
+        if owns_event and event is not None:
+            with _IN_FLIGHT_VOLUMES_LOCK:
+                if _IN_FLIGHT_VOLUMES.get(cache_key) is event:
+                    _IN_FLIGHT_VOLUMES.pop(cache_key, None)
+            event.set()
 
 
 def _patient_transform(info: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
@@ -821,6 +1436,28 @@ class ResliceResult:
     origin: list[float] | None
     row_vector: list[float] | None
     col_vector: list[float] | None
+
+
+@dataclass
+class RenderedPlane:
+    """A native plane rasterized server-side, for thin-client viewing.
+
+    Carries the resolved window so that the caller reporting ``X-MPR-Window``
+    does not have to re-run ``window_for`` (an autoscale over the plane).
+    ``center``/``width`` are None when the caller requested an auto window and
+    the response came from a cache entry whose window is not re-derivable
+    without voxels.
+    """
+
+    png: bytes
+    plane: str
+    index: int
+    center: float | None
+    width: float | None
+    rows: int
+    cols: int
+    spacing: list[float]
+    origin: list[float] | None
 
 
 def _sample_grid(vol: np.ndarray, ipp: np.ndarray, rinv: np.ndarray,

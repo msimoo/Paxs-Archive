@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +13,13 @@ from app.db.models import AuditLog, Series, Study
 from app.db.session import get_db
 from app.services import query_service
 from app.services.sharing_service import ShareError, create_share, get_share, qr_base64, share_url
-from app.api.v1.deps import get_current_user, require_destructive_role
+from app.api.v1.deps import (
+    SHARE_COOKIE_NAME,
+    get_current_user,
+    require_destructive_role,
+    require_study_access,
+    share_cookie_max_age,
+)
 
 router = APIRouter(prefix="/api/v1/share", tags=["share"])
 
@@ -25,8 +31,11 @@ class CreateShareBody(BaseModel):
 
 
 @router.post("", status_code=201)
-async def create_share_endpoint(body: CreateShareBody, db: AsyncSession = Depends(get_db),
+async def create_share_endpoint(request: Request, body: CreateShareBody,
+                                db: AsyncSession = Depends(get_db),
                                 user=Depends(get_current_user)):
+    # C04: creating a public link is a disclosure — it must be your tenant's study.
+    await require_study_access(db, body.study_uid, user)
     try:
         share = await create_share(db, body.study_uid, body.expiry_days, body.phone)
     except ShareError as exc:
@@ -38,7 +47,7 @@ async def create_share_endpoint(body: CreateShareBody, db: AsyncSession = Depend
         performed_by=user.username,
     ))
 
-    url = share_url(share.share_token)
+    url = share_url(share.share_token, request)
     return {
         "token": share.share_token,
         "url": url,
@@ -51,11 +60,26 @@ async def create_share_endpoint(body: CreateShareBody, db: AsyncSession = Depend
 
 
 @router.get("/{token}")
-async def get_share_info(token: str, db: AsyncSession = Depends(get_db)):
+async def get_share_info(token: str, response: Response, db: AsyncSession = Depends(get_db)):
     share = await get_share(db, token)
     if share is None:
         raise HTTPException(404, "Share link not found or expired")
     share.accessed_count += 1
+
+    # Hand the caller a study-scoped cookie so the viewer's later DICOMweb and
+    # volume reads keep working when DICOMWEB_PUBLIC is false (C03). The cookie
+    # only ever authorises READ access to this one study.
+    response.set_cookie(
+        SHARE_COOKIE_NAME,
+        token,
+        max_age=share_cookie_max_age(share.expires_at),
+        httponly=True,
+        # Deliberately lax, not AUTH_COOKIE_SAMESITE: share links are followed
+        # from external sites, where SameSite=strict would drop the cookie.
+        samesite="lax",
+        secure=settings.AUTH_COOKIE_SECURE,
+        path="/",
+    )
 
     study = (
         await db.execute(
@@ -101,11 +125,11 @@ async def get_share_info(token: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{token}/qr.png")
-async def share_qr(token: str, db: AsyncSession = Depends(get_db)):
+async def share_qr(token: str, request: Request, db: AsyncSession = Depends(get_db)):
     share = await get_share(db, token)
     if share is None:
         raise HTTPException(404, "Share link not found or expired")
-    url = share_url(share.share_token)
+    url = share_url(share.share_token, request)
     import base64
 
     return Response(content=base64.b64decode(qr_base64(url)), media_type="image/png")

@@ -15,13 +15,11 @@ def _register(client, username, password="secret123", role=None):
 
 
 def _auth(client, username, password="secret123", role=None):
-    # The first registered user bootstraps as ADMIN regardless of role.
-    reg = _register(client, username, password, role)
-    token = (reg.json().get("access_token") if reg.status_code == 201
-             else client.post("/api/v1/auth/login",
-                              json={"username": username, "password": password})
-             .json()["access_token"])
-    return {"Authorization": f"Bearer {token}"}
+    # H02: a specific role goes through the admin API; no role keeps the
+    # original "first account is the bootstrap ADMIN" behaviour.
+    from tests.helpers import auth_for_role
+
+    return auth_for_role(client, username, role=role or "ADMIN", password=password)
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +32,9 @@ def _admin(client):
 # Auth gates
 # --------------------------------------------------------------------------- #
 def test_users_requires_auth(client):
+    # The autouse `_admin` fixture logged in on this client, and the API also
+    # accepts cookie sessions (C03), so clear the jar to be anonymous.
+    client.cookies.clear()
     assert client.get("/api/v1/users").status_code == 401
     assert client.post("/api/v1/users", json={}).status_code == 401
 
@@ -103,7 +104,9 @@ def test_create_user_validation(client, _admin):
 
 
 def test_reset_password(client, _admin):
-    _register(client, "dr.sara", password="oldpass123", role="RADIOLOGIST")
+    from tests.helpers import create_user
+
+    create_user(client, _admin, "dr.sara", "RADIOLOGIST", password="oldpass123")
     uid = next(u["id"] for u in client.get("/api/v1/users", headers=_admin).json()
                if u["username"] == "dr.sara")
 

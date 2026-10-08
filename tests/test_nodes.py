@@ -25,9 +25,9 @@ from tests.test_receiver import _store_via_scu
 # Node registry API
 # --------------------------------------------------------------------------- #
 def _auth_headers(client, username="admin", password="secret123"):
-    client.post("/api/v1/auth/register", json={"username": username, "password": password})
-    res = client.post("/api/v1/auth/login", json={"username": username, "password": password})
-    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+    from tests.helpers import auth_for_role
+
+    return auth_for_role(client, username, role="ADMIN", password=password)
 
 
 def test_node_registry_crud(client):

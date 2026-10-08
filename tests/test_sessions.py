@@ -20,8 +20,6 @@ def _register(client, username="dr.ali", password="secret123", role=None):
     if role:
         body["role"] = role
     return client.post("/api/v1/auth/register", json=body)
-
-
 def _login(client, username="dr.ali", password="secret123"):
     return client.post("/api/v1/auth/login", json={"username": username, "password": password})
 
@@ -200,8 +198,13 @@ def test_multi_device_logins_have_separate_families(client):
 
 def test_me_resolves_from_session_cookie(client):
     """The study-list SPA holds only the HttpOnly cookie — /me must work."""
-    _register(client, username="admin.rad")  # first user bootstraps as ADMIN
-    _register(client, username="dr.rad", role="RADIOLOGIST")
+    from tests.helpers import create_user
+
+    admin = _register(client, username="admin.rad")  # first user bootstraps as ADMIN
+    create_user(
+        client, {"Authorization": f"Bearer {admin.json()['access_token']}"},
+        "dr.rad", "RADIOLOGIST",
+    )
     client.cookies.clear()
     _login(client, username="dr.rad")
     assert client.cookies.get(settings.AUTH_COOKIE_NAME)

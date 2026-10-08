@@ -1,0 +1,1205 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PAXS Viewer — toolbar icons preview</title>
+<style>
+/* ==========================================================================
+   PAXS Archive — Master Clinical DICOM Workstation Theme
+   Designed for Radiologists & Physicians (Refactoring UI + shadcn/ui)
+
+   Color System & Tool Categorization:
+   - Base Palette: Deep Obsidian/Slate (#020617 / #0f172a / #1e293b)
+   - Navigation Tools (Zoom, Pan, Scroll, Rotate): Sky Blue (#38bdf8)
+   - Measurement Tools (Length, Angle, Ellipse, Cobb): Emerald Green (#34d399)
+   - Window/Level & Contrast: Amber Yellow (#fbbf24)
+   - Annotation & Key Images: Violet (#a78bfa)
+   - Destructive / Reset: Rose Pink (#f43f5e)
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
+
+/* ------------------------------------------------------------------ */
+/* 0. Paxs HSL Token Overrides (Native Design System Mapping)         */
+/* ------------------------------------------------------------------ */
+:root {
+  /* HSL Triplets without wrapper for Paxs Tailwind integration */
+  --highlight: 160 84% 39%;
+  --neutral: 215 16% 57%;
+  --neutral-light: 215 20% 75%;
+  --neutral-dark: 222 47% 11%;
+  --background: 222 84% 4%;
+  --foreground: 210 40% 98%;
+  --card: 222 47% 9%;
+  --card-foreground: 210 40% 98%;
+  --popover: 222 47% 11%;
+  --popover-foreground: 210 40% 98%;
+  --primary: 217 91% 60%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 215 25% 22%;
+  --secondary-foreground: 210 40% 90%;
+  --muted: 217 33% 15%;
+  --muted-foreground: 215 16% 65%;
+  --accent: 217 33% 18%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 343 88% 50%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 215 25% 20%;
+  --input: 215 25% 22%;
+  --ring: 217 91% 60%;
+
+  /* Direct Hex Variables */
+  --paxs-navy: #020617;
+  --paxs-panel: #0f172a;
+  --paxs-card: #1e293b;
+  --paxs-border: rgba(51, 65, 85, 0.6);
+
+  --paxs-blue: #3b82f6;
+  --paxs-sky: #38bdf8;
+  --paxs-emerald: #34d399;
+  --paxs-amber: #fbbf24;
+  --paxs-violet: #a78bfa;
+  --paxs-rose: #f43f5e;
+
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+/* ------------------------------------------------------------------ */
+/* 1. Global Page Reset & Layout                                      */
+/* ------------------------------------------------------------------ */
+html, body, #root {
+  background-color: var(--paxs-navy) !important;
+  color: #f8fafc !important;
+  font-family: var(--font-sans) !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  -webkit-font-smoothing: antialiased !important;
+}
+
+div[class*="bg-black"],
+div[class*="bg-slate-900"],
+div[class*="bg-slate-950"] {
+  background-color: var(--paxs-navy) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 2. Control Tower Header Bar                                        */
+/* ------------------------------------------------------------------ */
+header,
+div[class*="bg-popover"][class*="z-20"],
+header[class*="relative"],
+div[class*="relative h-[48px] items-center"] {
+  background: rgba(2, 6, 23, 0.96) !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  border-bottom: 1px solid var(--paxs-border) !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6) !important;
+  height: 58px !important;
+  z-index: 40 !important;
+  transform: none !important;
+}
+
+/* Brand Link */
+header a[href*="viewer"],
+div[class*="header"] a {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+  text-decoration: none !important;
+}
+
+header img[src*="logo"],
+header img[src*="logo.png"],
+header img[src*="logomain"],
+header img[src*="PaxsViewer-logo"],
+div[class*="header"] img {
+  height: 32px !important;
+  width: auto !important;
+  max-width: 120px !important;
+  object-fit: contain !important;
+  display: inline-block !important;
+  filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.25)) !important;
+}
+
+/* Patient Name Badge */
+div[class*="mpr-corner-tl"],
+header span[class*="patient-name"],
+span[class*="patient-name"] {
+  font-family: var(--font-sans) !important;
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: #ffffff !important;
+  letter-spacing: 0.03em !important;
+  text-transform: uppercase !important;
+  background: rgba(30, 41, 59, 0.8) !important;
+  padding: 5px 14px !important;
+  border-radius: 8px !important;
+  border: 1px solid rgba(56, 189, 248, 0.4) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. Toolbar Dock & Category-Colored Buttons (All-Sides Multi-Color Border) */
+/* ------------------------------------------------------------------ */
+header div[class*="relative flex justify-center"],
+div[class*="relative flex justify-center gap-"] {
+  position: relative !important;
+  background:
+    linear-gradient(rgba(15, 23, 42, 0.95), rgba(15, 23, 42, 0.95)) padding-box,
+    linear-gradient(90deg, #38bdf8, #34d399, #fbbf24, #a78bfa, #f43f5e, #38bdf8) border-box !important;
+  border: 1px solid transparent !important;
+  border-radius: 999px !important; /* Fully rounded capsule on all sides */
+  padding: 4px 14px !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 18px rgba(56, 189, 248, 0.22) !important;
+  gap: 8px !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  background-size: 100% 100%, 240% 240% !important;
+  animation: paxs-tool-border-shine 5s linear infinite !important;
+}
+
+@keyframes paxs-tool-border-shine {
+  0% { background-position: 0% 0%, 0% 0%; }
+  100% { background-position: 0% 0%, 240% 240%; }
+}
+
+/* Clear Base Button Styles (Explicit Borders & 8px Radii) */
+header button[aria-label],
+div[class*="relative flex justify-center"] button {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 8px !important;
+  font-family: var(--font-sans) !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: #cbd5e1 !important;
+  background: rgba(30, 41, 59, 0.7) !important;
+  border: 1.5px solid rgba(71, 85, 105, 0.6) !important;
+  border-radius: 8px !important;
+  padding: 4px  !important;
+  height: 30px !important;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  cursor: pointer !important;
+}
+
+/* Explicit 20px SVG Icon Sizing with 5px Padding All Around */
+header button[aria-label] svg,
+div[class*="relative flex justify-center"] button svg,
+button[class*="paxs-tool-"] svg,
+div[class*="toolbar"] svg,
+header svg {
+  width: 20px !important;
+  height: 20px !important;
+  min-width: 20px !important;
+  min-height: 20px !important;
+  max-width: 20px !important;
+  max-height: 20px !important;
+  padding: 5px !important;
+  box-sizing: content-box !important;
+  flex-shrink: 0 !important;
+}
+
+/* Tool Category Hover & Focus States */
+header button[aria-label]:hover,
+div[class*="relative flex justify-center"] button:hover {
+  transform: translateY(-1px) !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* Category: Navigation (Sky Blue) */
+button.paxs-tool-nav,
+header button[aria-label*="Zoom"],
+header button[aria-label*="Pan"],
+header button[aria-label*="Scroll"],
+header button[aria-label*="Rotate"] {
+  border-color: rgba(56, 189, 248, 0.45) !important;
+}
+button.paxs-tool-nav:hover {
+  background: rgba(56, 189, 248, 0.15) !important;
+  border-color: var(--paxs-sky) !important;
+  color: #ffffff !important;
+}
+button.paxs-tool-nav svg { color: var(--paxs-sky) !important; }
+
+/* Category: Measurement (Emerald Green) */
+button.paxs-tool-measure,
+header button[aria-label*="Length"],
+header button[aria-label*="Ellipse"],
+header button[aria-label*="Angle"],
+header button[aria-label*="Rectangle"] {
+  border-color: rgba(52, 211, 153, 0.45) !important;
+}
+button.paxs-tool-measure:hover {
+  background: rgba(52, 211, 153, 0.15) !important;
+  border-color: var(--paxs-emerald) !important;
+  color: #ffffff !important;
+}
+button.paxs-tool-measure svg { color: var(--paxs-emerald) !important; }
+
+/* Category: Window/Level & Contrast (Amber Yellow) */
+button.paxs-tool-wl,
+header button[aria-label*="Window"],
+header button[aria-label*="Contrast"],
+header button[aria-label*="W/L"] {
+  border-color: rgba(251, 191, 36, 0.45) !important;
+}
+button.paxs-tool-wl:hover {
+  background: rgba(251, 191, 36, 0.15) !important;
+  border-color: var(--paxs-amber) !important;
+  color: #ffffff !important;
+}
+button.paxs-tool-wl svg { color: var(--paxs-amber) !important; }
+
+/* Category: Annotation & SR (Violet) */
+button.paxs-tool-annot,
+header button[aria-label*="Arrow"],
+header button[aria-label*="Text"],
+header button[aria-label*="Probe"],
+header button[aria-label*="Crosshairs"] {
+  border-color: rgba(167, 139, 250, 0.45) !important;
+}
+button.paxs-tool-annot:hover {
+  background: rgba(167, 139, 250, 0.15) !important;
+  border-color: var(--paxs-violet) !important;
+  color: #ffffff !important;
+}
+button.paxs-tool-annot svg { color: var(--paxs-violet) !important; }
+
+/* Active Tool Button (Solid Category Gradient Wash) */
+header button[aria-label][class*="bg-highlight"],
+div[class*="relative flex justify-center"] button[class*="bg-highlight"],
+header button[aria-label][data-state="active"],
+div[class*="relative flex justify-center"] button[data-state="active"] {
+  background: linear-gradient(135deg, #10b981, #059669) !important;
+  border-color: transparent !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.5) !important;
+  transform: scale(1.04) !important;
+}
+header button[aria-label][data-state="active"] svg,
+div[class*="relative flex justify-center"] button[data-state="active"] svg {
+  color: #ffffff !important;
+}
+
+/* Undo / Redo Cluster */
+button[aria-label*="Undo"],
+button[aria-label*="Redo"] {
+  border-radius: 8px !important;
+  background: rgba(15, 23, 42, 0.9) !important;
+  border: 1.5px solid rgba(71, 85, 105, 0.6) !important;
+  color: #e2e8f0 !important;
+  padding: 6px 12px !important;
+  height: 36px !important;
+}
+button[aria-label*="Undo"]:hover,
+button[aria-label*="Redo"]:hover {
+  background: rgba(59, 130, 246, 0.2) !important;
+  border-color: var(--paxs-blue) !important;
+  color: #ffffff !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 4. Filmstrip & Lightbox Series Cards (Next-Gen Clinical UI/UX)      */
+/* ------------------------------------------------------------------ */
+/* Master Left Resizable Panel Container */
+#viewerLayoutResizableLeftPanel,
+div[id*="viewerLayoutResizableLeftPanel"],
+div[data-cy="viewerLayoutResizableLeftPanel"],
+div[class*="viewerLayoutResizableLeftPanel"],
+div[class*="border-secondary"][class*="w-"],
+div[data-cy="study-browser"],
+div[class*="study-browser"],
+div[class*="StudyBrowser"] {
+  background: radial-gradient(circle at 10% 0%, rgba(14, 165, 233, 0.08), transparent 40%),
+              radial-gradient(circle at 90% 100%, rgba(168, 85, 247, 0.06), transparent 40%),
+              rgba(3, 7, 18, 0.96) !important;
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+  border-right: 1px solid rgba(56, 189, 248, 0.22) !important;
+  box-shadow: 6px 0 32px rgba(0, 0, 0, 0.75), inset -1px 0 0 rgba(255, 255, 255, 0.04) !important;
+  z-index: 30 !important;
+  transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s ease !important;
+}
+
+/* Collapse / Expand Handle on Left Resizable Divider */
+div[class*="resizer"],
+div[class*="Resizer"],
+div[role="separator"][aria-orientation="vertical"],
+div[data-cy*="resize-handle"] {
+  width: 4px !important;
+  background: rgba(30, 41, 59, 0.8) !important;
+  transition: all 0.2s ease !important;
+  position: relative !important;
+}
+
+div[class*="resizer"]:hover,
+div[class*="Resizer"]:hover,
+div[role="separator"][aria-orientation="vertical"]:hover,
+div[data-cy*="resize-handle"]:hover {
+  background: linear-gradient(180deg, #38bdf8, #2dd4bf, #a855f7) !important;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.8) !important;
+  cursor: col-resize !important;
+}
+
+/* Studies & Series Header Tabs Header */
+#viewerLayoutResizableLeftPanel div[class*="header"],
+div[data-cy="study-browser"] div[class*="header"],
+div[class*="study-browser"] div[class*="header"],
+div[class*="StudyBrowser"] div[class*="header"] {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(8, 15, 30, 0.96)) !important;
+  border-bottom: 1px solid rgba(56, 189, 248, 0.2) !important;
+  padding: 10px 14px !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5) !important;
+}
+
+/* Tab Switchers (e.g. Study / Series switcher buttons) */
+#viewerLayoutResizableLeftPanel button[role="tab"],
+div[data-cy="study-browser"] button[role="tab"] {
+  font-family: var(--font-sans) !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.04em !important;
+  color: #94a3b8 !important;
+  background: rgba(15, 23, 42, 0.6) !important;
+  border: 1px solid rgba(148, 163, 184, 0.15) !important;
+  border-radius: 6px !important;
+  padding: 5px 12px !important;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+#viewerLayoutResizableLeftPanel button[role="tab"]:hover,
+div[data-cy="study-browser"] button[role="tab"]:hover {
+  color: #ffffff !important;
+  background: rgba(30, 41, 59, 0.85) !important;
+  border-color: rgba(56, 189, 248, 0.4) !important;
+  box-shadow: 0 2px 10px rgba(56, 189, 248, 0.2) !important;
+}
+
+#viewerLayoutResizableLeftPanel button[role="tab"][data-state="active"],
+#viewerLayoutResizableLeftPanel button[role="tab"][aria-selected="true"],
+div[data-cy="study-browser"] button[role="tab"][data-state="active"] {
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.2), rgba(45, 212, 191, 0.15)) !important;
+  border-color: #22d3ee !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 14px rgba(34, 211, 238, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
+}
+
+/* Series Thumbnail Card Container */
+#viewerLayoutResizableLeftPanel div[class*="flex h-full w-full flex-col"] button[class*="cursor-pointer"],
+#viewerLayoutResizableLeftPanel div[class*="flex h-full w-full flex-col"] div[class*="cursor-pointer"],
+#viewerLayoutResizableLeftPanel div[data-cy*="study-browser-thumbnail"],
+#viewerLayoutResizableLeftPanel div[class*="thumbnail-wrapper"],
+#viewerLayoutResizableLeftPanel div[class*="Thumbnail"] {
+  position: relative !important;
+  border: 1px solid rgba(148, 163, 184, 0.22) !important;
+  border-radius: 12px !important;
+  background: linear-gradient(145deg, rgba(15, 23, 42, 0.9), rgba(6, 11, 22, 0.95)) !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  overflow: hidden !important;
+  margin: 6px 8px 10px 8px !important;
+  padding: 4px !important;
+}
+
+/* Glowing Neon Left Indicator Strip */
+#viewerLayoutResizableLeftPanel div[class*="cursor-pointer"]::before,
+#viewerLayoutResizableLeftPanel button[class*="cursor-pointer"]::before {
+  content: "" !important;
+  position: absolute !important;
+  left: 0 !important;
+  top: 0 !important;
+  bottom: 0 !important;
+  width: 3.5px !important;
+  background: linear-gradient(180deg, #38bdf8, #2dd4bf) !important;
+  opacity: 0 !important;
+  transition: opacity 0.2s ease, box-shadow 0.2s ease !important;
+  z-index: 5 !important;
+}
+
+/* Hover State with Neon Cyan Lift */
+#viewerLayoutResizableLeftPanel div[class*="cursor-pointer"]:hover,
+#viewerLayoutResizableLeftPanel button[class*="cursor-pointer"]:hover,
+#viewerLayoutResizableLeftPanel div[data-cy*="study-browser-thumbnail"]:hover {
+  border-color: rgba(56, 189, 248, 0.7) !important;
+  background: linear-gradient(145deg, rgba(22, 36, 64, 0.95), rgba(10, 18, 36, 0.98)) !important;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.75), 0 0 20px rgba(56, 189, 248, 0.35) !important;
+  transform: translateY(-2px) scale(1.015) !important;
+}
+
+#viewerLayoutResizableLeftPanel div[class*="cursor-pointer"]:hover::before,
+#viewerLayoutResizableLeftPanel button[class*="cursor-pointer"]:hover::before {
+  opacity: 1 !important;
+  box-shadow: 0 0 10px #38bdf8 !important;
+}
+
+/* Active / Dragging / Selected Series Card with 0.5px Rainbow Gradient Border (Matching Footer) */
+#viewerLayoutResizableLeftPanel div[class*="border-primary"],
+#viewerLayoutResizableLeftPanel button[class*="border-primary"],
+#viewerLayoutResizableLeftPanel div[class*="border-highlight"],
+#viewerLayoutResizableLeftPanel div[class*="selected"][class*="cursor-pointer"],
+#viewerLayoutResizableLeftPanel div[aria-selected="true"][class*="cursor-pointer"],
+#viewerLayoutResizableLeftPanel div[data-state="selected"][class*="cursor-pointer"] {
+  position: relative !important;
+  border: 0.5px solid transparent !important;
+  background:
+    linear-gradient(rgba(15, 23, 42, 0.98), rgba(8, 15, 30, 0.98)) padding-box,
+    linear-gradient(90deg, #38bdf8, #34d399, #fbbf24, #a78bfa, #f43f5e, #38bdf8) border-box !important;
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.4), 0 4px 16px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+  background-size: 100% 100%, 200% 200% !important;
+  animation: paxs-selected-shine 4s linear infinite !important;
+}
+
+@keyframes paxs-selected-shine {
+  0% { background-position: 0% 0%, 0% 0%; }
+  100% { background-position: 0% 0%, 200% 200%; }
+}
+
+#viewerLayoutResizableLeftPanel div[class*="border-primary"]::before,
+#viewerLayoutResizableLeftPanel button[class*="border-primary"]::before,
+#viewerLayoutResizableLeftPanel div[class*="selected"][class*="cursor-pointer"]::before,
+#viewerLayoutResizableLeftPanel div[aria-selected="true"]::before {
+  opacity: 1 !important;
+  background: linear-gradient(180deg, #38bdf8, #34d399, #fbbf24, #a78bfa, #f43f5e) !important;
+  box-shadow: 0 0 12px #38bdf8 !important;
+}
+
+/* Series Description & Metadata Typography */
+#viewerLayoutResizableLeftPanel span[class*="description"],
+#viewerLayoutResizableLeftPanel div[data-cy*="study-browser"] span,
+#viewerLayoutResizableLeftPanel div[class*="thumbnail-wrapper"] span {
+  font-family: var(--font-sans) !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  color: #f1f5f9 !important;
+}
+
+/* Modality Signature Color Tags & Badges */
+#viewerLayoutResizableLeftPanel span[class*="modality-badge"],
+#viewerLayoutResizableLeftPanel span[class*="modality"],
+#viewerLayoutResizableLeftPanel .paxs-modality-pill {
+  font-family: var(--font-mono) !important;
+  font-size: 10.5px !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.07em !important;
+  padding: 3px 8px !important;
+  border-radius: 6px !important;
+  text-transform: uppercase !important;
+  background: rgba(34, 211, 238, 0.18) !important;
+  color: #22d3ee !important;
+  border: 1px solid rgba(34, 211, 238, 0.45) !important;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.25) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+}
+
+#viewerLayoutResizableLeftPanel .paxs-modality-pill svg {
+  color: #38bdf8 !important;
+  width: 12px !important;
+  height: 12px !important;
+  padding: 0 !important;
+}
+
+/* Instance Count Pill (e.g. 30 imgs 3D) */
+#viewerLayoutResizableLeftPanel span[class*="count"],
+#viewerLayoutResizableLeftPanel span[class*="series-count"],
+#viewerLayoutResizableLeftPanel div[class*="instances"] {
+  font-family: var(--font-mono) !important;
+  font-size: 10.5px !important;
+  font-weight: 700 !important;
+  color: #38bdf8 !important;
+  background: rgba(15, 23, 42, 0.85) !important;
+  padding: 2px 7px !important;
+  border-radius: 6px !important;
+  border: 1px solid rgba(56, 189, 248, 0.3) !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 5. Viewport View (Clean Diagnostic Canvas)                        */
+/* ------------------------------------------------------------------ */
+div.viewport-element,
+div.cornerstone-viewport-element,
+div.viewport-wrapper {
+  position: relative !important;
+  background-color: #000000 !important;
+  border: 1px solid rgba(51, 65, 85, 0.5) !important;
+  border-radius: 4px !important;
+}
+
+/* ACR Corner HUD Overlay Reads */
+#paxs-mpr-root .mpr-corner-tl,
+#paxs-mpr-root .mpr-corner-tr,
+#paxs-mpr-root .mpr-corner-bl,
+#paxs-mpr-root .mpr-corner-br,
+div[class*="corner-overlay"] {
+  font-family: var(--font-mono) !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: #38bdf8 !important;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95) !important;
+  pointer-events: none !important;
+}
+
+#paxs-mpr-root .mpr-corner-tl { color: #f8fafc !important; font-weight: 700 !important; }
+#paxs-mpr-root .mpr-corner-tr { color: #a78bfa !important; }
+#paxs-mpr-root .mpr-corner-bl { color: #34d399 !important; }
+#paxs-mpr-root .mpr-corner-br { color: #fbbf24 !important; font-weight: 700 !important; }
+
+/* Viewport Crosshair Lines */
+#paxs-mpr-root .mpr-line {
+  position: absolute !important;
+  background: var(--paxs-sky) !important;
+  opacity: 0.8 !important;
+  pointer-events: none !important;
+  z-index: 10 !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 6. Modals, Popovers & Dialogs                                      */
+/* ------------------------------------------------------------------ */
+#react-portal > div[class*="fixed"],
+div[class*="fixed inset-0"][class*="bg-"] {
+  background: rgba(0, 0, 0, 0.75) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+#react-portal div[role="dialog"],
+div[role="dialog"] {
+  background: rgba(15, 23, 42, 0.98) !important;
+  border: 1px solid var(--paxs-border) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.8) !important;
+  color: #f8fafc !important;
+}
+
+/* Mechanical Keycaps */
+div[role="dialog"] kbd {
+  background: rgba(30, 41, 59, 0.9) !important;
+  border: 1px solid rgba(71, 85, 105, 0.6) !important;
+  color: var(--paxs-sky) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  padding: 2px 7px !important;
+  border-radius: 4px !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 7. Range Sliders & Scrollbars                                      */
+/* ------------------------------------------------------------------ */
+input[type="range"] {
+  accent-color: var(--paxs-blue) !important;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.5);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--paxs-blue);
+}
+
+/* ------------------------------------------------------------------ */
+/* 8. PAXS Archive Site Footer (Compact Single-Line & Auto-Hide)      */
+/* ------------------------------------------------------------------ */
+.paxs-viewer-foot {
+  position: fixed !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  z-index: 9999 !important;
+  width: 100% !important;
+  height: 26px !important;
+  background:
+    linear-gradient(rgba(15, 23, 42, 0.95), rgba(15, 23, 42, 0.95)) padding-box,
+    linear-gradient(90deg, #38bdf8, #34d399, #fbbf24, #a78bfa, #f43f5e, #38bdf8) border-box !important;
+  border: 1px solid transparent !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important; 
+  padding: 2px 16px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  font-family: var(--font-sans) !important;
+  font-size: 10.5px !important;
+  color: #94a3b8 !important;
+  /* Auto-hide transition: collapses down leaving a 3px glowing indicator edge */
+  transform: translateY(calc(100% - 3px)) !important;
+  opacity: 0.7 !important;
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.28s ease, box-shadow 0.28s ease !important;
+}
+
+/* Hover reveal on mouseover or proximity */
+.paxs-viewer-foot:hover,
+.paxs-viewer-foot:focus-within,
+.paxs-viewer-foot.paxs-foot-visible {
+  transform: translateY(0) !important;
+  opacity: 1 !important;
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.85) !important;
+}
+
+.paxs-viewer-foot .foot-glow {
+  position: absolute !important;
+  top: -1px !important;
+  left: 0 !important;
+  right: 0 !important;
+  height: 2px !important;
+  background: linear-gradient(90deg, transparent, #3b82f6, #10b981, #f59e0b, transparent) !important;
+}
+
+.paxs-viewer-foot .foot-brand {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  font-size: 10.5px !important;
+  color: #64748b !important;
+}
+
+.paxs-viewer-foot .foot-brand svg {
+  width: 13px !important;
+  height: 13px !important;
+  padding: 0 !important;
+  min-width: 13px !important;
+  min-height: 13px !important;
+  max-width: 13px !important;
+  max-height: 13px !important;
+}
+
+.paxs-viewer-foot .foot-copy {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  font-size: 10.5px !important;
+  color: #94a3b8 !important;
+}
+
+.paxs-viewer-foot .foot-heart {
+  color: var(--paxs-rose) !important;
+  font-size: 11px !important;
+  animation: paxs-heart-beat 1.7s ease-in-out infinite !important;
+}
+
+@keyframes paxs-heart-beat {
+  0%, 100% { transform: scale(1); }
+  12% { transform: scale(1.25); }
+  24% { transform: scale(1); }
+}
+
+.paxs-viewer-foot .foot-name {
+  font-weight: 700 !important;
+  background: linear-gradient(90deg, #38bdf8, #34d399, #a78bfa, #38bdf8) !important;
+  background-size: 200% auto !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  color: transparent !important;
+  animation: paxs-foot-shine 5s linear infinite !important;
+}
+
+@keyframes paxs-foot-shine { to { background-position: 200% center; } }
+
+.paxs-viewer-foot .foot-link {
+  font-family: var(--font-mono) !important;
+  font-size: 10.5px !important;
+  color: var(--paxs-sky) !important;
+  text-decoration: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 3px !important;
+}
+
+.paxs-viewer-foot .foot-link svg {
+  width: 11px !important;
+  height: 11px !important;
+  padding: 0 !important;
+  min-width: 11px !important;
+  min-height: 11px !important;
+  max-width: 11px !important;
+  max-height: 11px !important;
+}
+
+.paxs-viewer-foot .foot-link:hover {
+  color: #7dd3fc !important;
+}
+
+.paxs-viewer-foot .foot-pulse {
+  display: flex !important;
+  align-items: center !important;
+  gap: 2px !important;
+}
+
+.paxs-viewer-foot .foot-pulse span {
+  width: 2.5px !important;
+  border-radius: 2px !important;
+  background: linear-gradient(180deg, #38bdf8, #34d399) !important;
+  animation: paxs-ecg-pulse 1.3s ease-in-out infinite !important;
+}
+
+.paxs-viewer-foot .foot-pulse span:nth-child(odd) { height: 4px !important; }
+.paxs-viewer-foot .foot-pulse span:nth-child(even) { height: 10px !important; animation-delay: 0.16s !important; }
+
+@keyframes paxs-ecg-pulse {
+  0%, 100% { opacity: 0.3; transform: scaleY(0.6); }
+  50% { opacity: 1; transform: scaleY(1.15); }
+}
+
+body {
+  padding-bottom: 0px !important;
+}
+
+/* ==========================================================================
+   9. HEADER TOOLBAR MODERNIZATION  (Phase 1 — clinical dark workstation)
+   --------------------------------------------------------------------------
+   Loaded last so it overrides the earlier header/tool rules above.
+   Marker classes (.paxs-toolbar / .paxs-tool / .paxs-tool-active / .paxs-icon)
+   are applied at runtime by paxs-toolbar-enhance.js, because the bundle's own
+   wrapper classes are hashed Tailwind utilities that change between builds.
+   ========================================================================== */
+
+/* --- 9.1 Header shell: deep slate glassmorphism -------------------------- */
+header {
+  position: relative !important;
+  background: rgba(10, 15, 29, 0.88) !important;
+  backdrop-filter: blur(14px) saturate(140%) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(140%) !important;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.4) !important;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55), inset 0 -1px 0 rgba(148, 163, 184, 0.06) !important;
+}
+
+/* --- 9.2 Left brand badge ("PAXS" logomark + glowing cyan accent) -------- */
+header .paxs-brand-badge,
+header a[href*="viewer"] > span:first-child,
+header .paxs-brand {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  padding: 5px 12px !important;
+  border-radius: 9px !important;
+  font-family: var(--font-sans) !important;
+  font-size: 12.5px !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.12em !important;
+  text-transform: uppercase !important;
+  color: #e2f7ff !important;
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.16), rgba(45, 212, 191, 0.08)) !important;
+  border: 1px solid rgba(34, 211, 238, 0.38) !important;
+  box-shadow: 0 0 16px rgba(34, 211, 238, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+  text-shadow: 0 0 12px rgba(34, 211, 238, 0.45) !important;
+}
+
+/* --- 9.3 Toolbar container ---------------------------------------------- */
+.paxs-toolbar {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  padding: 3px 6px !important;
+  border-radius: 12px !important;
+  background: rgba(15, 23, 42, 0.55) !important;
+  border: 1px solid rgba(51, 65, 85, 0.55) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 4px 16px rgba(0, 0, 0, 0.35) !important;
+  backdrop-filter: blur(10px) !important;
+  -webkit-backdrop-filter: blur(10px) !important;
+}
+
+/* --- 9.4 Tool button geometry ------------------------------------------- */
+.paxs-tool,
+header .paxs-toolbar button[aria-label] {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  height: 30px !important;
+  min-width: 30px !important;
+  padding: 4px 6px !important;
+  border-radius: 6px !important;
+  border: 1px solid rgba(51, 65, 85, 0.55) !important;
+  background: rgba(30, 41, 59, 0.42) !important;
+  color: #94a3b8 !important;
+  transition: color 0.16s ease, background 0.16s ease, border-color 0.16s ease,
+              box-shadow 0.16s ease, transform 0.16s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  cursor: pointer !important;
+}
+
+.paxs-tool:hover,
+header .paxs-toolbar button[aria-label]:hover {
+  color: #f8fafc !important;
+  background: rgba(30, 41, 59, 0.6) !important;
+  border-color: rgba(100, 116, 139, 0.7) !important;
+  transform: translateY(-1px) !important;
+}
+
+.paxs-tool:focus-visible {
+  outline: 2px solid rgba(34, 211, 238, 0.7) !important;
+  outline-offset: 1px !important;
+}
+
+/* --- 9.5 ACTIVE state --------------------------------------------------
+   Radix Toggle / ToggleGroupItem exposes the pressed state as
+   data-state="on" and/or aria-checked="true" (role="radio") or
+   aria-pressed="true" (bare Toggle). `[data-state="active"]` is the legacy
+   selector — kept only so older bundles keep working. .paxs-tool-active is the
+   runtime tag from paxs-toolbar-enhance.js.
+   ------------------------------------------------------------------------ */
+.paxs-tool-active,
+.paxs-tool[data-state="on"],
+header .paxs-toolbar button[data-state="on"],
+header .paxs-toolbar button[aria-checked="true"],
+header .paxs-toolbar button[aria-pressed="true"],
+header .paxs-toolbar button[data-active="true"],
+header button[aria-label][data-state="active"] {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.28), rgba(16, 185, 129, 0.22)) !important;
+  border-color: rgba(34, 211, 238, 0.75) !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 10px rgba(6, 182, 212, 0.25), 0 0 0 1px rgba(34, 211, 238, 0.25),
+              inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+}
+
+.paxs-tool-active svg,
+.paxs-tool-active svg *,
+header .paxs-toolbar button[data-state="on"] svg,
+header .paxs-toolbar button[data-state="on"] svg *,
+header .paxs-toolbar button[aria-checked="true"] svg,
+header .paxs-toolbar button[aria-checked="true"] svg *,
+header .paxs-toolbar button[aria-pressed="true"] svg,
+header .paxs-toolbar button[aria-pressed="true"] svg * {
+  color: #ffffff !important;
+  stroke: #ffffff !important;
+}
+
+/* --- 9.6 Category accents (icon tint) ----------------------------------- */
+.paxs-tool-nav svg,      .paxs-tool-nav svg *      { color: #38bdf8 !important; }
+.paxs-tool-measure svg,  .paxs-tool-measure svg *  { color: #34d399 !important; }
+.paxs-tool-wl svg,       .paxs-tool-wl svg *       { color: #fbbf24 !important; }
+.paxs-tool-annot svg,    .paxs-tool-annot svg *    { color: #a78bfa !important; }
+.paxs-tool-default svg,  .paxs-tool-default svg *  { color: #94a3b8 !important; }
+
+/* Active buttons keep a bright white icon regardless of category. */
+.paxs-tool-active svg, .paxs-tool-active svg * { color: #ffffff !important; }
+
+/* --- 9.7 Crisp medical icon rendering (1.75px uniform stroke) -----------
+   stroke-width is a presentation attribute, so a CSS rule overrides it
+   without rewriting any path data — existing OHIF icons are simply sharpened.
+   ------------------------------------------------------------------------ */
+.paxs-icon,
+.paxs-tool svg {
+  width: 18px !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  min-height: 18px !important;
+  max-width: 18px !important;
+  max-height: 18px !important;
+  padding: 0 !important;
+  box-sizing: border-box !important;
+  flex-shrink: 0 !important;
+  shape-rendering: geometricPrecision !important;
+}
+
+/* Line-art guarantee. The injected icons are pure strokes, so any residual
+   `fill="currentColor"` presentation attribute on a stock glyph is neutralised
+   and the stroke always follows the button's resolved colour (category tint,
+   or white when the tool is active). */
+.paxs-toolbar button svg,
+.paxs-tool svg {
+  fill: none !important;
+  stroke: currentColor !important;
+}
+
+.paxs-icon *,
+.paxs-tool svg * {
+  stroke-width: 1.75 !important;
+  stroke-linecap: round !important;
+  stroke-linejoin: round !important;
+  vector-effect: non-scaling-stroke !important;
+}
+
+/* --- 9.7b Injected medical icons (.paxs-modern-svg) --------------------
+   Stamped by paxs-toolbar-enhance.js on every <svg> whose inner geometry we
+   replaced. `fill:none` targets only the ROOT svg, so the small solid anchor
+   dots that a few glyphs carry (length / angle / probe / invert) keep their own
+   `fill="currentColor"` and still render.
+   ------------------------------------------------------------------------ */
+/* Specificity note: the generic `.paxs-tool svg` / `.paxs-toolbar button svg`
+   rules above carry (0,1,1) and would otherwise win the size cascade, silently
+   pinning our icons back to 18px. These higher-specificity selectors (0,2,1)
+   guarantee the 19px spec value is the one that lands. */
+.paxs-modern-svg,
+.paxs-tool .paxs-modern-svg,
+.paxs-toolbar button .paxs-modern-svg {
+  fill: none !important;
+  stroke: currentColor !important;
+  width: 19px !important;
+  height: 19px !important;
+  min-width: 19px !important;
+  min-height: 19px !important;
+  max-width: 19px !important;
+  max-height: 19px !important;
+  stroke-width: 1.75px !important;
+  transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1),
+              color 0.16s ease, stroke 0.16s ease, filter 0.16s ease !important;
+}
+
+/* Hover / focus on an INACTIVE tool: subtle lift + clinical cyan tint.
+   Scoped with :not(.paxs-tool-active) so a selected tool keeps its white
+   stroke instead of being overridden by the hover colour. */
+.paxs-tool:not(.paxs-tool-active):hover .paxs-modern-svg,
+.paxs-tool:not(.paxs-tool-active):focus-visible .paxs-modern-svg {
+  transform: scale(1.08) !important;
+  color: #38bdf8 !important;
+  stroke: #38bdf8 !important;
+}
+
+/* Active tool: glowing accent + bright white stroke. */
+.paxs-tool-active .paxs-modern-svg,
+.paxs-tool[data-state="on"] .paxs-modern-svg,
+.paxs-tool[aria-checked="true"] .paxs-modern-svg,
+.paxs-tool[aria-pressed="true"] .paxs-modern-svg {
+  color: #ffffff !important;
+  stroke: #ffffff !important;
+  filter: drop-shadow(0 0 5px rgba(6, 182, 212, 0.55)) !important;
+}
+
+/* Active button glow, per the diagnostic-workstation spec. */
+.paxs-tool-active,
+.paxs-tool[data-state="on"],
+.paxs-tool[aria-checked="true"],
+.paxs-tool[aria-pressed="true"] {
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.3), 0 0 0 1px rgba(34, 211, 238, 0.3),
+              inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+}
+
+/* --- 9.8 Dropdown chevrons & polished menus ----------------------------- */
+.paxs-tool svg[data-icon="chevron"],
+.paxs-tool .paxs-chevron {
+  width: 12px !important;
+  height: 12px !important;
+  opacity: 0.7 !important;
+  margin-left: -2px !important;
+}
+
+#react-portal [role="menu"],
+[data-radix-popper-content-wrapper] [role="menu"] {
+  background: rgba(15, 23, 42, 0.98) !important;
+  border: 1px solid rgba(51, 65, 85, 0.7) !important;
+  border-radius: 10px !important;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+  backdrop-filter: blur(14px) !important;
+  -webkit-backdrop-filter: blur(14px) !important;
+  padding: 5px !important;
+}
+
+#react-portal [role="menuitem"],
+[data-radix-popper-content-wrapper] [role="menuitem"] {
+  border-radius: 7px !important;
+  font-family: var(--font-sans) !important;
+  font-size: 12.5px !important;
+  color: #cbd5e1 !important;
+  transition: background 0.14s ease, color 0.14s ease !important;
+}
+
+#react-portal [role="menuitem"]:hover,
+#react-portal [role="menuitem"][data-highlighted],
+[data-radix-popper-content-wrapper] [role="menuitem"]:hover,
+[data-radix-popper-content-wrapper] [role="menuitem"][data-highlighted] {
+  background: rgba(34, 211, 238, 0.14) !important;
+  color: #ffffff !important;
+}
+
+/* --- 9.9 Patient / Study info header ------------------------------------ */
+.paxs-patient-info {
+  font-family: var(--font-sans) !important;
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.02em !important;
+  color: #ffffff !important;
+}
+
+.paxs-modality-badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-family: var(--font-mono) !important;
+  font-size: 10px !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.09em !important;
+  padding: 3px 8px !important;
+  border-radius: 6px !important;
+  color: #22d3ee !important;
+  background: rgba(34, 211, 238, 0.16) !important;
+  border: 1px solid rgba(34, 211, 238, 0.42) !important;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.22) !important;
+}
+
+/* --- 9.10 Live telemetry pill ------------------------------------------- */
+.paxs-telemetry {
+  position: absolute !important;
+  right: 14px !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  height: 26px !important;
+  padding: 0 11px !important;
+  border-radius: 999px !important;
+  font-family: var(--font-mono) !important;
+  font-size: 10.5px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  color: #cbd5e1 !important;
+  background: rgba(15, 23, 42, 0.8) !important;
+  border: 1px solid rgba(51, 65, 85, 0.7) !important;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45) !important;
+  backdrop-filter: blur(10px) !important;
+  -webkit-backdrop-filter: blur(10px) !important;
+  z-index: 45 !important;
+  user-select: none !important;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease !important;
+}
+
+.paxs-telemetry .paxs-tel-dot {
+  width: 6px !important;
+  height: 6px !important;
+  border-radius: 50% !important;
+  background: currentColor !important;
+  box-shadow: 0 0 8px currentColor !important;
+  animation: paxs-tel-pulse 2.4s ease-in-out infinite !important;
+}
+
+@keyframes paxs-tel-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(0.8); }
+}
+
+.paxs-telemetry .paxs-tel-icon { font-size: 11px !important; line-height: 1 !important; }
+
+.paxs-telemetry.paxs-mode-client {
+  color: #34d399 !important;
+  border-color: rgba(52, 211, 153, 0.5) !important;
+  box-shadow: 0 0 14px rgba(52, 211, 153, 0.22) !important;
+}
+.paxs-telemetry.paxs-mode-server {
+  color: #38bdf8 !important;
+  border-color: rgba(56, 189, 248, 0.5) !important;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.22) !important;
+}
+.paxs-telemetry.paxs-mode-split {
+  color: #a78bfa !important;
+  border-color: rgba(167, 139, 250, 0.5) !important;
+  box-shadow: 0 0 14px rgba(167, 139, 250, 0.22) !important;
+}
+.paxs-telemetry.paxs-mode-idle {
+  color: #64748b !important;
+  border-color: rgba(100, 116, 139, 0.45) !important;
+}
+
+/* Tooltip (native title attribute is the fallback; this is the styled one) */
+.paxs-telemetry .paxs-tel-tip {
+  position: absolute !important;
+  top: calc(100% + 8px) !important;
+  right: 0 !important;
+  min-width: 230px !important;
+  max-width: 320px !important;
+  padding: 8px 10px !important;
+  border-radius: 8px !important;
+  background: rgba(2, 6, 23, 0.97) !important;
+  border: 1px solid rgba(51, 65, 85, 0.8) !important;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.7) !important;
+  color: #94a3b8 !important;
+  font-size: 10.5px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  text-transform: none !important;
+  white-space: normal !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  transform: translateY(-4px) !important;
+  transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s !important;
+  pointer-events: none !important;
+  z-index: 50 !important;
+}
+
+.paxs-telemetry:hover .paxs-tel-tip {
+  opacity: 1 !important;
+  visibility: visible !important;
+  transform: translateY(0) !important;
+}
+
+
+/* ---- preview scaffolding (not part of the shipped theme) ---- */
+html,body{height:100%}
+body{background:#05070d;margin:0;display:flex;flex-direction:column;overflow:hidden}
+.pv-note{color:#64748b;font:600 11px/1.6 ui-monospace,monospace;padding:14px 18px;border-bottom:1px solid rgba(51,65,85,.35)}
+.pv-note b{color:#94a3b8}
+.pv-stage{flex:1;background:radial-gradient(circle at 50% 40%,#0b1220,#04060c);display:flex;align-items:center;justify-content:center;color:#334155;font:700 12px ui-monospace,monospace;letter-spacing:.2em}
+.pv-zoom{display:flex;gap:26px;justify-content:center;padding:26px;border-bottom:1px solid rgba(51,65,85,.35);flex-wrap:wrap}
+.pv-zoom figure{margin:0;text-align:center}
+.pv-zoom figcaption{color:#64748b;font:600 9.5px ui-monospace,monospace;margin-top:8px;letter-spacing:.06em}
+.pv-zoom .big{display:grid;place-items:center;width:64px;height:64px;border-radius:12px;background:rgba(30,41,59,.5);border:1px solid rgba(51,65,85,.6)}
+.pv-zoom .big svg{width:38px!important;height:38px!important;min-width:38px!important;min-height:38px!important}
+</style>
+</head>
+<body>
+<div class="pv-note"><b>PAXS Viewer — injected medical icon set.</b> Every glyph below is the real output of <code>paxs-toolbar-enhance.js</code>, rendered with the shipping <code>paxs-viewer-theme.css</code>.</div>
+
+<header>
+  <a href="/viewer" class="paxs-brand">PAXS</a>
+  <div class="paxs-toolbar">
+    <button class="paxs-tool paxs-tool-wl paxs-tool-active" aria-label="Window Level" title="Window Level" data-state="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="windowLevel"><circle cx="12" cy="12" r="9"></circle><path d="M12 3v18"></path><path d="M12 7h5.5M12 11h7M12 15h6M12 19h4"></path></svg></button>
+    <button class="paxs-tool paxs-tool-nav" aria-label="Zoom" title="Zoom"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="zoom"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path><path d="M11 8v6M8 11h6"></path></svg></button>
+    <button class="paxs-tool paxs-tool-nav" aria-label="Pan" title="Pan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="pan"><path d="M12 2v20M2 12h20"></path><path d="M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3"></path><path d="M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l3 3"></path></svg></button>
+    <button class="paxs-tool paxs-tool-nav" aria-label="Stack Scroll" title="Stack Scroll"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="scroll"><path d="M4 8.6 12 4.2l8 4.4-8 4.4z"></path><path d="M4 12.4 12 16.8l8-4.4"></path><path d="M4 16.2 12 20.6l8-4.4"></path></svg></button>
+    <button class="paxs-tool paxs-tool-measure" aria-label="Length" title="Length"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="length"><path d="m3 21 18-18"></path><path d="M7.5 12.5l2 2M11 9l2 2M14.5 5.5l2 2"></path><circle cx="3" cy="21" r="1.5" fill="currentColor"></circle><circle cx="21" cy="3" r="1.5" fill="currentColor"></circle></svg></button>
+    <button class="paxs-tool paxs-tool-measure" aria-label="Angle" title="Angle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="angle"><path d="M5 19h14M5 19l11-13"></path><path d="M10 19a5 5 0 0 0-1.8-3.8"></path><circle cx="5" cy="19" r="1.5" fill="currentColor"></circle></svg></button>
+    <button class="paxs-tool paxs-tool-measure" aria-label="Cobb Angle" title="Cobb Angle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="cobb"><path d="M3 18.5h8M13 18.5h8"></path><path d="M10.4 18.5 14.2 6.2"></path><path d="M6.8 18.5a3.6 3.6 0 0 1 3.3-3.6"></path></svg></button>
+    <button class="paxs-tool paxs-tool-measure" aria-label="Bidirectional" title="Bidirectional"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="bidi"><path d="m3 21 18-18"></path><path d="M3 21h4M3 21v-4M21 3h-4M21 3v4"></path><path d="M8.5 15.5l7-7"></path></svg></button>
+    <button class="paxs-tool paxs-tool-annot" aria-label="Probe" title="Probe"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="probe"><circle cx="12" cy="12" r="8"></circle><path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path><circle cx="12" cy="12" r="1.5" fill="currentColor"></circle></svg></button>
+    <button class="paxs-tool paxs-tool-def" aria-label="MPR" title="MPR"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="mpr"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3z"></path><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"></path><path d="M8 5.25 16 9.75M16 14.25v-4.5"></path></svg></button>
+    <button class="paxs-tool paxs-tool-def" aria-label="Layout" title="Layout"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="layout"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"></rect><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"></rect><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"></rect><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"></rect></svg></button>
+    <button class="paxs-tool paxs-tool-nav" aria-label="Invert" title="Invert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="invert"><path d="M12 3a9 9 0 1 0 9 9 9 9 0 0 0-9-9zm0 15a6 6 0 1 1 6-6 6 6 0 0 1-6 6z"></path><path d="M12 6a6 6 0 0 1 6 6h-6z" fill="currentColor" fill-opacity="0.7"></path></svg></button>
+    <button class="paxs-tool paxs-tool-nav" aria-label="Rotate Right" title="Rotate Right"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="rotate"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8M21 3v5h-5"></path></svg></button>
+    <button class="paxs-tool paxs-tool-nav" aria-label="Reset" title="Reset"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="reset"><path d="M3 12a9 9 0 1 0 2.64-6.36L3 8M3 3v5h5"></path></svg></button>
+    <button class="paxs-tool paxs-tool-nav" aria-label="Cine" title="Cine"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="cine"><polygon points="7 4 19 12 7 20 7 4"></polygon></svg></button>
+    <button class="paxs-tool paxs-tool-annot" aria-label="Arrow Annotate" title="Arrow Annotate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="arrow"><path d="M5 19 19 5M19 5h-7M19 5v7"></path></svg></button>
+    <button class="paxs-tool paxs-tool-annot" aria-label="Eraser" title="Eraser"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="clear"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><path d="M10 11v6M14 11v6"></path></svg></button>
+    <button class="paxs-tool paxs-tool-annot" aria-label="Measurements" title="Measurements"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="report"><path d="M14 3.2H7.2a2 2 0 0 0-2 2v13.6a2 2 0 0 0 2 2h9.6a2 2 0 0 0 2-2V8z"></path><path d="M14 3.2V8h4.8"></path><path d="M9 13h6M9 16.6h4"></path></svg></button>
+  </div>
+  <span class="paxs-modality-badge">CT</span>
+  <div class="paxs-telemetry paxs-mode-split" role="status">
+    <span class="paxs-tel-dot"></span>
+    <span class="paxs-tel-icon">⚡</span>
+    <span class="paxs-tel-label">Hybrid</span>
+    <span class="paxs-tel-tip">Processing mode: Hybrid  ·  Network RTT: 88 ms  ·  Client score: 46 / 100  ·  GPU: WebGL2</span>
+  </div>
+</header>
+
+<div class="pv-zoom">
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="windowLevel"><circle cx="12" cy="12" r="9"></circle><path d="M12 3v18"></path><path d="M12 7h5.5M12 11h7M12 15h6M12 19h4"></path></svg></div><figcaption>W/L</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="zoom"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path><path d="M11 8v6M8 11h6"></path></svg></div><figcaption>ZOOM</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="pan"><path d="M12 2v20M2 12h20"></path><path d="M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3"></path><path d="M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l3 3"></path></svg></div><figcaption>PAN</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="length"><path d="m3 21 18-18"></path><path d="M7.5 12.5l2 2M11 9l2 2M14.5 5.5l2 2"></path><circle cx="3" cy="21" r="1.5" fill="currentColor"></circle><circle cx="21" cy="3" r="1.5" fill="currentColor"></circle></svg></div><figcaption>LENGTH</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="angle"><path d="M5 19h14M5 19l11-13"></path><path d="M10 19a5 5 0 0 0-1.8-3.8"></path><circle cx="5" cy="19" r="1.5" fill="currentColor"></circle></svg></div><figcaption>ANGLE</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="cobb"><path d="M3 18.5h8M13 18.5h8"></path><path d="M10.4 18.5 14.2 6.2"></path><path d="M6.8 18.5a3.6 3.6 0 0 1 3.3-3.6"></path></svg></div><figcaption>COBB</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="probe"><circle cx="12" cy="12" r="8"></circle><path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path><circle cx="12" cy="12" r="1.5" fill="currentColor"></circle></svg></div><figcaption>PROBE</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="mpr"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3z"></path><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"></path><path d="M8 5.25 16 9.75M16 14.25v-4.5"></path></svg></div><figcaption>MPR/3D</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="layout"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"></rect><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"></rect><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"></rect><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"></rect></svg></div><figcaption>LAYOUT</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="invert"><path d="M12 3a9 9 0 1 0 9 9 9 9 0 0 0-9-9zm0 15a6 6 0 1 1 6-6 6 6 0 0 1-6 6z"></path><path d="M12 6a6 6 0 0 1 6 6h-6z" fill="currentColor" fill-opacity="0.7"></path></svg></div><figcaption>INVERT</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="rotate"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8M21 3v5h-5"></path></svg></div><figcaption>ROTATE</figcaption></figure>
+  <figure><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="paxs-icon paxs-modern-svg" data-paxs-icon="cine"><polygon points="7 4 19 12 7 20 7 4"></polygon></svg></div><figcaption>CINE</figcaption></figure>
+</div>
+
+<div class="pv-stage">DICOM VIEWPORT AREA</div>
+</body></html>

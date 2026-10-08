@@ -289,7 +289,7 @@ def test_stats_include_lifecycle_counters(client):
     )
     client.post("/api/v1/lifecycle/run", headers=headers)
 
-    stats = client.get("/api/v1/stats").json()
+    stats = client.get("/api/v1/stats", headers=headers).json()
     lc = stats["features"]["lifecycle"]
     assert lc["rules"] >= 1
     assert lc["archived"] >= 1

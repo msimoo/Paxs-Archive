@@ -10,22 +10,15 @@ import pytest
 from app.core.config import settings as runtime_settings
 from app.services.settings_service import EDITABLE_KEYS
 
-GROUP_KEYS = {"sys", "dicom", "interop", "storage", "security", "workflow"}
+GROUP_KEYS = {"sys", "dicom", "interop", "storage", "security", "workflow", "viewer"}
 
 
 def _auth(client, username="cfg_admin", password="secret123", role="ADMIN"):
-    # The first registered user bootstraps as ADMIN regardless of the
-    # requested role, so seed an admin first when a lower-role user is needed.
-    if role != "ADMIN":
-        client.post("/api/v1/auth/register",
-                    json={"username": "admin", "password": "secret123"})
-    reg = client.post("/api/v1/auth/register",
-                      json={"username": username, "password": password, "role": role})
-    token = (reg.json().get("access_token") if reg.status_code == 201
-             else client.post("/api/v1/auth/login",
-                              json={"username": username, "password": password})
-             .json()["access_token"])
-    return {"Authorization": f"Bearer {token}"}
+    # H02: self-registration cannot mint privileged roles, so accounts are
+    # created through the admin API.
+    from tests.helpers import auth_for_role
+
+    return auth_for_role(client, username, role=role or "ADMIN", password=password)
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +137,7 @@ def test_config_patch_applies_and_persists(client):
     assert runtime_settings.DICOM_PORT == 11112
 
     # Health reflects the live change
-    health = client.get("/api/v1/health").json()
+    health = client.get("/api/v1/health", headers=h).json()
     assert health["app"] == "PAXS Radiology Hub"
 
     # Persisted: a fresh GET (new request) still reports the overrides

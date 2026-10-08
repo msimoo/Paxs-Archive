@@ -20,13 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Patient, ScheduledProcedureStep, User
 from app.db.session import get_db
 from app.api.v1.deps import get_current_user
+from app.core.roles import WRITE_ROLES
 
 log = logging.getLogger("paxs.api.worklist")
 
 router = APIRouter(prefix="/api/v1/worklist", tags=["worklist"])
 
 # Booking clerks (TECHNOLOGIST) and admins manage the schedule; deletes are admin-only.
-WRITE_ROLES = ("ADMIN", "TECHNOLOGIST")
+# WRITE_ROLES is imported from app.core.roles so the role vocabulary has one definition.
 
 VALID_STATUS = ("SCHEDULED", "IN PROGRESS", "COMPLETED", "CANCELED")
 

@@ -216,6 +216,9 @@ def admin(client):
 
 
 def test_api_requires_auth(client):
+    # The autouse `admin` fixture logged in on this client, and the API also
+    # accepts cookie sessions (C03), so clear the jar to be anonymous.
+    client.cookies.clear()
     assert client.get("/api/v1/scripts").status_code == 401
     assert client.post("/api/v1/scripts/reload").status_code == 401
 

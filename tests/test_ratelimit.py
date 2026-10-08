@@ -65,5 +65,5 @@ def test_headers_included():
 def test_disabled_when_settings_flag_off(client: TestClient):
     # conftest sets RATE_LIMIT_ENABLED=false; a burst must not trip 429.
     for _ in range(5):
-        res = client.get("/api/v1/health")
+        res = client.get("/api/v1/health/live")
         assert res.status_code == 200

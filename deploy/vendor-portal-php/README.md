@@ -49,7 +49,7 @@ php -S localhost:8080
 ### Method 2: MySQL Database (Optional)
 If you prefer MySQL over SQLite:
 1. Create a MySQL database and user in your hosting control panel.
-2. Open `config.php` and update:
+2. Copy `config.local.php.example` to `config.local.php` and set the credentials there (that file is git-ignored), or set the equivalent environment variables:
    ```php
    define('DB_DRIVER', 'mysql');
    define('DB_HOST', '127.0.0.1');
@@ -57,6 +57,7 @@ If you prefer MySQL over SQLite:
    define('DB_USER', 'your_db_username');
    define('DB_PASS', 'your_db_password');
    ```
+   The same values can be supplied as `PAXS_PORTAL_DB_DRIVER`, `PAXS_PORTAL_DB_HOST`, `PAXS_PORTAL_DB_NAME`, `PAXS_PORTAL_DB_USER`, `PAXS_PORTAL_DB_PASS`.
 3. The portal will automatically create all tables on first load!
 
 ---
@@ -80,8 +81,15 @@ If you prefer MySQL over SQLite:
    ```php
    echo password_hash('YourNewStrongPassword!', PASSWORD_BCRYPT);
    ```
-   Update `ADMIN_DEFAULT_PASS` in `config.php`.
-2. **Protect Private Keys**:
-   The private key in `config.php` signs your licenses. Never commit production private keys to public GitHub repositories.
+   Set it as `ADMIN_DEFAULT_PASS` in `config.local.php`, or via the
+   `PAXS_PORTAL_ADMIN_PASS_HASH` environment variable.
+2. **Keep the signing key out of source control**:
+   `config.php` no longer contains any private key. The RSA key that signs your
+   licences is resolved at runtime from, in order: the
+   `PAXS_VENDOR_PRIVATE_KEY` environment variable, the file named by
+   `PAXS_VENDOR_PRIVATE_KEY_FILE` (default `vendor_private.pem` beside
+   `config.php`), or `config.local.php`. When none is configured, licence
+   signing **fails closed** instead of falling back to a bundled key. Store the
+   PEM outside the web root with `chmod 600`, and never commit it.
 3. **HTTPS**:
    Always run your live vendor portal over SSL/HTTPS to secure activation requests.

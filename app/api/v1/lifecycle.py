@@ -28,7 +28,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user, require_destructive_role
+from app.api.v1.deps import (
+    get_current_user,
+    require_admin,
+    require_destructive_role,
+)
 from app.db.models import Patient, Study, StudyLifecycleRule, User
 from app.db.session import get_db
 from app.services import lifecycle_service
@@ -79,7 +83,7 @@ def _rule_to_dict(rule: StudyLifecycleRule) -> dict[str, Any]:
 @router.post("/rules", status_code=201, response_class=JSONResponse)
 async def create_rule(body: CreateLifecycleRuleRequest,
                       db: AsyncSession = Depends(get_db),
-                      user: User = Depends(get_current_user)):
+                      user: User = Depends(require_admin)):
     try:
         rule = await lifecycle_service.create_rule(db, body.model_dump())
         await db.commit()
@@ -111,7 +115,7 @@ async def get_rule(rule_id: int, db: AsyncSession = Depends(get_db),
 @router.put("/rules/{rule_id}", response_class=JSONResponse)
 async def update_rule(rule_id: int, body: UpdateLifecycleRuleRequest,
                       db: AsyncSession = Depends(get_db),
-                      user: User = Depends(get_current_user)):
+                      user: User = Depends(require_admin)):
     rule = await lifecycle_service.get_rule(db, rule_id)
     if not rule:
         raise HTTPException(404, f"Lifecycle rule #{rule_id} not found")
@@ -130,7 +134,7 @@ async def update_rule(rule_id: int, body: UpdateLifecycleRuleRequest,
 
 @router.delete("/rules/{rule_id}", response_class=JSONResponse)
 async def delete_rule(rule_id: int, db: AsyncSession = Depends(get_db),
-                      user: User = Depends(get_current_user)):
+                      user: User = Depends(require_admin)):
     deleted = await lifecycle_service.delete_rule(db, rule_id)
     if not deleted:
         raise HTTPException(404, f"Lifecycle rule #{rule_id} not found")
@@ -141,7 +145,7 @@ async def delete_rule(rule_id: int, db: AsyncSession = Depends(get_db),
 @router.post("/run", response_class=JSONResponse)
 async def run_lifecycle(rule_id: int | None = Query(default=None),
                         db: AsyncSession = Depends(get_db),
-                        user: User = Depends(get_current_user)):
+                        user: User = Depends(require_admin)):
     """Evaluate enabled lifecycle rules now (or a single rule by id)."""
     result = await asyncio.to_thread(
         lifecycle_service.evaluate_and_run, rule_id, f"api:{user.username}"
@@ -157,7 +161,7 @@ async def run_lifecycle(rule_id: int | None = Query(default=None),
 
 @router.post("/studies/{study_uid}/archive", response_class=JSONResponse)
 async def archive_one(study_uid: str, db: AsyncSession = Depends(get_db),
-                      user: User = Depends(get_current_user)):
+                      user: User = Depends(require_admin)):
     result = await asyncio.to_thread(
         lifecycle_service.archive_study, study_uid, f"api:{user.username}"
     )
@@ -168,7 +172,7 @@ async def archive_one(study_uid: str, db: AsyncSession = Depends(get_db),
 
 @router.post("/studies/{study_uid}/restore", response_class=JSONResponse)
 async def restore_one(study_uid: str, db: AsyncSession = Depends(get_db),
-                      user: User = Depends(get_current_user)):
+                      user: User = Depends(require_admin)):
     result = await asyncio.to_thread(
         lifecycle_service.restore_study, study_uid, f"api:{user.username}"
     )
@@ -179,7 +183,7 @@ async def restore_one(study_uid: str, db: AsyncSession = Depends(get_db),
 
 @router.post("/studies/{study_uid}/purge", response_class=JSONResponse)
 async def purge_one(study_uid: str, db: AsyncSession = Depends(get_db),
-                    user: User = Depends(require_destructive_role)):
+                    user: User = Depends(require_admin)):
     result = await asyncio.to_thread(
         lifecycle_service.purge_study, study_uid, f"api:{user.username}"
     )

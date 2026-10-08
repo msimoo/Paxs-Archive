@@ -30,6 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.roles import DESTRUCTIVE_ROLES, ROLES
 from app.core.security import (
     clear_session_cookie,
     create_access_token,
@@ -48,7 +49,8 @@ from app.api.ratelimit import rate_limit
 log = logging.getLogger("paxs.auth")
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
-ROLES = ("ADMIN", "RADIOLOGIST", "PHYSICIAN", "TECHNOLOGIST")
+# ROLES is re-exported from app.core.roles so that role names have exactly one
+# definition (shared with the LDAP group mapping and the worklist guard).
 
 # Post-login landing per role (auth plan §1). These are the real pages the
 # archive serves — the dashboard at /, the study list at /viewer. The
@@ -63,13 +65,20 @@ ROLE_LANDING = {
 }
 
 
-def role_landing(role: str, next_url: str | None = None) -> str:
-    """Landing page after login: ?next= (same-origin only) or role default."""
+def role_landing(role: str, next_url: str | None = None, root_path: str = "") -> str:
+    """Landing page after login: ?next= (same-origin only) or role default.
+
+    ``root_path`` is the reverse-proxy mount prefix (V2-4): the result is a
+    browser-facing path, so it must carry the prefix or the redirect lands
+    outside the app.
+    """
+    from app.core.proxy_prefix import prefix_path
+
     if next_url and next_url.startswith("/") and not next_url.startswith("//"):
         # same-origin absolute path only — blocks open-redirect via ?next=
         if "\n" not in next_url and "\r" not in next_url:
-            return next_url
-    return ROLE_LANDING.get(role, "/viewer")
+            return prefix_path(root_path, next_url)
+    return prefix_path(root_path, ROLE_LANDING.get(role, "/viewer"))
 
 
 class RegisterBody(BaseModel):
@@ -158,21 +167,19 @@ async def _create_session(db: AsyncSession, user: User,
     return family_id, refresh_token
 
 
-def _auth_response(user: User, access_token: str, next_url: str | None) -> JSONResponse:
+def _auth_response(user: User, access_token: str, next_url: str | None,
+                   root_path: str = "") -> JSONResponse:
     return JSONResponse({
         "access_token": access_token,
         "token_type": "bearer",
         "user": _user_dict(user),
-        "redirect_to": role_landing(user.role, next_url),
+        "redirect_to": role_landing(user.role, next_url, root_path),
     })
 
 
 @router.post("/register", status_code=201,
             dependencies=[Depends(rate_limit("auth", settings.RATE_LIMIT_LOGIN_PER_MINUTE, 60))])
 async def register(body: RegisterBody, request: Request, db: AsyncSession = Depends(get_db)):
-    if not settings.ALLOW_REGISTER:
-        raise HTTPException(403, "Registration is disabled on this server")
-
     existing = (
         await db.execute(select(User).where(User.username == body.username))
     ).scalar_one_or_none()
@@ -180,15 +187,34 @@ async def register(body: RegisterBody, request: Request, db: AsyncSession = Depe
         raise HTTPException(409, "Username already taken")
 
     total = (await db.execute(select(func.count(User.id)))).scalar_one()
-    role = body.role or "PHYSICIAN"
+
+    # The bootstrap account (the very first user) is always allowed — otherwise
+    # a fresh install with ALLOW_REGISTER=false could never be set up.
     if total == 0:
-        role = "ADMIN"  # first user bootstraps as admin
-    elif role not in ROLES:
-        raise HTTPException(422, f"Invalid role, use one of {ROLES}")
-    elif role == "ADMIN":
-        # Self-registration can never mint admins: an existing admin must
-        # promote the account via Admin → Users (privilege-escalation guard).
-        raise HTTPException(403, "New accounts cannot be created as ADMIN")
+        role = "ADMIN"
+    else:
+        if not settings.ALLOW_REGISTER:
+            raise HTTPException(403, "Registration is disabled on this server")
+
+        # H02: self-registration may only mint least-privilege roles. ADMIN and
+        # RADIOLOGIST are destructive-capable, so they are refused outright —
+        # an existing admin must create such accounts via Admin → Users.
+        allowed = {
+            r.strip().upper()
+            for r in settings.REGISTER_ALLOWED_ROLES.split(",")
+            if r.strip()
+        } - set(DESTRUCTIVE_ROLES)
+        requested = (body.role or "").strip().upper()
+        if requested and requested not in ROLES:
+            raise HTTPException(422, f"Invalid role, use one of {ROLES}")
+        if requested and requested not in allowed:
+            raise HTTPException(
+                403,
+                "Self-registration cannot create this role; "
+                f"allowed: {sorted(allowed) or 'none'}. "
+                "An administrator can create privileged accounts in Admin → Users.",
+            )
+        role = requested or (sorted(allowed)[0] if allowed else "PHYSICIAN")
 
     user = User(
         username=body.username,
@@ -208,7 +234,8 @@ async def register(body: RegisterBody, request: Request, db: AsyncSession = Depe
     access_token = create_access_token(user.username, user.role, settings.SECRET_KEY,
                                        settings.TOKEN_EXPIRE_MINUTES)
     _, refresh_token = await _create_session(db, user, request)
-    response = _auth_response(user, access_token, request.query_params.get("next"))
+    response = _auth_response(user, access_token, request.query_params.get("next"),
+                              request.scope.get("root_path") or "")
     response.status_code = 201
     set_session_cookie(response, refresh_token)
     return response
@@ -269,7 +296,8 @@ async def login(body: LoginBody, request: Request, db: AsyncSession = Depends(ge
     access_token = create_access_token(user.username, user.role, settings.SECRET_KEY,
                                        settings.TOKEN_EXPIRE_MINUTES)
     _, refresh_token = await _create_session(db, user, request)
-    response = _auth_response(user, access_token, request.query_params.get("next"))
+    response = _auth_response(user, access_token, request.query_params.get("next"),
+                              request.scope.get("root_path") or "")
     set_session_cookie(response, refresh_token)
     return response
 
@@ -326,7 +354,8 @@ async def refresh(request: Request, db: AsyncSession = Depends(get_db)):
     await write_audit(db, user.id, "token_refresh", request)
     access_token = create_access_token(user.username, user.role, settings.SECRET_KEY,
                                        settings.TOKEN_EXPIRE_MINUTES)
-    response = _auth_response(user, access_token, request.query_params.get("next"))
+    response = _auth_response(user, access_token, request.query_params.get("next"),
+                              request.scope.get("root_path") or "")
     set_session_cookie(response, new_token)
     return response
 

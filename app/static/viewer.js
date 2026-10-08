@@ -271,7 +271,7 @@ function bind() {
   $("v-prev").addEventListener("click", () => { if (state.instIdx > 0) renderImage(state.instIdx - 1); });
   $("v-next").addEventListener("click", () => { if (state.instIdx < state.instances.length - 1) renderImage(state.instIdx + 1); });
   $("v-cine").addEventListener("click", toggleCine);
-  $("v-back").addEventListener("click", () => { location.href = "/"; });
+  $("v-back").addEventListener("click", () => { location.href = (window.PAXS_BASE_PATH || "") + "/"; });
   $("v-zoom").addEventListener("input", () => {
     $("v-zoom-label").textContent = `${$("v-zoom").value}%`;
     if (img.complete && img.naturalWidth) draw();

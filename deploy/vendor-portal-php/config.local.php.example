@@ -1,0 +1,59 @@
+<?php
+/**
+ * PAXS Vendor Licensing Portal — operator-local secrets (TEMPLATE).
+ *
+ * Copy this file to `config.local.php` in the same directory and fill it in.
+ * `config.local.php` is git-ignored and must never be committed.
+ *
+ *   cp config.local.php.example config.local.php
+ *
+ * config.php loads it automatically when present.
+ */
+
+declare(strict_types=1);
+
+// ---------------------------------------------------------------------------
+// 1. RSA private key used to sign licences  (REQUIRED to issue licences)
+// ---------------------------------------------------------------------------
+// Preferred: point at a PEM file stored OUTSIDE the web root / repository and
+// readable only by the web-server user.
+define('PAXS_VENDOR_PRIVATE_KEY_FILE', '/etc/paxs/vendor_private.pem');
+
+// Alternative: inline the PEM text. Keep in mind this still lands in a file on
+// disk, so restrict its permissions (chmod 600) and keep it out of any backup
+// that leaves the host.
+//
+// define('PAXS_VENDOR_PRIVATE_KEY', <<<'EOD'
+// <paste the PEM contents here, including the opening and closing header lines>
+// EOD);
+//
+// The same value can instead be supplied through the environment:
+//   PAXS_VENDOR_PRIVATE_KEY_FILE=/etc/paxs/vendor_private.pem
+
+// ---------------------------------------------------------------------------
+// 2. Portal admin bootstrap password  (recommended)
+// ---------------------------------------------------------------------------
+// Generate with: php -r "echo password_hash('your-password', PASSWORD_DEFAULT);"
+// define('ADMIN_DEFAULT_USER', 'admin');
+// define('ADMIN_DEFAULT_PASS', '$2y$10$replace-with-your-own-hash');
+
+// ---------------------------------------------------------------------------
+// 3. MySQL credentials  (only used when DB_DRIVER is 'mysql')
+// ---------------------------------------------------------------------------
+// define('DB_HOST', '127.0.0.1');
+// define('DB_NAME', 'paxs_portal');
+// define('DB_USER', 'paxs_portal_user');
+// define('DB_PASS', 'a-long-random-password');
+
+// ---------------------------------------------------------------------------
+// 4. Session/portal secret
+// ---------------------------------------------------------------------------
+// define('PORTAL_SECRET_KEY', 'a-long-random-value');
+
+// ---------------------------------------------------------------------------
+// DO NOT change the licence AES salt here.
+// ---------------------------------------------------------------------------
+// It is shared with app/core/licensing/crypto.py and changing it makes every
+// previously issued .lic container undecryptable. Any change is a licence
+// migration, not a routine edit.
+// define('PAXS_LIC_AES_SALT', 'PAXS_ARCHIVE_LIC_SEC_2026_AES25');

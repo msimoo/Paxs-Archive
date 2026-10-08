@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import get_current_user, require_study_access
 from app.db.models import Series, Study, User
 from app.db.session import get_db
 from app.services import dicomdir_service
@@ -39,6 +39,9 @@ async def export_dicomdir_package(
     """Generate and download a standard DICOMDIR export ZIP archive (contains DICOMDIR file + IMAGES/)."""
     if not req.study_instance_uids:
         raise HTTPException(400, "study_instance_uids list cannot be empty")
+    # C04: a bulk package must not mix in another institution's studies.
+    for _uid in req.study_instance_uids:
+        await require_study_access(db, _uid, user)
 
     try:
         zip_bytes, filename = await dicomdir_service.export_dicomdir_package(
@@ -67,6 +70,9 @@ async def preview_dicomdir_structure(
     """Preview the DICOMDIR record hierarchy structure (PATIENT -> STUDY -> SERIES -> IMAGE)."""
     if not req.study_instance_uids:
         raise HTTPException(400, "study_instance_uids list cannot be empty")
+    # C04
+    for _uid in req.study_instance_uids:
+        await require_study_access(db, _uid, user)
 
     stmt = (
         select(Study)

@@ -38,8 +38,16 @@ async def find_prior_studies(
     session: AsyncSession,
     study_instance_uid: str,
     patient_id: str | None = None,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
 ) -> list[PriorStudyMatch]:
-    """Find all prior studies for a patient given a current study_instance_uid."""
+    """Find all prior studies for a patient given a current study_instance_uid.
+
+    C04: the result set is tenant-scoped — "prior studies for this patient" must
+    not reach into another institution's records, even when the patient id
+    happens to match.
+    """
     # 1. Fetch current study details
     stmt_curr = (
         select(Study)
@@ -80,6 +88,11 @@ async def find_prior_studies(
         .order_by(Study.study_date.is_not(None).desc(), Study.study_date.desc(),
                   Study.created_at.desc())
     )
+    # C04: constrain the priors query to what the caller may see — "prior
+    # studies for this patient" must not reach into another institution.
+    from app.services.query_service import apply_study_tenant_scope
+
+    stmt_priors = apply_study_tenant_scope(stmt_priors, tenant_id, include_all)
     priors = (await session.execute(stmt_priors)).scalars().unique().all()
 
     results = []

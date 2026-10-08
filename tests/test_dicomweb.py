@@ -1,3 +1,5 @@
+import pytest
+
 from tests.helpers import build_stow_body, ds_bytes, make_instance, stow_headers
 
 
@@ -53,6 +55,7 @@ def test_stow_streams_parts_with_small_chunks(client):
     """STOW body is consumed part-by-part; identical result whether the
     client sends it as one blob or dribbles it in tiny chunks (boundary
     separators split across chunk boundaries must still parse)."""
+
     ds1 = make_instance(patient_id="STREAMED", study_date="20250116",
                         modality="MR", instance_num=1)
     ds2 = make_instance(patient_id="STREAMED", study_date="20250116",
@@ -605,3 +608,14 @@ def test_dashboard_counts_reported_oru_his(client):
     assert p_uid["1.2.3.300"]["oru_status"] == "PENDING"
     # The ?oru=1 filter still shows only the truly delivered report.
     assert client.get("/api/v1/studies?oru=1").json()["total"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# C03: the dashboard study list / stats endpoints require authentication.
+# Override the anonymous ``client`` for this module so its requests carry a
+# valid ADMIN bearer token. (No test here asserts anonymous behaviour.)
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

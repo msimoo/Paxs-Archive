@@ -330,10 +330,12 @@ def _admin_headers(client):
 
 
 def _tech_headers(client):
-    client.post("/api/v1/auth/register", json={"username": "tech1", "password": "secret123",
-                                               "role": "TECHNOLOGIST"})
-    res = client.post("/api/v1/auth/login", json={"username": "tech1", "password": "secret123"})
-    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+    from tests.helpers import auth_for_role
+
+    # Reuse the module's own bootstrap admin: it owns the ADMIN slot.
+    return auth_for_role(
+        client, "tech1", role="TECHNOLOGIST", admin=_admin_headers(client)
+    )
 
 
 def test_worklist_api_crud(client):

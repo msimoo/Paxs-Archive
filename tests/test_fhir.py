@@ -1,5 +1,8 @@
 """FHIR R4 gateway tests."""
 
+import pytest
+
+
 from tests.test_dicomweb import _upload_study
 
 
@@ -87,3 +90,15 @@ def test_fhir_missing_patient_404(client):
 
 def test_fhir_invalid_patient_id_400(client):
     assert client.get("/fhir/Patient/abc").status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# C03: the volume / FHIR / GSPS / dashboard / metrics routes require
+# authentication. Override the anonymous ``client`` fixture for this module so
+# its requests carry a valid ADMIN bearer token. Tests that assert anonymous
+# rejection live in test_route_auth_matrix.py and use ``anonymous_client``.
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

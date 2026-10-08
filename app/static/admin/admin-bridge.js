@@ -37,7 +37,8 @@
     }).then(function (res) {
       if (res.status === 401) {
         try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ }
-        window.location.href = "/";
+        // V2-4: carry the reverse-proxy mount prefix (injected by the shell).
+        window.location.href = (window.PAXS_BASE_PATH || "") + "/";
         throw new Error("unauthorized");
       }
       if (!res.ok) {

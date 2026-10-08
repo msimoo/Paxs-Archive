@@ -24,12 +24,16 @@ export function SearchToolbar({ filters, setSearch, setModality, setDateRange }:
       </div>
       
       <div className="flex flex-row gap-3 w-full md:w-auto">
-        <Select value={filters.modality} onValueChange={setModality}>
+        <Select
+          value={filters.modality || 'all'}
+          onValueChange={(v) => setModality(v === 'all' ? '' : v)}
+        >
           <SelectTrigger className="w-[180px] bg-[#0c1424]/80 border-slate-700/50 backdrop-blur-md text-slate-300 h-12 focus:ring-cyan-500">
             <SelectValue placeholder="All Modalities" />
           </SelectTrigger>
           <SelectContent className="bg-[#0c1424] border-slate-700 text-slate-300">
-            <SelectItem value="">All Modalities</SelectItem>
+            {/* H17: Radix reserves "" for the placeholder, so the sentinel is "all". */}
+            <SelectItem value="all">All Modalities</SelectItem>
             {Object.entries(MOD_LABELS).map(([key, label]) => (
               <SelectItem key={key} value={key}>{label} ({key})</SelectItem>
             ))}

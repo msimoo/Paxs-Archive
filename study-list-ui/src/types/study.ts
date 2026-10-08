@@ -3,6 +3,10 @@ export interface Study {
   patient_name: string;
   patient_id: string;
   patient_source: string;
+  // C07: real demographics from the archive. Optional — render "Unknown"/"N/A"
+  // when absent rather than substituting a default.
+  patient_birth_date?: string | null;
+  patient_sex?: string | null;
   tenant_id?: number;
   tenant_name?: string;
   study_date: string;

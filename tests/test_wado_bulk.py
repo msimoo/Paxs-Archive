@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import numpy as np
 from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
@@ -97,3 +99,13 @@ def test_wado_frame_and_bulk_api(client):
     )
     assert resp_bulk.status_code == 200
     assert len(resp_bulk.content) == 2 * 64 * 64
+
+
+# --------------------------------------------------------------------------- #
+# C03: DICOMweb is private by default, so this module's requests carry a valid
+# ADMIN bearer token. (No test here asserts anonymous behaviour.)
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client(auth_client):
+    """Authenticated client (ADMIN bearer token)."""
+    return auth_client

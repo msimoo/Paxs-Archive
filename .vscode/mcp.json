@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "report-intelligence": {
+      "type": "stdio",
+      "command": "cmd.exe",
+      "args": [
+        "/d",
+        "/c",
+        "npx.cmd",
+        "--yes",
+        "@report-intelligence/mcp-server@0.1.2"
+      ],
+      "env": {
+        "RIP_ALLOWED_REPORT_ROOTS": "D:\\Paxs Archive"
+      }
+    }
+  }
+}

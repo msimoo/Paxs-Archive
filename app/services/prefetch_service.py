@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 
 from pydicom.dataset import Dataset
@@ -68,6 +69,37 @@ def query_remote_priors_sync(
     return priors
 
 
+def _study_move_query(study_instance_uid: str) -> Dataset:
+    """A STUDY-level C-MOVE query identifying exactly one prior study."""
+    query = Dataset()
+    query.QueryRetrieveLevel = "STUDY"
+    query.StudyInstanceUID = study_instance_uid
+    return query
+
+
+def _within_max_age(study_date: str | None, max_age_days: int | None,
+                    now: datetime) -> bool:
+    """True when a prior's study date is within ``max_age_days`` of ``now`` (L-13).
+
+    A non-positive or missing limit means "no age restriction". An absent or
+    unparseable date is kept rather than dropped — the remote C-FIND already
+    matched it, and silently discarding priors is worse than fetching a slightly
+    older one.
+    """
+    if not max_age_days or int(max_age_days) <= 0:
+        return True
+    raw = str(study_date or "").strip()
+    # DICOM DA may be a single date or a range "YYYYMMDD-YYYYMMDD"; use the start.
+    first = raw.split("-", 1)[0]
+    if len(first) != 8 or not first.isdigit():
+        return True
+    try:
+        parsed = datetime.strptime(first, "%Y%m%d")
+    except ValueError:
+        return True
+    return (now - parsed).days <= int(max_age_days)
+
+
 async def evaluate_and_trigger_prefetch(
     session: AsyncSession,
     patient_id: str,
@@ -123,8 +155,13 @@ async def evaluate_and_trigger_prefetch(
             settings.DICOM_AE_TITLE,
         )
 
-        # Filter out already stored studies
+        # Filter out already stored studies, then honour the rule's age window
+        # (L-13) before capping the count.
         needed_priors = [p for p in priors if p["study_instance_uid"] not in existing_uids]
+        needed_priors = [
+            p for p in needed_priors
+            if _within_max_age(p.get("study_date"), rule.max_prior_age_days, now)
+        ]
         needed_priors = needed_priors[: rule.max_priors_count]
 
         job = PrefetchJob(
@@ -145,18 +182,31 @@ async def evaluate_and_trigger_prefetch(
         for prior_info in needed_priors:
             st_uid = prior_info["study_instance_uid"]
             try:
-                # Trigger C-MOVE to fetch prior study to local PAXS
-                cmove_ok = await loop.run_in_executor(
+                # Trigger C-MOVE to fetch the prior study to local PAXS. The
+                # destination AE is this archive: the remote SCP pushes the
+                # instances back to us. (H-1: this previously called the
+                # non-existent `sender.c_move_study`, so every prefetch raised
+                # AttributeError and was swallowed — priors were never fetched.)
+                result = await loop.run_in_executor(
                     None,
-                    sender.c_move_study,
-                    rule.source_node.host,
-                    rule.source_node.port,
-                    rule.source_node.ae_title,
-                    st_uid,
-                    settings.DICOM_AE_TITLE,
+                    partial(
+                        sender.send_move,
+                        rule.source_node.host,
+                        rule.source_node.port,
+                        rule.source_node.ae_title,
+                        settings.DICOM_AE_TITLE,          # dest_ae_title (ourselves)
+                        query=_study_move_query(st_uid),
+                        our_ae_title=settings.DICOM_AE_TITLE,
+                    ),
                 )
-                if cmove_ok:
+                if isinstance(result, dict) and result.get("ok"):
                     retrieved_count += 1
+                else:
+                    reason = result.get("reason") if isinstance(result, dict) else result
+                    log.warning(
+                        "C-MOVE prefetch did not succeed for study %s from %s: %s",
+                        st_uid, rule.source_node.ae_title, reason,
+                    )
             except Exception as exc:
                 log.warning("C-MOVE prefetch failed for study %s from %s: %s", st_uid, rule.source_node.ae_title, exc)
 

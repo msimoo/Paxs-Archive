@@ -7,6 +7,7 @@ dispatches matching studies to remote DICOM Node destinations via C-STORE.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
@@ -135,28 +136,42 @@ def dispatch_study_to_node_sync(study_instance_uid: str, node_id: int) -> dict[s
                 continue
 
             local = storage_service.local_path(inst.file_path, backend_name=bk)
+            temp_path: str | None = None
             if local:
                 file_target = local
             else:
-                # Materialize temp file if on remote S3
+                # Materialize a temp file for a remote (S3) object. It is removed
+                # in `finally` below — an auto-routed S3 study must not leak one
+                # `.dcm` per instance into the system temp dir (H-2).
                 import tempfile
                 data = storage_service.read_bytes(inst.file_path, backend_name=bk)
                 with tempfile.NamedTemporaryFile(suffix=".dcm", delete=False) as tmp:
                     tmp.write(data)
                     file_target = tmp.name
+                    temp_path = tmp.name
 
-            res = send_file(node.host, node.port, node.ae_title, file_target)
-            if res.get("ok"):
-                sent_count += 1
-                audit_service.add_audit(
-                    session,
-                    sop_instance_uid=inst.sop_instance_uid,
-                    study_instance_uid=study_instance_uid,
-                    action="AUTO_ROUTED",
-                    performed_by=f"auto-router:{node.ae_title}",
-                )
-            else:
-                failed_count += 1
+            try:
+                res = send_file(node.host, node.port, node.ae_title, file_target)
+                if res.get("ok"):
+                    sent_count += 1
+                    audit_service.add_audit(
+                        session,
+                        sop_instance_uid=inst.sop_instance_uid,
+                        study_instance_uid=study_instance_uid,
+                        action="AUTO_ROUTED",
+                        performed_by=f"auto-router:{node.ae_title}",
+                    )
+                else:
+                    failed_count += 1
+            finally:
+                if temp_path is not None:
+                    try:
+                        os.unlink(temp_path)
+                    except OSError:
+                        log.warning(
+                            "could not remove routing temp file %s", temp_path,
+                            exc_info=True,
+                        )
 
         session.commit()
 

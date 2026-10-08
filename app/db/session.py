@@ -232,12 +232,49 @@ async def get_db():
 
 
 async def init_db() -> None:
-    """Create tables if missing (idempotent). Alembic migrations for production."""
-    from app.db.models import Base
+    """Prepare the schema at startup (H11).
 
-    async with async_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    log.info("Database schema ready (%s)", settings.DATABASE_URL.split("://")[0])
+    Alembic is the single schema authority. A brand-new **empty** database is
+    brought up by running the migration chain, so ``alembic_version`` is
+    authoritative from the first boot. An existing database is only *checked*:
+    drift is reported, never silently created — `create_all` would add objects
+    that no migration records, which is exactly how schema and history diverged
+    before. ``create_all`` is now used only by the test fixtures.
+    """
+    import asyncio
+
+    from sqlalchemy import inspect
+
+    def _state() -> tuple[bool, list[str]]:
+        inspector = inspect(sync_engine)
+        tables = set(inspector.get_table_names())
+        # Ignore alembic's own bookkeeping table when deciding "empty".
+        return (not (tables - {"alembic_version"}), [])
+
+    empty, _ = await asyncio.to_thread(_state)
+    if empty:
+        # Fresh install: run the chain so the revision table is the source of
+        # truth from the very first boot.
+        from app.services import db_admin
+
+        log.info("Empty database — applying migrations to head")
+        await asyncio.to_thread(db_admin.run_migrations, settings.DATABASE_URL)
+        log.info("Database schema ready (%s)", settings.DATABASE_URL.split("://")[0])
+        return
+
+    from app.services import db_admin
+
+    missing = await asyncio.to_thread(db_admin.schema_drift, settings.DATABASE_URL)
+    if missing:
+        log.warning(
+            "Schema drift detected (%d object(s) present in the models but not in "
+            "the database): %s — run 'alembic upgrade head' to reconcile; startup "
+            "will NOT create them implicitly.",
+            len(missing),
+            ", ".join(missing[:10]),
+        )
+    else:
+        log.info("Database schema verified (%s)", settings.DATABASE_URL.split("://")[0])
 
 
 async def close_db() -> None:

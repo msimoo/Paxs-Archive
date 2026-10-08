@@ -255,14 +255,23 @@ def _ensure_patient(session, data: dict) -> Patient | None:
     needed. Race-safe: if a C-STORE/STOW for the same brand-new MRN wins the
     INSERT first (and we lose on the unique patient_id), we adopt the winner
     instead of crashing the listener thread and dropping the message."""
+    # C10: the MRN is no longer globally unique, so this lookup is explicitly
+    # limited to the legacy (unscoped) bucket — it can never adopt a patient
+    # that belongs to a tenant.
+    #
+    # KNOWN GAP: the HL7 listener has no AE->tenant mapping (unlike the DICOM
+    # receiver), so ADT/ORM registrations can only land in the legacy bucket.
+    # A deployment that ingests DICOM from tenant-mapped AE titles must give the
+    # listener the same mapping, otherwise HL7-registered patients will not
+    # correlate with tenant-scoped DICOM patients.
     patient = (
         session.query(Patient)
-        .filter(Patient.patient_id == data["patient_id"])
+        .filter(Patient.patient_id == data["patient_id"], Patient.tenant_id.is_(None))
         .one_or_none()
     )
     if patient is None:
         try:
-            patient = Patient(patient_id=data["patient_id"])
+            patient = Patient(patient_id=data["patient_id"], tenant_id=None)
             session.add(patient)
             log.info("HL7 new patient %s (%s)", data["patient_id"], data.get("name"))
             session.flush()
@@ -271,7 +280,7 @@ def _ensure_patient(session, data: dict) -> Patient | None:
             session.rollback()
             patient = (
                 session.query(Patient)
-                .filter(Patient.patient_id == data["patient_id"])
+                .filter(Patient.patient_id == data["patient_id"], Patient.tenant_id.is_(None))
                 .one_or_none()
             )
     if patient is not None:

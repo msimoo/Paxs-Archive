@@ -127,3 +127,90 @@ def stow_headers(boundary: str = "test-boundary-xyz") -> dict[str, str]:
     return {
         "Content-Type": f'multipart/related; type="application/dicom"; boundary={boundary}'
     }
+
+
+# --------------------------------------------------------------------------- #
+# Test authentication helpers (H02)
+#
+# Self-registration is off by default and can never mint a destructive role, so
+# tests that need a user with a specific role create it the way an administrator
+# would: bootstrap the first account, then use the admin API.
+# --------------------------------------------------------------------------- #
+BOOTSTRAP_USER = "root_admin"
+BOOTSTRAP_PASSWORD = "secret123"
+
+
+def admin_headers(client, username: str = BOOTSTRAP_USER) -> dict[str, str]:
+    """Bearer headers for an ADMIN, bootstrapping the first account if needed."""
+    client.post(
+        "/api/v1/auth/register",
+        json={"username": username, "password": BOOTSTRAP_PASSWORD},
+    )
+    res = client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": BOOTSTRAP_PASSWORD},
+    )
+    assert res.status_code == 200, f"could not log in as {username}: {res.text}"
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+def auth_for_role(
+    client,
+    username: str,
+    role: str | None = None,
+    password: str = BOOTSTRAP_PASSWORD,
+    admin: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Create ``username`` with ``role`` via the admin API and return its headers.
+
+    ``role=None`` means "whatever the server decides" (the first account is the
+    bootstrap ADMIN, later ones are least-privilege). A specific role is created
+    through ``POST /api/v1/users`` with an admin token, because H02 forbids
+    self-registering privileged accounts.
+    """
+    admin = admin or admin_headers(client)
+    if role:
+        created = client.post(
+            "/api/v1/users",
+            headers=admin,
+            json={"username": username, "password": password, "role": role},
+        )
+        assert created.status_code in (200, 201, 409), (
+            f"could not create {username}/{role}: {created.status_code} {created.text}"
+        )
+    else:
+        client.post(
+            "/api/v1/auth/register",
+            json={"username": username, "password": password},
+        )
+    res = client.post("/api/v1/auth/login", json={"username": username, "password": password})
+    assert res.status_code == 200, f"could not log in as {username}: {res.text}"
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+def create_user(
+    client,
+    admin: dict[str, str],
+    username: str,
+    role: str,
+    password: str = BOOTSTRAP_PASSWORD,
+    tenant_id: int | None = None,
+) -> dict[str, str]:
+    """Create an account with ``role`` the way an administrator would (H02).
+
+    Self-registration cannot mint privileged roles, so tests that need a
+    RADIOLOGIST/ADMIN/etc. use the admin API with an existing admin's headers.
+    """
+    payload = {"username": username, "password": password, "role": role}
+    if tenant_id is not None:
+        payload["tenant_id"] = tenant_id
+    res = client.post("/api/v1/users", headers=admin, json=payload)
+    assert res.status_code in (200, 201), (
+        f"admin could not create {username}/{role}: {res.status_code} {res.text}"
+    )
+    # Return the new user's bearer headers, which is what most callers want.
+    login = client.post(
+        "/api/v1/auth/login", json={"username": username, "password": password}
+    )
+    assert login.status_code == 200, login.text
+    return {"Authorization": f"Bearer {login.json()['access_token']}"}

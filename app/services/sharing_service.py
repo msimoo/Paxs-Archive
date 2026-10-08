@@ -14,7 +14,7 @@ import qrcode
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
+from app.core.config import resolve_public_base_url, settings
 from app.db.models import PatientShare, Study
 
 
@@ -69,9 +69,14 @@ async def get_share(session: AsyncSession, token: str) -> PatientShare | None:
     return share
 
 
-def share_url(token: str) -> str:
-    """Absolute URL for a share token (used in links + QR codes)."""
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
+def share_url(token: str, request=None) -> str:
+    """Absolute URL for a share token (used in links + QR codes).
+
+    The origin comes from :func:`resolve_public_base_url`, so an unconfigured
+    deployment derives it from the request (X-Forwarded-Host / Host) instead of
+    minting a dead ``http://0.0.0.0/...`` link (V2-2).
+    """
+    base = resolve_public_base_url(request)
     return f"{base}/viewer?share={token}"
 
 

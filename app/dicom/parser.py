@@ -16,6 +16,7 @@ from pydicom.dataset import Dataset
 _META_FIELDS = (
     # patient
     "patient_id",
+    "issuer_of_patient_id",
     "patient_name",
     "patient_birth_date",
     "patient_sex",
@@ -49,6 +50,8 @@ _META_FIELDS = (
 # keyword -> the DICOM attribute to read from the dataset
 _KEYWORD_MAP = {
     "patient_id": "PatientID",
+    # C10: the assigning authority that qualifies PatientID.
+    "issuer_of_patient_id": "IssuerOfPatientID",
     "patient_name": "PatientName",
     "patient_birth_date": "PatientBirthDate",
     "patient_sex": "PatientSex",

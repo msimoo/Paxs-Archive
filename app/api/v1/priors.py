@@ -13,8 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
-from app.db.models import User
+from sqlalchemy import select
+
+from app.api.v1.deps import get_current_user, require_study_access, tenant_scope
+from app.db.models import Study, User
 from app.db.session import get_db
 from app.services import prior_service
 
@@ -45,7 +47,19 @@ async def get_priors_for_study(
     user: User = Depends(get_current_user),
 ):
     """Find relevant prior imaging studies for a given study."""
-    matches = await prior_service.find_prior_studies(db, study_instance_uid=study_uid)
+    # C04: an *existing* anchor study must be visible to the caller (404 when it
+    # belongs to another tenant), but an unknown UID keeps this endpoint's
+    # historical answer (200 + []) rather than turning into a 404.
+    _known = (
+        await db.execute(select(Study.id).where(Study.study_instance_uid == study_uid))
+    ).scalar_one_or_none()
+    if _known is not None:
+        await require_study_access(db, study_uid, user)
+    _tenant_id, _include_all = tenant_scope(user)
+    matches = await prior_service.find_prior_studies(
+        db, study_instance_uid=study_uid,
+        tenant_id=_tenant_id, include_all=_include_all,
+    )
     return JSONResponse([_match_to_dict(m) for m in matches])
 
 
@@ -56,5 +70,9 @@ async def get_priors_for_patient(
     user: User = Depends(get_current_user),
 ):
     """Find all prior imaging studies for a patient."""
-    matches = await prior_service.find_prior_studies(db, study_instance_uid="", patient_id=patient_id)
+    _tenant_id, _include_all = tenant_scope(user)
+    matches = await prior_service.find_prior_studies(
+        db, study_instance_uid="", patient_id=patient_id,
+        tenant_id=_tenant_id, include_all=_include_all,
+    )
     return JSONResponse([_match_to_dict(m) for m in matches])

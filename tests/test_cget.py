@@ -375,7 +375,10 @@ def test_rest_pull_error_paths(client):
     r = client.post("/api/v1/nodes/GHOST/pull", headers=admin_h,
                     json={"level": "STUDY", "filters": {"StudyInstanceUID": "1.2.3"}})
     assert r.status_code == 502
-    # No auth -> 401
+    # No auth -> 401. Logging in above left a session cookie in the shared test
+    # client, and these routes also accept cookie sessions (C03), so the jar
+    # must be cleared for this request to be genuinely anonymous.
+    client.cookies.clear()
     r = client.post("/api/v1/nodes/PAXS_TEST_SCP/pull",
                     json={"level": "STUDY", "filters": {"StudyInstanceUID": "1.2.3"}})
     assert r.status_code == 401
@@ -400,7 +403,15 @@ def test_rest_pull_vna_tenant_tagging(client):
         tenant = _make_tenant(client, admin_h, "Pull Dept", "pull-t")
         _register_node(client, admin_h, "PAXS_SOURCE", "127.0.0.1", port)
 
-        tenant_h = _auth(client, "dr.pull.t", role="RADIOLOGIST")
+        from tests.helpers import create_user
+
+        create_user(client, admin_h, "dr.pull.t", "RADIOLOGIST")
+        tenant_h = {
+            "Authorization": "Bearer " + client.post(
+                "/api/v1/auth/login",
+                json={"username": "dr.pull.t", "password": "secret123"},
+            ).json()["access_token"]
+        }
         assert client.post(f"/api/v1/tenants/{tenant['id']}/users", headers=admin_h,
                            json={"username": "dr.pull.t"}).status_code == 200
 

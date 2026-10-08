@@ -19,8 +19,6 @@ def _register(client, username="dr.ali", password="secret123", role=None, full_n
     if role:
         body["role"] = role
     return client.post("/api/v1/auth/register", json=body)
-
-
 def _login(client, username="dr.ali", password="secret123", next_url=None):
     url = "/api/v1/auth/login"
     if next_url:
@@ -144,8 +142,15 @@ def test_role_landing_admin_is_dashboard(client):
 
 
 def test_role_landing_radiologist_is_study_list(client):
-    _register(client, username="admin2", password="secret123")
-    _register(client, username="dr.e", password="secret123", role="RADIOLOGIST")
+    from tests.helpers import create_user
+
+    admin = _register(client, username="admin2", password="secret123")
+    create_user(
+        client,
+        {"Authorization": f"Bearer {admin.json()['access_token']}"},
+        "dr.e",
+        "RADIOLOGIST",
+    )
     res = _login(client, username="dr.e", password="secret123")
     assert res.json()["redirect_to"] == "/viewer"
 
@@ -157,8 +162,15 @@ def test_next_param_overrides_role_landing(client):
 
 
 def test_next_param_blocks_open_redirect(client):
-    _register(client, username="admin_x", password="secret123")  # first user → ADMIN
-    _register(client, username="dr.g", password="secret123", role="RADIOLOGIST")
+    from tests.helpers import create_user
+
+    admin = _register(client, username="admin_x", password="secret123")  # first user → ADMIN
+    create_user(
+        client,
+        {"Authorization": f"Bearer {admin.json()['access_token']}"},
+        "dr.g",
+        "RADIOLOGIST",
+    )
     res = _login(client, username="dr.g", password="secret123", next_url="https://evil.example/phish")
     assert res.json()["redirect_to"] == "/viewer"  # falls back to role landing
 

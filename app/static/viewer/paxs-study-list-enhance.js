@@ -13,33 +13,15 @@
    ========================================================================== */
 (function () {
   // -------------------------------------------------------------------------
-  // VTK.js / Cornerstone 3D Volume & Segmentation setContext Null Guard
-  // Prevents "TypeError: Cannot read properties of null (reading 'setContext')"
-  // when starting SR on segmentation or when WebGL canvases remount.
+  // H-11: the global HTMLCanvasElement.prototype.getContext patch that forced
+  // `preserveDrawingBuffer: true` (and `desynchronized`/`powerPreference`) on
+  // EVERY WebGL/WebGL2 context was removed. It inflated GPU VRAM and slowed
+  // rendering across Cornerstone/OHIF viewports. The one canvas that is actually
+  // read back — the MPR GPU renderer — now requests preserveDrawingBuffer on its
+  // own getContext call (see paxs-mpr.js drawGl2). A duplicate of this patch in
+  // viewer/index.html was removed at the same time; it ran first and was the one
+  // that actually took effect.
   // -------------------------------------------------------------------------
-  (function installVtkContextGuard() {
-    if (window.__paxsVtkGuardInstalled) return;
-    window.__paxsVtkGuardInstalled = true;
-
-    // Monkey-patch HTMLCanvasElement.prototype.getContext to guarantee robust WebGL contexts
-    var originalGetContext = HTMLCanvasElement.prototype.getContext;
-    HTMLCanvasElement.prototype.getContext = function (type, attributes) {
-      if (type === 'webgl2' || type === 'webgl' || type === 'experimental-webgl') {
-        var opts = Object.assign({
-          preserveDrawingBuffer: true,
-          powerPreference: 'high-performance',
-          failIfMajorPerformanceCaveat: false
-        }, attributes || {});
-        var ctx = originalGetContext.call(this, type, opts);
-        if (!ctx && type === 'webgl2') {
-          // Fallback to webgl if webgl2 temporarily exhausts context slots
-          ctx = originalGetContext.call(this, 'webgl', opts);
-        }
-        return ctx;
-      }
-      return originalGetContext.call(this, type, attributes);
-    };
-  })();
 
   // -------------------------------------------------------------------------
   // Radix UI / Shadcn DialogContent Accessibility Fix
@@ -75,9 +57,41 @@
   };
 
   var studies = [];      // QIDO /studies response (row order = render order)
-  var thumbCache = {};   // studyUid -> object URL
+  var thumbCache = {};   // studyUid -> object URL ('' = known-unavailable)
   var resolved = {};     // studyUid -> { series, sop } | null
   var resolving = {};    // studyUid -> in-flight promise
+
+  // H-12 — bound the number of live thumbnail blob URLs. The list renders up to
+  // 200 studies and the cache used to hold one un-revoked object URL per study
+  // for the lifetime of the page. It is now an LRU: the oldest URL is revoked
+  // once the cap is exceeded, and every cached URL is revoked on pagehide.
+  var THUMB_CACHE_MAX = 64;
+  var thumbOrder = [];   // LRU order of cached uids (oldest first)
+
+  function _releaseThumb(uid) {
+    var u = thumbCache[uid];
+    if (u) { try { URL.revokeObjectURL(u); } catch (e) {} }
+    delete thumbCache[uid];
+    var i = thumbOrder.indexOf(uid);
+    if (i !== -1) thumbOrder.splice(i, 1);
+  }
+
+  function _cacheThumb(uid, url) {
+    if (thumbCache[uid] !== undefined) _releaseThumb(uid);
+    thumbCache[uid] = url;
+    thumbOrder.push(uid);
+    while (thumbOrder.length > THUMB_CACHE_MAX) _releaseThumb(thumbOrder[0]);
+  }
+
+  function releaseAllThumbs() {
+    thumbOrder.slice().forEach(_releaseThumb);
+    thumbCache = {};
+    thumbOrder = [];
+  }
+
+  // Revoke every cached blob URL when the page is being discarded. A bfcache
+  // restore re-runs this script, so this only ever frees memory.
+  window.addEventListener('pagehide', releaseAllThumbs);
 
   function pick(obj, tag) {
     try {
@@ -167,7 +181,9 @@
           if (!r.ok) { thumbCache[uid] = ''; return ''; }
           return r.blob().then(function (b) {
             var u = URL.createObjectURL(b);
-            thumbCache[uid] = u;
+            // H-12: cache through the LRU so the oldest blob URL is revoked
+            // once the cap is reached (and never the one just created).
+            _cacheThumb(uid, u);
             return u;
           });
         })
@@ -467,27 +483,15 @@
     var label = btn.getAttribute('aria-label');
     var cat = classifyLabel(label);
     var cls = TOOL_CLASSES[cat];
-    var color = TOOL_COLORS[cat];
 
-    // Remove any previous tool class, then add the new one
+    // Remove any previous tool class, then add the new one. Presentation
+    // (icon size, padding, colour, active glow) is owned entirely by
+    // paxs-viewer-theme.css + paxs-toolbar-enhance.js — this function must NOT
+    // write inline styles on the SVG, or it would fight the stylesheet on the
+    // 2s interval below and win (inline beats class rules).
     removeToolClasses(btn);
     btn.classList.add(cls);
-
-    // Color and size SVG icons inside the button (28px size, 5px padding on all sides)
-    var svgs = btn.querySelectorAll('svg');
-    if (svgs && svgs.length) {
-      for (var i = 0; i < svgs.length; i++) {
-        if (svgs[i]) {
-          svgs[i].style.color = color;
-          svgs[i].style.width = '28px';
-          svgs[i].style.height = '28px';
-          svgs[i].style.minWidth = '28px';
-          svgs[i].style.minHeight = '28px';
-          svgs[i].style.padding = '5px';
-          svgs[i].style.boxSizing = 'content-box';
-        }
-      }
-    }
+    btn.classList.add('paxs-tool');
   }
 
   function colorizeToolbarIcons() {
@@ -583,7 +587,9 @@
 
     document.body.appendChild(wrap);
 
-    document.getElementById('paxs-rpt-close').onclick = function () { wrap.remove(); };        fetch('/api/v1/reports/study/' + encodeURIComponent(uid), { headers: paxsAuthHeaders() })
+    document.getElementById('paxs-rpt-close').onclick = function () { wrap.remove(); };
+
+    paxsFetch('/api/v1/reports/study/' + encodeURIComponent(uid), { headers: paxsAuthHeaders() })
       .then(function (r) { return r.json(); })
       .then(function (meta) {
         document.getElementById('paxs-rpt-loading').style.display = 'none';
@@ -623,7 +629,21 @@
           }).catch(function () {});
 
         document.getElementById('paxs-rpt-draft-btn').onclick = function () { saveRpt('DRAFT'); };
-        document.getElementById('paxs-rpt-final-btn').onclick = function () { saveRpt('FINALIZED'); };
+        // C06: finalizing/signing a report is a privileged action. The server
+        // enforces it; the UI must not offer a button that will be refused.
+        var paxsCanFinalize = !!paxsUser &&
+          (paxsUser.role === 'ADMIN' || paxsUser.role === 'RADIOLOGIST');
+        var paxsFinalBtn = document.getElementById('paxs-rpt-final-btn');
+        if (!paxsCanFinalize) {
+          paxsFinalBtn.disabled = true;
+          paxsFinalBtn.title = 'Finalizing a report requires a radiologist or admin role';
+          paxsFinalBtn.style.opacity = '0.45';
+          paxsFinalBtn.style.cursor = 'not-allowed';
+        }
+        paxsFinalBtn.onclick = function () {
+          if (!paxsCanFinalize) { return; }
+          saveRpt('FINALIZED');
+        };
         document.getElementById('paxs-rpt-print-btn').onclick = function () {
           window.open('/api/v1/reports/print/' + encodeURIComponent(uid), '_blank');
         };
@@ -635,13 +655,24 @@
             impression: document.getElementById('paxs-rpt-impression').value,
             status: status
           };
-          fetch('/api/v1/reports/save', {
+          paxsFetch('/api/v1/reports/save', {
             method: 'POST',
             headers: paxsAuthHeaders(),
             body: JSON.stringify(payload)
           })
-          .then(function (sr) { return sr.json(); })
-          .then(function () {
+          .then(function (sr) {
+            return sr.json().catch(function () { return {}; }).then(function (body) {
+              return { ok: sr.ok, code: sr.status, body: body };
+            });
+          })
+          .then(function (res) {
+            if (!res.ok) {
+              // e.g. 403 for a non-radiologist, or 409 when the report is already
+              // finalized — surface the server's reason instead of "success".
+              alert('Could not save the report: ' +
+                ((res.body && res.body.detail) ? res.body.detail : 'HTTP ' + res.code));
+              return;
+            }
             alert('Report ' + (status === 'FINALIZED' ? 'finalized and signed successfully!' : 'saved as draft!'));
             if (status === 'FINALIZED') wrap.remove();
           })
@@ -838,24 +869,167 @@
   // -------------------------------------------------------------------------
   var paxsRefreshDone = false;
 
-  function paxsHasSessionCookie() {
-    return document.cookie.split(';').some(function (c) {
-      var kv = c.trim().split('=');
-      return kv[0] === 'paxs_session' && kv.length > 1 && kv[1].length > 1;
-    });
+  // H14: the session cookie is HttpOnly, so `document.cookie` can never see it
+  // — the previous guard therefore skipped refresh unconditionally. Refresh is
+  // now driven by the response (401) rather than by a JS-visible cookie.
+  var paxsRefreshInFlight = null;
+
+  function paxsRefreshToken() {
+    // Single flight: concurrent 401s share one refresh call.
+    if (!paxsRefreshInFlight) {
+      paxsRefreshInFlight = fetch('/api/v1/auth/refresh', {
+        method: 'POST',
+        credentials: 'same-origin',
+      })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (d && d.access_token) {
+            try { localStorage.setItem('paxs_token', d.access_token); } catch (e) {}
+            return d.access_token;
+          }
+          return null;
+        })
+        .catch(function () { return null; })
+        .then(function (tok) {
+          paxsRefreshInFlight = null;
+          return tok;
+        });
+    }
+    return paxsRefreshInFlight;
+  }
+
+  // Centralized authenticated fetch:
+  //   * attaches the bearer token
+  //   * on 401, refreshes once and retries the original request exactly once
+  //   * never retries the refresh endpoint itself (loop protection)
+  function paxsFetch(url, opts) {
+    opts = opts || {};
+    var isRefreshCall = String(url).indexOf('/api/v1/auth/refresh') !== -1;
+
+    function attempt(retried) {
+      var o = {};
+      for (var k in opts) { if (Object.prototype.hasOwnProperty.call(opts, k)) o[k] = opts[k]; }
+      o.credentials = 'same-origin';
+      o.headers = {};
+      var base = opts.headers || {};
+      for (var h in base) { if (Object.prototype.hasOwnProperty.call(base, h)) o.headers[h] = base[h]; }
+      try {
+        var t = localStorage.getItem('paxs_token');
+        if (t) o.headers['Authorization'] = 'Bearer ' + t;
+      } catch (e) {}
+
+      return fetch(url, o).then(function (res) {
+        if (res.status !== 401 || retried || isRefreshCall) return res;
+        return paxsRefreshToken().then(function (tok) {
+          if (!tok) return res;      // refresh failed: surface the original 401
+          return attempt(true);      // exactly one retry
+        });
+      });
+    }
+
+    return attempt(false);
+  }
+
+  // -------------------------------------------------------------------------
+  // V1-1 — transport-level refresh-and-retry for IMAGE requests.
+  //
+  // paxsFetch() above is a module-private helper with only three call sites
+  // (the report modal and /auth/me). Cornerstone reaches the network through
+  // dicomweb-client, which uses its OWN fetch/XHR — so every WADO-RS
+  // /metadata, /frames/{n} and /rendered request bypassed the refresh path
+  // entirely. A single transient 401 was therefore terminal for that frame:
+  // the loader marked the image failed and the viewport stayed black with no
+  // in-page recovery.
+  //
+  // We install the same single-flight refresh at the transport layer, scoped to
+  // the endpoints the viewer actually loads images from. paxsRefreshToken() is
+  // single-flight, so a burst of concurrent 401s triggers ONE /auth/refresh and
+  // then one replay each — no thundering herd against the auth endpoint.
+  // -------------------------------------------------------------------------
+  var PAXS_AUTH_RETRY_PATHS = ['/dicom-web/', '/api/v1/volume/', '/api/v1/reports/'];
+
+  function paxsNeedsAuthRetry(url) {
+    var u = String(url == null ? '' : url);
+    for (var i = 0; i < PAXS_AUTH_RETRY_PATHS.length; i++) {
+      if (u.indexOf(PAXS_AUTH_RETRY_PATHS[i]) !== -1) return true;
+    }
+    return false;
+  }
+
+  function paxsInstallFetchGuard() {
+    if (!window.fetch || window.__paxsFetchGuard) return;
+    window.__paxsFetchGuard = true;
+    var origFetch = window.fetch;
+    window.fetch = function (input, init) {
+      var url = (typeof input === 'string') ? input
+              : (input && input.url) ? input.url : '';
+      var p = origFetch.apply(this, arguments);
+      if (!paxsNeedsAuthRetry(url)) return p;
+      return p.then(function (res) {
+        if (!res || res.status !== 401) return res;
+        return paxsRefreshToken().then(function (tok) {
+          if (!tok) return res;            // refresh failed: surface the 401
+          // Replay the ORIGINAL request exactly once, with the fresh token.
+          var retryInit = {};
+          for (var k in (init || {})) {
+            if (Object.prototype.hasOwnProperty.call(init, k)) retryInit[k] = init[k];
+          }
+          retryInit.credentials = 'same-origin';
+          retryInit.headers = {};
+          var base = (init && init.headers) || {};
+          for (var h in base) {
+            if (Object.prototype.hasOwnProperty.call(base, h)) retryInit.headers[h] = base[h];
+          }
+          retryInit.headers['Authorization'] = 'Bearer ' + tok;
+          return origFetch.call(window, input, retryInit);
+        });
+      });
+    };
+  }
+
+  function paxsInstallXhrGuard() {
+    if (!window.XMLHttpRequest || window.__paxsXhrGuard) return;
+    window.__paxsXhrGuard = true;
+    var XHR = window.XMLHttpRequest;
+    var origOpen = XHR.prototype.open;
+    var origSend = XHR.prototype.send;
+    var origSetHeader = XHR.prototype.setRequestHeader;
+    XHR.prototype.open = function (method, url) {
+      // Record the target so send() can decide whether this is an image read.
+      this.__paxsUrl = url;
+      this.__paxsRetried = false;
+      return origOpen.apply(this, arguments);
+    };
+    XHR.prototype.send = function () {
+      var xhr = this;
+      var args = arguments;
+      if (!paxsNeedsAuthRetry(xhr.__paxsUrl)) return origSend.apply(xhr, args);
+      xhr.addEventListener('load', function () {
+        if (xhr.status !== 401 || xhr.__paxsRetried) return;
+        xhr.__paxsRetried = true;          // exactly one replay, ever
+        paxsRefreshToken().then(function (tok) {
+          if (!tok) return;
+          try {
+            origSetHeader.call(xhr, 'Authorization', 'Bearer ' + tok);
+          } catch (e) { /* headers already flushed — nothing we can do */ }
+          origSend.apply(xhr, args);
+        });
+      });
+      return origSend.apply(xhr, args);
+    };
+  }
+
+  function paxsInstallAuthGuards() {
+    paxsInstallFetchGuard();
+    paxsInstallXhrGuard();
   }
 
   function paxsSilentRefresh() {
-    if (paxsRefreshDone || !paxsHasSessionCookie()) return;
+    // Page-load optimization: rotate the token once so the first authenticated
+    // call starts valid. Refresh-on-401 (paxsFetch) is the real safety net.
+    if (paxsRefreshDone) return;
     paxsRefreshDone = true;
-    fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin' })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (d) {
-        if (d && d.access_token) {
-          try { localStorage.setItem('paxs_token', d.access_token); } catch (e) {}
-        }
-      })
-      .catch(function () {});
+    paxsRefreshToken();
   }
 
   function paxsAuthHeaders() {
@@ -870,7 +1044,7 @@
   function fetchPaxsUser() {
     if (paxsUserFetched) return;
     paxsUserFetched = true;
-    fetch('/api/v1/auth/me', { credentials: 'same-origin' })
+    paxsFetch('/api/v1/auth/me', { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (u) { paxsUser = u; })
       .catch(function () { paxsUser = null; });
@@ -930,11 +1104,17 @@
     });
   }
 
+  // V1-1: install the transport guard BEFORE anything can fetch an image, so a
+  // 401 on a WADO-RS frame triggers a refresh + replay instead of a black viewport.
+  paxsInstallAuthGuards();
   paxsSilentRefresh();   // fire once on load — fresh token before any API call
   fetchPaxsUser();
   setTimeout(injectUserChip, 600);
   // Keep the chip attached across React re-renders of the header
   setInterval(function () { injectUserChip(); }, 2000);
+
+  // Expose for diagnostics / re-installation if another script swaps window.fetch.
+  window.__paxsInstallAuthGuards = paxsInstallAuthGuards;
 
 })();
 

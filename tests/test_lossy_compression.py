@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from pydicom.uid import generate_uid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.models import AuditLog, Instance
 from app.db.session import AsyncSessionLocal, sync_engine
 from app.services import indexing_service, lossy_compression_service, storage_service
@@ -15,22 +17,40 @@ from tests.helpers import ds_bytes, make_instance
 
 @pytest.mark.anyio
 async def test_transcode_dataset_lossy_service():
-    """Verify in-memory transcoding of DICOM dataset to lossy JPEG."""
-    ds = make_instance(patient_id="LOSSY_P1", modality="CT")
-    orig_bytes_len = len(ds_bytes(ds))
+    """Lossy re-encode keeps native bit depth/geometry (C-2) and never mislabels (C-3)."""
+    ds = make_instance(patient_id="LOSSY_P1", modality="CT", bits=16)
+    original = ds.pixel_array.copy()
 
     transcoded, new_len = lossy_compression_service.transcode_dataset_lossy(
-        ds, target_ts_uid="1.2.840.10008.1.2.4.50", quality_factor=75
+        ds, target_ts_uid="1.2.840.10008.1.2.4.81", quality_factor=90
     )
 
-    assert transcoded.file_meta.TransferSyntaxUID == "1.2.840.10008.1.2.4.50"
-    assert transcoded.PhotometricInterpretation == "YBR_FULL_422"
+    assert str(transcoded.file_meta.TransferSyntaxUID) == "1.2.840.10008.1.2.4.81"
+    # Native 16-bit grayscale geometry is preserved — no 8-bit RGB down-conversion.
+    assert transcoded.BitsAllocated == 16
+    assert transcoded.BitsStored == 16
+    assert transcoded.PhotometricInterpretation == "MONOCHROME2"
+    assert transcoded.SamplesPerPixel == 1
     assert new_len > 0
+    # The source dataset is never mutated.
+    assert str(ds.file_meta.TransferSyntaxUID) == "1.2.840.10008.1.2.1"
+    # Near-lossless: the decoded values stay within the codec's error bound.
+    diff = np.abs(transcoded.pixel_array.astype(np.int64) - original.astype(np.int64))
+    assert diff.max() <= 15
+
+    # JPEG Baseline has no encoder — must abort, never emit a mislabelled stream.
+    with pytest.raises(lossy_compression_service.LossyCompressionError):
+        lossy_compression_service.transcode_dataset_lossy(
+            make_instance(modality="CT", bits=16),
+            target_ts_uid="1.2.840.10008.1.2.4.50",
+        )
 
 
 @pytest.mark.anyio
-async def test_evaluate_and_run_lossy_compression():
+async def test_evaluate_and_run_lossy_compression(monkeypatch):
     """Verify rule evaluation transcodes matching stored study instances."""
+    monkeypatch.setattr(settings, "LOSSY_COMPRESSION_ENABLED", True)
+
     study_uid = generate_uid()
     ds = make_instance(patient_id="LOSSY_P2", study_uid=study_uid, modality="CT")
 
@@ -41,7 +61,7 @@ async def test_evaluate_and_run_lossy_compression():
             from app.dicom.parser import parse_metadata
             await indexing_service.index_new_instance(session, parse_metadata(ds), key, sha)
 
-    # Create lossy rule (min_age_days=0)
+    # Create lossy rule (min_age_days=0) targeting an encodable lossy syntax.
     async with AsyncSessionLocal() as session:
         async with session.begin():
             await lossy_compression_service.create_rule(
@@ -52,6 +72,7 @@ async def test_evaluate_and_run_lossy_compression():
                     "priority": 1,
                     "min_age_days": 0,
                     "modality": "CT",
+                    "transfer_syntax_uid": "1.2.840.10008.1.2.4.81",
                     "quality_factor": 80,
                 },
             )
@@ -67,7 +88,7 @@ async def test_evaluate_and_run_lossy_compression():
         inst = session.execute(
             select(Instance).where(Instance.sop_instance_uid == ds.SOPInstanceUID)
         ).scalar_one()
-        assert inst.transfer_syntax_uid == "1.2.840.10008.1.2.4.50"
+        assert inst.transfer_syntax_uid == "1.2.840.10008.1.2.4.81"
 
         # Check Audit Log
         audits = session.execute(

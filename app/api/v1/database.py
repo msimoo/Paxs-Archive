@@ -169,13 +169,11 @@ async def db_init(body: InitBody, _user: User = Depends(require_admin)):
         if created:
             log.append("Database created (CREATE DATABASE IF NOT EXISTS, utf8mb4)")
 
-        # --- migrate to head (stamps a drifted alembic state automatically) ---
+        # --- migrate to head (H11: never auto-stamps) ---
         before = db_admin.current_revision(url)
-        steps, stamped = await asyncio.to_thread(db_admin.run_migrations, url)
+        steps, _stamped = await asyncio.to_thread(db_admin.run_migrations, url)
         after = db_admin.current_revision(url)
-        log.extend(steps or ([] if stamped else ["Schema is already at head."]))
-        if stamped:
-            log.append("NOTE: schema already present — alembic state stamped to head.")
+        log.extend(steps or ["Schema is already at head."])
         log.append(f"Revision: {before or 'none'} -> {after or 'none'}")
 
         # --- seed the first admin (new installs only) ---
@@ -197,7 +195,9 @@ async def db_init(body: InitBody, _user: User = Depends(require_admin)):
             "url_masked": db_admin.masked_url(url),
             "head_revision": after or db_admin.head_revision(),
             "current_revision": after,
-            "stamped": bool(stamped),
+            # H11: never automatic — stamping is an explicit, parity-checked
+            # operator action (db_admin.stamp_head), so this is always False.
+            "stamped": bool(_stamped),
             "seeded": bool(seeded and seeded.get("created")),
             "log": log,
         }

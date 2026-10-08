@@ -9,10 +9,14 @@ Architecture:
   - A quota of 0 means unlimited.
   - warning_threshold_pct (default 80%) triggers advisory alerts but does not block writes.
 
-Integration points:
-  - storage_service.save_bytes() / save_dataset() call `check_quota_before_write()`
+Integration points (H08):
+  - C-STORE and STOW-RS call `reserve_quota()` **before** staging an object and
+    `release_quota()` if the ingest fails; `commit_quota()` is a no-op today
+    because the reservation is already counted as used.
   - API endpoints expose current usage vs limits and allow CRUD of quota rules.
   - Worker can periodically evaluate quotas and emit warnings.
+  - `recompute_used_bytes()` reconciles the denormalised counter with the
+    indexed bytes if it ever drifts.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Instance, StorageBackendConfig, StorageQuota, Tenant
@@ -254,8 +258,152 @@ async def get_quota_status_async(db: AsyncSession,
 from app.db.models import Series, Study
 
 
+# --------------------------------------------------------------------------- #
+# H08 — atomic reservation
+#
+# `check_quota_before_write` (above) is a *reporting* helper: it computes usage
+# from indexed rows and cannot stop two concurrent ingests from both passing.
+# Enforcement uses a single atomic UPDATE against the counter instead, so the
+# check and the reservation cannot be interleaved.
+# --------------------------------------------------------------------------- #
+class QuotaExceeded(RuntimeError):
+    """Raised when a reservation would push a scope over its limit."""
+
+    def __init__(self, infos: list["QuotaInfo"]):
+        self.infos = infos
+        exceeded = ", ".join(f"{i.scope_type}:{i.scope_id}" for i in infos)
+        super().__init__(f"Storage quota exceeded for {exceeded}")
+
+
+def reserve_quota(tenant_id: int | None, backend_name: str | None,
+                  size: int) -> list["QuotaInfo"]:
+    """Atomically reserve `size` bytes against every applicable quota.
+
+    Each quota is claimed with a conditional UPDATE, so the check and the
+    increment happen in one statement:
+
+        UPDATE storage_quotas
+           SET used_bytes = used_bytes + :size
+         WHERE id = :id AND used_bytes + :size <= max_bytes
+
+    A `rowcount` of 0 means the limit would be crossed. The claims happen in one
+    transaction, so a later refusal rolls back the earlier increments rather
+    than leaving the counter inflated.
+
+    Returns the applicable quota infos (for reporting). Raises QuotaExceeded
+    when any limit would be crossed.
+    """
+    if size <= 0:
+        return []
+    quotas = get_effective_quotas(tenant_id, backend_name)
+    if not quotas:
+        return []
+
+    infos: list[QuotaInfo] = []
+    with SyncSessionLocal() as session:
+        try:
+            for q in quotas:
+                infos.append(_info_for(session, q))
+                if not q.max_bytes or q.max_bytes <= 0:
+                    continue  # unlimited
+                result = session.execute(
+                    text(
+                        "UPDATE storage_quotas "
+                        "SET used_bytes = used_bytes + :size "
+                        "WHERE id = :qid "
+                        "AND used_bytes + :size <= max_bytes"
+                    ),
+                    {"size": size, "qid": q.id},
+                )
+                if result.rowcount != 1:
+                    session.rollback()
+                    log.warning(
+                        "Quota reservation refused: %s:%s would exceed %d bytes",
+                        "tenant" if q.tenant_id else "backend",
+                        q.tenant_id or q.storage_backend_name or "default",
+                        q.max_bytes,
+                    )
+                    raise QuotaExceeded(infos)
+            session.commit()
+        except QuotaExceeded:
+            raise
+        except Exception:
+            session.rollback()
+            raise
+    return infos
+
+
+def release_quota(tenant_id: int | None, backend_name: str | None, size: int) -> None:
+    """Give back a reservation that will not be committed (ingest failed)."""
+    if size <= 0:
+        return
+    quotas = get_effective_quotas(tenant_id, backend_name)
+    if not quotas:
+        return
+    with SyncSessionLocal() as session:
+        for q in quotas:
+            if not q.max_bytes or q.max_bytes <= 0:
+                continue
+            # MAX(0, ...) keeps the counter sane even if a release is duplicated.
+            session.execute(
+                text(
+                    "UPDATE storage_quotas "
+                    "SET used_bytes = CASE WHEN used_bytes >= :size "
+                    "THEN used_bytes - :size ELSE 0 END "
+                    "WHERE id = :qid"
+                ),
+                {"size": size, "qid": q.id},
+            )
+        session.commit()
+
+
+def _info_for(session, q: StorageQuota) -> QuotaInfo:
+    """A QuotaInfo built from the counter (single source of truth)."""
+    if q.tenant_id is not None:
+        tenant = session.get(Tenant, q.tenant_id)
+        scope_type, scope_id = "tenant", (tenant.code if tenant else str(q.tenant_id))
+    else:
+        scope_type, scope_id = "backend", (q.storage_backend_name or "default")
+    info = QuotaInfo(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        limit_bytes=q.max_bytes,
+        used_bytes=q.used_bytes,
+        warning_threshold_pct=q.warning_threshold_pct,
+        enabled=q.enabled,
+        warning_triggered=False,
+    )
+    info.warning_triggered = info.is_warning
+    return info
+
+
+def recompute_used_bytes(tenant_id: int | None = None) -> int:
+    """Reconcile the counter with the indexed bytes; returns rows updated."""
+    quotas = get_effective_quotas(tenant_id, None) if tenant_id else None
+    with SyncSessionLocal() as session:
+        rows = session.execute(select(StorageQuota)).scalars().all()
+        updated = 0
+        for q in rows:
+            if quotas is not None and q not in quotas:
+                continue
+            actual = (
+                get_tenant_usage_bytes(q.tenant_id, q.storage_backend_name)
+                if q.tenant_id is not None
+                else get_backend_usage_bytes(q.storage_backend_name)
+            )
+            if q.used_bytes != actual:
+                q.used_bytes = actual
+                updated += 1
+        session.commit()
+    return updated
+
+
 __all__ = [
+    "QuotaExceeded",
     "QuotaInfo",
+    "release_quota",
+    "reserve_quota",
+    "recompute_used_bytes",
     "get_effective_quotas",
     "get_tenant_usage_bytes",
     "get_backend_usage_bytes",
