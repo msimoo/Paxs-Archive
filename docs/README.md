@@ -12,6 +12,7 @@ HTTP API and a full code review. It describes commit **`5a32aa4`** (main) and wa
 | [APP_WORKFLOW.md](APP_WORKFLOW.md) | follow a real flow end to end: startup, sign-in and LDAP, staged C-STORE ingest, worker, Q/R, viewing with MPR client/server/hybrid modes, STOW, order→MWL→MPPS→report→addenda→EMR, routing, migration/prefetch, lifecycle/quotas, share links, export, admin, licensing, hooks, reverse proxy. Includes 18 sequence, state and flow diagrams |
 | [API_REFERENCE.md](API_REFERENCE.md) | look up any of the 278 routes: method, path, auth level, handler and summary, plus a computed **Changes since e90d32c** section. Generated from the router source |
 | [CODE_REVIEW.md](CODE_REVIEW.md) | see the status of every earlier finding (fixed / partial / open), the 6 new blockers and 26 new important findings, the phased remediation plan, and the tests to add |
+| [COMPARISON_PACS_Sys.md](COMPARISON_PACS_Sys.md) | compare PAXS Archive with the PACS_Sys project: architecture, capability matrix (DICOM, clinical, viewer, admin, security, ops), engineering quality, shared weaknesses, what to borrow each way, recommendations. Area analyses in [comparison/pacs-sys/](comparison/pacs-sys/) |
 
 ## Area deep-dives (`reference/`)
 
