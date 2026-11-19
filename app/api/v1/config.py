@@ -37,6 +37,8 @@ def _field(key: str, overrides: dict[str, Any]) -> dict:
         "label": spec["label"],
         "type": spec["type"],
         "options": spec.get("options"),
+        "option_labels": spec.get("option_labels"),
+        "input": spec.get("input"),
         "description": spec.get("description", ""),
         "restart": bool(spec.get("restart", False)),
         "value": overrides.get(key, getattr(settings, key)),

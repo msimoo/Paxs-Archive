@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PAXS Archive</title>
   <link rel="icon" href="/static/logo/logo.ico" />
-  <link rel="stylesheet" href="/static/styles.css?v=32" />
+  <link rel="stylesheet" href="/static/styles.css?v=33" />
   <script>
     /* Apply the persisted theme before first paint (dark reading-room is the default). */
     (function () {
@@ -472,31 +472,7 @@
       </div>
 
       <div class="admin-panel" id="panel-router" hidden>
-        <p class="sub" style="margin:0 0 12px">Auto-routing rules engine: when a new study matches a rule (modality · body part · source AE · description), PAXS enqueues it to the send queue and the worker C-STORE's it to the destination node with automatic retry &amp; backoff — failed sends stay visible here for review.</p>
-        <div class="field-row">
-          <div class="field"><label>Rule name</label><input id="rt-name" placeholder="Route CT chest to archive B" /></div>
-          <div class="field" style="max-width:110px"><label>Modality</label><input id="rt-modality" placeholder="CT" /></div>
-          <div class="field" style="max-width:140px"><label>Body part</label><input id="rt-body" placeholder="CHEST" /></div>
-          <div class="field"><label>Destination node</label><select id="rt-node"></select></div>
-          <button class="btn" id="rt-add" style="align-self:flex-end">+ Add rule</button>
-        </div>
-        <div class="node-list" id="router-list"><p class="sub">Loading…</p></div>
-        <h4 style="margin-top:20px">Send queue <span class="mwl-tag" style="background:rgba(34,211,238,.14);color:#22d3ee;border-color:rgba(34,211,238,.35)">C1</span></h4>
-        <p class="sub">Durable dispatches with automatic retry &amp; backoff. FAILED items exhausted their attempts — re-queue them when the destination is reachable.</p>
-        <div class="field-row" style="margin-top:8px">
-          <div class="field" style="flex:1"></div>
-          <div class="field"><label>Filter</label>
-            <select id="rq-filter" style="padding:8px">
-              <option value="">All</option>
-              <option value="PENDING">Pending</option>
-              <option value="SENDING">Sending</option>
-              <option value="COMPLETED">Completed</option>
-              <option value="FAILED">Failed</option>
-            </select>
-          </div>
-          <button class="btn ghost" id="rq-run" style="align-self:flex-end" title="Sweep the queue now (dispatch due items)">Sweep now ▶</button>
-        </div>
-        <div class="node-list" id="routing-queue-list"><p class="sub">Loading…</p></div>
+        <button type="button" class="btn" data-open-compression>Open auto-routing in Compression settings</button>
       </div>
 
       <div class="admin-panel" id="panel-critical" hidden>
@@ -541,36 +517,7 @@
           </div>
           <button class="btn ghost" id="bk-move">Move study →</button>
         </div>
-        <h4 style="margin-top:22px">Lossy compression rules <span class="mwl-tag">B4</span></h4>
-        <div class="field-row">
-          <div class="field"><label>Name</label><input id="lc-name" placeholder="Archive CT after 1y" /></div>
-          <div class="field" style="max-width:110px"><label>Modality</label><input id="lc-modality" placeholder="CT" /></div>
-          <div class="field" style="max-width:110px"><label>Age (days)</label><input id="lc-age" type="number" value="365" min="0" /></div>
-          <div class="field" style="max-width:110px"><label>Quality</label><input id="lc-quality" type="number" value="85" min="1" max="100" /></div>
-          <button class="btn" id="lc-add" style="align-self:flex-end">+ Add rule</button>
-          <button class="btn ghost" id="lc-run" style="align-self:flex-end" title="Evaluate rules and transcode matching studies now">Run now ▶</button>
-        </div>
-        <div class="node-list" id="lossy-list"><p class="sub">Loading…</p></div>
-        <h4 style="margin-top:20px">Study lifecycle <span class="mwl-tag" style="background:rgba(34,211,238,.14);color:#22d3ee;border-color:rgba(34,211,238,.35)">14</span></h4>
-        <p class="sub">Tier studies between hot and cold storage (auto-archive, restore, purge) based on rules — the worker sweeps automatically; “Run now” evaluates on demand.</p>
-        <div class="field-row">
-          <div class="field"><label>Name</label><input id="lc2-name" placeholder="Archive CT after 1y" /></div>
-          <div class="field" style="max-width:110px"><label>Action</label>
-            <select id="lc2-action">
-              <option value="ARCHIVE">ARCHIVE</option>
-              <option value="RESTORE">RESTORE</option>
-              <option value="PURGE">PURGE</option>
-            </select>
-          </div>
-          <div class="field" style="max-width:110px"><label>Modality</label><input id="lc2-modality" placeholder="CT" /></div>
-          <div class="field" style="max-width:110px"><label>Age (days)</label><input id="lc2-age" type="number" value="365" min="0" /></div>
-          <div class="field" style="max-width:120px"><label>Body part</label><input id="lc2-body" placeholder="CHEST" /></div>
-          <button class="btn" id="lc2-add" style="align-self:flex-end">+ Add rule</button>
-          <button class="btn ghost" id="lc2-run" style="align-self:flex-end" title="Evaluate lifecycle rules now (archive/restore/purge matching studies)">Run now ▶</button>
-        </div>
-        <div class="node-list" id="lifecycle-list"><p class="sub">Loading…</p></div>
-        <h4 style="margin-top:14px">Archived studies <span class="mwl-tag" style="background:rgba(148,163,184,.14);color:#94a3b8;border-color:rgba(148,163,184,.35)">COLD</span></h4>
-        <div class="node-list" id="lifecycle-studies"><p class="sub">Loading…</p></div>
+        <p><button type="button" class="btn" data-open-compression>Open compression and retention rules</button></p>
       </div>
 
       <div class="admin-panel" id="panel-migration" hidden>
@@ -761,6 +708,8 @@
         <button data-stab="modality">Modality</button>
         <button data-stab="interop">Interop</button>
         <button data-stab="storage">Storage</button>
+        <button data-stab="compression">Compression</button>
+        <button data-stab="optical">CD/DVD Burning</button>
         <button data-stab="security">Security</button>
         <button data-stab="workflow">Workflow</button>
         <button data-stab="viewer">Viewer</button>
@@ -770,6 +719,129 @@
 
       <div class="settings-panel" id="spanel-sys">
         <div class="cfg-form" id="set-sys"><p class="sub">Loading…</p></div>
+      </div>
+
+      <div class="settings-panel" id="spanel-compression" hidden>
+        <section class="cfg-dicomweb" aria-labelledby="compression-profiles-title">
+          <div class="dw-head"><div>
+            <b id="compression-profiles-title">Lossless profiles</b>
+            <span class="cfg-desc">All lossless formats preserve diagnostic pixel values. Compare HTJ2K and JPEG-LS on the actual client device.</span>
+          </div></div>
+          <div class="dw-base">
+            <button type="button" class="btn sm" data-compression-profile="HTJ2K" disabled>HTJ2K viewer trial</button>
+            <button type="button" class="btn sm ghost" data-compression-profile="JPEG-LS" disabled>JPEG-LS fast lossless</button>
+            <button type="button" class="btn sm ghost" data-compression-profile="AS_SOURCE" disabled>Keep source</button>
+          </div>
+          <p class="dw-hint" id="compression-codecs" role="status">Checking server codecs…</p>
+        </section>
+        <div class="cfg-form" id="set-compression"><p class="sub">Loading…</p></div>
+        <section class="cfg-dicomweb" aria-labelledby="compression-rules-title">
+          <h3 id="compression-rules-title">Compression and retention rules</h3>
+        <h4 style="margin-top:22px">Lossy compression rules</h4>
+        <p class="sub">Run enabled rules manually. Lossy conversion permanently changes image data.</p>
+        <div class="field-row">
+          <div class="field"><label>Name</label><input id="lc-name" placeholder="Archive CT after 1y" /></div>
+          <div class="field" style="max-width:110px"><label>Modality</label><input id="lc-modality" placeholder="CT" /></div>
+          <div class="field" style="max-width:110px"><label>Age (days)</label><input id="lc-age" type="number" value="365" min="0" /></div>
+          <div class="field" style="max-width:110px"><label>Quality</label><input id="lc-quality" type="number" value="85" min="1" max="100" /></div>
+          <div class="field"><label for="lc-syntax">Lossy format</label>
+            <select id="lc-syntax">
+              <option value="1.2.840.10008.1.2.4.81">JPEG-LS Near-Lossless</option>
+              <option value="1.2.840.10008.1.2.4.91">JPEG 2000 Lossy</option>
+            </select>
+          </div>
+          <button class="btn" id="lc-add" style="align-self:flex-end">+ Add rule</button>
+          <button class="btn ghost" id="lc-run" style="align-self:flex-end" title="Evaluate rules and transcode matching studies now">Run now ▶</button>
+        </div>
+        <div class="node-list" id="lossy-list"><p class="sub">Loading…</p></div>
+        <h4 style="margin-top:20px">Automatic archive, restore and deletion</h4>
+        <p class="sub">Archive moves studies to cold storage. Purge permanently deletes matching archived studies. New purge rules are saved disabled.</p>
+        <div class="field-row">
+          <div class="field"><label>Name</label><input id="lc2-name" placeholder="Archive CT after 1y" /></div>
+          <div class="field" style="max-width:110px"><label>Action</label>
+            <select id="lc2-action">
+              <option value="ARCHIVE">ARCHIVE</option>
+              <option value="RESTORE">RESTORE</option>
+              <option value="PURGE">PURGE</option>
+            </select>
+          </div>
+          <div class="field" style="max-width:110px"><label>Modality</label><input id="lc2-modality" placeholder="CT" /></div>
+          <div class="field" style="max-width:110px"><label>Age (days)</label><input id="lc2-age" type="number" value="365" min="0" /></div>
+          <div class="field" style="max-width:120px"><label>Body part</label><input id="lc2-body" placeholder="CHEST" /></div>
+          <button class="btn" id="lc2-add" style="align-self:flex-end">+ Add rule</button>
+          <button class="btn ghost" id="lc2-run" style="align-self:flex-end" title="Evaluate lifecycle rules now (archive/restore/purge matching studies)">Run now ▶</button>
+        </div>
+        <div class="node-list" id="lifecycle-list"><p class="sub">Loading…</p></div>
+        <h4 style="margin-top:14px">Archived studies <span class="mwl-tag" style="background:rgba(148,163,184,.14);color:#94a3b8;border-color:rgba(148,163,184,.35)">COLD</span></h4>
+        <div class="node-list" id="lifecycle-studies"><p class="sub">Loading…</p></div>
+        </section>
+        <section class="cfg-dicomweb" aria-labelledby="compression-routing-title">
+          <h3 id="compression-routing-title">Auto-route to DICOM nodes</h3>
+        <p class="sub" style="margin:0 0 12px">Auto-routing rules engine: when a new study matches a rule (modality · body part · source AE · description), PAXS enqueues it to the send queue and the worker C-STORE's it to the destination node with automatic retry &amp; backoff — failed sends stay visible here for review.</p>
+        <div class="field-row">
+          <div class="field"><label>Rule name</label><input id="rt-name" placeholder="Route CT chest to archive B" /></div>
+          <div class="field" style="max-width:110px"><label>Modality</label><input id="rt-modality" placeholder="CT" /></div>
+          <div class="field" style="max-width:140px"><label>Body part</label><input id="rt-body" placeholder="CHEST" /></div>
+          <div class="field" style="max-width:150px"><label for="rt-source">Source AE</label><input id="rt-source" maxlength="16" placeholder="Any" /></div>
+          <div class="field" style="max-width:110px"><label for="rt-priority">Priority</label><input type="number" id="rt-priority" value="10" min="0" max="1000" /></div>
+          <div class="field" style="max-width:125px"><label for="rt-delay">Delay (seconds)</label><input type="number" id="rt-delay" value="0" min="0" max="86400" /></div>
+          <div class="field"><label>Destination node</label><select id="rt-node"></select></div>
+          <button class="btn" id="rt-add" style="align-self:flex-end">+ Add rule</button>
+        </div>
+        <div class="node-list" id="router-list"><p class="sub">Loading…</p></div>
+        <h4 style="margin-top:20px">Send queue <span class="mwl-tag" style="background:rgba(34,211,238,.14);color:#22d3ee;border-color:rgba(34,211,238,.35)">C1</span></h4>
+        <p class="sub">Durable dispatches with automatic retry &amp; backoff. FAILED items exhausted their attempts — re-queue them when the destination is reachable.</p>
+        <div class="field-row" style="margin-top:8px">
+          <div class="field" style="flex:1"></div>
+          <div class="field"><label>Filter</label>
+            <select id="rq-filter" style="padding:8px">
+              <option value="">All</option>
+              <option value="PENDING">Pending</option>
+              <option value="SENDING">Sending</option>
+              <option value="COMPLETED">Completed</option>
+              <option value="FAILED">Failed</option>
+            </select>
+          </div>
+          <button class="btn ghost" id="rq-run" style="align-self:flex-end" title="Sweep the queue now (dispatch due items)">Sweep now ▶</button>
+        </div>
+        <div class="node-list" id="routing-queue-list"><p class="sub">Loading…</p></div>
+        </section>
+        <section class="cfg-dicomweb" aria-labelledby="compression-dimse-title">
+          <h3 id="compression-dimse-title">DICOM identity and Query/Retrieve</h3>
+          <p class="dw-hint">PAXS uses the association AE title for DIMSE peer identity. Query/Retrieve uses negotiated transfer syntaxes.</p>
+          <button type="button" class="btn sm ghost" id="compression-dicom-settings">Open DICOM AE settings</button>
+        </section>
+      </div>
+
+      <div class="settings-panel" id="spanel-optical" hidden>
+        <div class="cfg-form" id="set-optical"><p class="sub">Loading…</p></div>
+        <section class="cfg-dicomweb" aria-labelledby="disc-diagnostics-title">
+          <div class="dw-head">
+            <div>
+              <b id="disc-diagnostics-title">Recorder and media</b>
+              <span class="cfg-desc">Check the recorder attached to the server and the inserted disc before burning.</span>
+            </div>
+          </div>
+          <div class="dw-base">
+            <label for="disc-recorders">Detected recorders</label>
+            <select id="disc-recorders" disabled><option value="">Scan for recorders</option></select>
+            <button type="button" class="btn sm ghost" id="disc-scan">Scan recorders</button>
+            <button type="button" class="btn sm ghost" id="disc-check">Check disc</button>
+          </div>
+          <p class="dw-hint" id="disc-recorder-status" role="status"></p>
+          <p class="dw-hint" id="disc-media-status" role="status"></p>
+        </section>
+        <section class="cfg-dicomweb" aria-labelledby="disc-activity-title">
+          <div class="dw-head">
+            <div>
+              <b id="disc-activity-title">Burn activity</b>
+              <span class="cfg-desc">Latest 10 jobs since the server started. Completed and failed burns are recorded in Audit Trail.</span>
+            </div>
+            <button type="button" class="btn sm ghost" id="disc-refresh-jobs">Refresh activity</button>
+          </div>
+          <p class="dw-hint" id="disc-job-status" role="status"></p>
+          <ol class="dw-routes disc-jobs" id="disc-jobs" hidden></ol>
+        </section>
       </div>
 
       <div class="settings-panel" id="spanel-dicom" hidden>
@@ -1265,6 +1337,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=42"></script>
+  <script src="/static/app.js?v=43"></script>
 </body>
 </html>

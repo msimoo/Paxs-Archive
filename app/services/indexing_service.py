@@ -501,12 +501,20 @@ async def index_new_instance(session: AsyncSession, meta: dict,
         if rec is not None:
             rec.status = "PENDING"
 
-    # Queue lossless compression for the background worker (skip PR — no pixels).
-    if settings.COMPRESSION_ENABLED and meta.get("sop_class_uid") != _GSPS_SOP_CLASS_UID:
+    from app.services.compression_service import SOURCE_METHOD, THUMBNAIL_METHOD, normalize_method
+
+    has_pixels = (
+        "PixelData" in ds if ds is not None else bool(meta.get("rows") and meta.get("columns"))
+    )
+    method = normalize_method(settings.DEFAULT_COMPRESSION)
+    compress = settings.COMPRESSION_ENABLED and method != SOURCE_METHOD
+    if has_pixels and settings.THUMBNAIL_ENABLED and (settings.THUMBNAIL_ON_RECEIPT or not compress):
+        session.add(CompressionJob(instance_id=instance.id, method=THUMBNAIL_METHOD, status="PENDING"))
+    if has_pixels and compress:
         session.add(
             CompressionJob(
                 instance_id=instance.id,
-                method=settings.DEFAULT_COMPRESSION,
+                method=method,
                 status="PENDING",
             )
         )

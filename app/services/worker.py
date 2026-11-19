@@ -20,6 +20,9 @@ from app.db.models import CompressionJob, Instance, Series, Session, Study, Tria
 from app.db.session import SyncSessionLocal
 from app.services import storage_service, thumbnail_service
 from app.services import triage_service
+from app.services.compression_service import (
+    NATIVE_METHOD, SOURCE_METHOD, THUMBNAIL_METHOD, compression_window_open,
+)
 
 log = logging.getLogger("paxs.worker")
 
@@ -61,10 +64,16 @@ class CompressionWorker(threading.Thread):
         from sqlalchemy import update as sa_update
 
         limit = limit or settings.WORKER_BATCH_SIZE
+        eligible = CompressionJob.status == "PENDING"
+        if not compression_window_open(
+            settings.COMPRESSION_TIMING, settings.COMPRESSION_START_TIME,
+            settings.COMPRESSION_END_TIME, datetime.now().strftime("%H:%M"),
+        ):
+            eligible &= CompressionJob.method == THUMBNAIL_METHOD
         ids = (
             session.execute(
                 select(CompressionJob.id)
-                .where(CompressionJob.status == "PENDING")
+                .where(eligible)
                 .order_by(CompressionJob.id)
                 .limit(limit)
             )
@@ -75,7 +84,7 @@ class CompressionWorker(threading.Thread):
             return []
         res = session.execute(
             sa_update(CompressionJob)
-            .where(CompressionJob.id.in_(ids), CompressionJob.status == "PENDING")
+            .where(CompressionJob.id.in_(ids), eligible)
             .values(status="RUNNING")
         )
         session.commit()  # make the claim visible to other workers immediately
@@ -94,10 +103,14 @@ class CompressionWorker(threading.Thread):
     # ------------------------------------------------------------------ #
     def _process_batch(self) -> None:
         with SyncSessionLocal() as session:
-            jobs = self._claim_jobs(session)
-            for job in jobs:
-                self._process_job(session, job)
-            session.commit()
+            for _ in range(settings.WORKER_BATCH_SIZE):
+                if self._stop.is_set():
+                    break
+                jobs = self._claim_jobs(session, limit=1)
+                if not jobs:
+                    break
+                self._process_job(session, jobs[0])
+                session.commit()
             if settings.TRIAGE_RUN_IN_WORKER:
                 self._process_triage(session)
                 session.commit()
@@ -144,10 +157,19 @@ class CompressionWorker(threading.Thread):
             return
 
         try:
+            if job.method == THUMBNAIL_METHOD:
+                if settings.THUMBNAIL_ENABLED and not thumbnail_service.generate_thumbnail(
+                    instance.file_path, storage_service.thumbnail_key(instance.sop_instance_uid), backend_name=bk,
+                ):
+                    raise RuntimeError("Thumbnail generation failed")
+                job.status = "DONE"
+                job.finished_at = now
+                return
             result = storage_service.compress(instance.file_path, job.method, backend_name=bk)
             instance.transfer_syntax_uid = result["transfer_syntax_uid"]
             instance.file_size_bytes = result["compressed_bytes"]
-            instance.compressed_at = now
+            if job.method not in {NATIVE_METHOD, SOURCE_METHOD}:
+                instance.compressed_at = now
 
             job.original_size = result["original_bytes"]
             job.compressed_size = result["compressed_bytes"]
@@ -161,12 +183,12 @@ class CompressionWorker(threading.Thread):
             add_audit(
                 session,
                 sop_instance_uid=instance.sop_instance_uid,
-                action="COMPRESSED",
+                action="DECOMPRESSED" if job.method == NATIVE_METHOD else "COMPRESSED",
                 performed_by="worker",
                 study_instance_uid=None,
                 file_path=instance.file_path,
             )
-            if settings.THUMBNAIL_ENABLED:
+            if settings.THUMBNAIL_ENABLED and not settings.THUMBNAIL_ON_RECEIPT:
                 thumbnail_service.generate_thumbnail(
                     instance.file_path,
                     storage_service.thumbnail_key(instance.sop_instance_uid),
@@ -477,6 +499,9 @@ def _check_codecs_cli() -> int:
         print(f"  {entry['method']:<10} {mark}  {entry['transfer_syntax_uid']:<24} {note}")
 
     configured = normalize_method(settings.DEFAULT_COMPRESSION)
+    if configured in {NATIVE_METHOD, SOURCE_METHOD}:
+        print(f"\nDEFAULT_COMPRESSION={configured}: no encoder required [OK]")
+        return 0
     configured_ok = configured in COMPRESSION_METHODS and available.get(configured, False)
     if configured_ok:
         print(f"\nDEFAULT_COMPRESSION={configured}: usable [OK]")
@@ -509,4 +534,3 @@ if __name__ == "__main__":
     if args.check_codecs:
         raise SystemExit(_check_codecs_cli())
     run_standalone(poll_seconds=args.poll, once=args.once)
-

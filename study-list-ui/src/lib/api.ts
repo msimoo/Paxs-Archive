@@ -218,3 +218,68 @@ export async function createShare(
   }
   return body as ShareResult;
 }
+
+const ANONYMOUS_PATIENT_NAME = 'Anonymous / Unnamed';
+let patientNameDisplay: unknown;
+
+export function setPatientNameDisplay(mode: unknown): void {
+  patientNameDisplay = mode;
+}
+
+export function displayPatientName(value: string | null | undefined): string {
+  const stored = value?.trim();
+  if (!stored) return ANONYMOUS_PATIENT_NAME;
+  if (patientNameDisplay === 'source') return stored;
+  if (patientNameDisplay === 'remove_carets') {
+    return stored.replace(/\^/g, '').trim() || ANONYMOUS_PATIENT_NAME;
+  }
+  if (patientNameDisplay === 'structured') {
+    const group = stored.split('=').find((part) => part.replace(/\^/g, '').trim());
+    if (!group) return ANONYMOUS_PATIENT_NAME;
+    return group.split('^').map((part) => part.trim()).filter(Boolean).join(', ');
+  }
+  const formatted = value?.replace(/\^/g, ' ').trim();
+  return formatted || ANONYMOUS_PATIENT_NAME;
+}
+
+export interface DiscBurnStatus {
+  phase: 'queued' | 'preparing' | 'writing' | 'verifying' | 'verified' | 'failed';
+  count: number;
+  error: string | null;
+}
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function requestDisc(id: string, init: RequestInit): Promise<DiscBurnStatus> {
+  const headers = new Headers(init.headers);
+  const token = localStorage.getItem('paxs_token');
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetch(`${API_BASE}/export/dicomdir/disc/${id}`, {
+    ...init, headers, credentials: 'same-origin',
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data) {
+    const detail = data?.detail;
+    throw new ApiError(typeof detail === 'string' ? detail : `Disc request failed (${response.status}).`, response.status);
+  }
+  return data as DiscBurnStatus;
+}
+
+export function startDiscBurn(id: string, studyUid: string): Promise<DiscBurnStatus> {
+  return requestDisc(id, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ study_uid: studyUid }),
+  });
+}
+
+export function getDiscBurn(id: string, signal: AbortSignal): Promise<DiscBurnStatus> {
+  return requestDisc(id, { signal });
+}

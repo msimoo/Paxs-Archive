@@ -21,6 +21,7 @@ from app.core.config import settings
 from app.db.models import DicomNode, Instance, RoutingQueueItem, RoutingRule, Series, Study
 from app.db.session import AsyncSessionLocal, SyncSessionLocal
 from app.dicom.sender import send_file
+from app.services.compression_service import compression_window_open
 from app.services import audit_service, storage_service
 
 log = logging.getLogger("paxs.routing")
@@ -151,7 +152,10 @@ def dispatch_study_to_node_sync(study_instance_uid: str, node_id: int) -> dict[s
                     temp_path = tmp.name
 
             try:
-                res = send_file(node.host, node.port, node.ae_title, file_target)
+                res = send_file(
+                    node.host, node.port, node.ae_title, file_target,
+                    our_ae_title=settings.ROUTING_SCU_AE_TITLE,
+                )
                 if res.get("ok"):
                     sent_count += 1
                     audit_service.add_audit(
@@ -260,7 +264,10 @@ def process_queue_batch(limit: int = 10) -> dict[str, int]:
       * failure -> attempts += 1; if attempts >= max_attempts -> FAILED,
         else next_retry_at = now + backoff (grows with attempts).
     """
-    if not settings.ROUTING_QUEUE_ENABLED:
+    if not settings.ROUTING_QUEUE_ENABLED or not compression_window_open(
+        settings.ROUTING_TIMING, settings.ROUTING_START_TIME, settings.ROUTING_END_TIME,
+        datetime.now().strftime("%H:%M"),
+    ):
         return {"claimed": 0, "completed": 0, "failed": 0, "requeued": 0}
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     counts = {"claimed": 0, "completed": 0, "failed": 0, "requeued": 0}

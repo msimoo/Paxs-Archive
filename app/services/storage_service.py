@@ -198,6 +198,11 @@ def save_bytes(key: str, data: bytes, backend_name: str | None = None) -> None:
     _resolve(backend_name).save_bytes(key, data)
 
 
+def read_stream(key: str, backend_name: str | None = None):
+    """Open the stored object as a stream for optical media export."""
+    return _resolve(backend_name).read_stream(key)
+
+
 def read_bytes(key: str, backend_name: str | None = None) -> bytes:
     return _resolve(backend_name).read_bytes(key)
 
@@ -603,6 +608,8 @@ def compress(key: str, method: str = "RLE", backend_name: str | None = None) -> 
         with open(tmp, "wb") as fh:
             fh.write(data)
         result = compress_file(tmp, method)
+        if result["already_compressed"]:
+            return result
         with open(tmp, "rb") as fh:
             bk.save_bytes(key, fh.read())
     finally:

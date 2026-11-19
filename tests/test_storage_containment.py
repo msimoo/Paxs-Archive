@@ -216,7 +216,13 @@ def test_absolute_keys_refused_by_default(backend):
 def test_legacy_paths_allowed_only_with_the_flag(backend, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "STORAGE_ALLOW_LEGACY_PATHS", True, raising=False)
     absolute = tmp_path / "legacy" / "x.dcm"
-    assert backend._resolve(str(absolute)) == absolute
+    with pytest.raises(StorageError):
+        backend._resolve(str(absolute), allow_legacy_read=True)
+
+    monkeypatch.setattr(settings, "STORAGE_LEGACY_ROOTS", str(absolute.parent))
+    assert backend._resolve(str(absolute), allow_legacy_read=True) == absolute
+    with pytest.raises(StorageError):
+        backend._resolve(str(absolute))
 
 
 def test_relative_keys_still_work_with_the_flag_on(backend, monkeypatch):

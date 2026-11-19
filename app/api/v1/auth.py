@@ -380,4 +380,4 @@ async def logout(request: Request, db: AsyncSession = Depends(get_db)):
 
 @router.get("/me")
 async def me(user: User = Depends(get_current_user_any)):
-    return _user_dict(user)
+    return {**_user_dict(user), "patient_name_display": settings.PATIENT_NAME_DISPLAY}

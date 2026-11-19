@@ -10,6 +10,15 @@ const COLUMN_DEFS = [
   { key: "modality",  label: "Modalities" },
   { key: "actions",   label: "Actions" },
 ];
+function archivePatientName(value) {
+  const stored = value?.trim() || "";
+  if (state.patientNameDisplay === "remove_carets") return stored.replace(/\^/g, "").trim();
+  if (state.patientNameDisplay === "structured") {
+    const group = stored.split("=").find((part) => part.replace(/\^/g, "").trim());
+    return group?.split("^").map((part) => part.trim()).filter(Boolean).join(", ") || "";
+  }
+  return stored;
+}
 function defaultCols() { return Object.fromEntries(COLUMN_DEFS.map((c) => [c.key, true])); }
 function loadCols() {
   try {
@@ -383,7 +392,7 @@ function renderStudies(items) {
     <div class="study-row" style="--mod:${modColor};animation-delay:${Math.min((state.page - 1) * 20, 300)}ms">
       ${thumb}
       <div class="cell-main" data-col="patient">
-        <div class="name">${esc(s.patient_name) || "Unknown patient"}${s.patient_source === "his" ? '<span class="his-badge" title="Patient registered by the hospital HIS (HL7 ADT)">HIS</span>' : ""}${s.tenant_name ? `<span class="vna-badge" title="VNA tenant — vendor-neutral archive isolation">${esc(s.tenant_name)}</span>` : ""}</div>
+        <div class="name">${esc(archivePatientName(s.patient_name)) || "Unknown patient"}${s.patient_source === "his" ? '<span class="his-badge" title="Patient registered by the hospital HIS (HL7 ADT)">HIS</span>' : ""}${s.tenant_name ? `<span class="vna-badge" title="VNA tenant — vendor-neutral archive isolation">${esc(s.tenant_name)}</span>` : ""}</div>
         <div class="sub mono">${esc(s.patient_id || "—")}</div>
       </div>
       <div class="cell-main" data-col="study">
@@ -625,7 +634,8 @@ async function doAuth() {
 /* ---------------- view navigation ---------------- */
 const VIEWS = ["dashboard", "studies", "reading", "workflow", "nodes", "admin", "settings"];
 
-function switchView(view) {
+function switchView(view, settingsTab = "sys") {
+  if (view !== "settings") window.clearTimeout(discActivityTimer);
   if (!VIEWS.includes(view)) view = "dashboard";
   [...document.querySelectorAll(".view")].forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   [...document.querySelectorAll(".nav-tab")].forEach((b) =>
@@ -640,7 +650,7 @@ function switchView(view) {
       const activeBtn = document.querySelector("#admin-tabs button.active");
       loadAdminSubTab(activeBtn ? activeBtn.dataset.tab : "sys");
     },
-    settings: () => { loadSettings(); },
+    settings: () => { loadSettings(false, settingsTab); },
   };
   (loaders[view] || (() => {}))();
   /* Push browser history so the Back button navigates between views
@@ -652,7 +662,7 @@ function switchView(view) {
 }
 
 /* ---------------- settings (editable config) ---------------- */
-const CFG_PANELS = ["sys", "dicom", "modality", "interop", "storage", "security", "workflow", "viewer", "db"];
+const CFG_PANELS = ["sys", "dicom", "modality", "interop", "storage", "compression", "optical", "security", "workflow", "viewer", "db"];
 
 function cfgCtrlValue(f) {
   const c = document.querySelector(`[data-cfg="${f.key}"]`);
@@ -667,13 +677,16 @@ function cfgRowHTML(f) {
   const ro = state.config && !state.config.admin;
   let ctrl;
   if (f.type === "bool") {
-    ctrl = `<label class="sw${ro ? " off" : ""}"><input type="checkbox" data-cfg="${f.key}"${f.value ? " checked" : ""}${ro ? " disabled" : ""} /><i></i></label>`;
+    ctrl = `<label class="sw${ro ? " off" : ""}"><input type="checkbox" aria-label="${esc(f.label)}" data-cfg="${f.key}"${f.value ? " checked" : ""}${ro ? " disabled" : ""} /><i></i></label>`;
   } else if (f.type === "select") {
-    ctrl = `<select data-cfg="${f.key}"${ro ? " disabled" : ""}>${(f.options || [])
-      .map((o) => `<option value="${esc(o)}"${String(o) === String(f.value) ? " selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+    ctrl = `<select aria-label="${esc(f.label)}" data-cfg="${f.key}"${ro ? " disabled" : ""}>${(f.options || [])
+      .map((o) => `<option value="${esc(o)}"${String(o) === String(f.value) ? " selected" : ""}>${esc(f.option_labels?.[o] || o)}</option>`).join("")}</select>`;
   } else {
-    const kind = f.type === "int" || f.type === "float" ? "number" : "text";
-    ctrl = `<input type="${kind}" data-cfg="${f.key}" value="${esc(f.value)}"${ro ? " disabled" : ""} />`;
+    const kind = f.type === "int" || f.type === "float" ? "number" : f.input === "time" ? "time" : "text";
+    const min = f.min === undefined ? "" : ` min="${esc(f.min)}"`;
+    const max = f.max === undefined ? "" : ` max="${esc(f.max)}"`;
+    const step = f.type === "float" ? ' step="any"' : "";
+    ctrl = `<input type="${kind}" aria-label="${esc(f.label)}" data-cfg="${f.key}" value="${esc(f.value)}"${min}${max}${step}${ro ? " disabled" : ""} />`;
   }
   const tags = [
     f.restart ? '<span class="restart-tag" title="Consumed at boot — takes full effect after the next server start">restart ↵</span>' : "",
@@ -747,8 +760,8 @@ function wireCfgInputs() {
     b.addEventListener("click", () => saveSettings(b.dataset.g)));
 }
 
-async function loadSettings(force = false) {
-  if (state.configLoaded && !force) { openSettingsTab("sys"); return; }
+async function loadSettings(force = false, tab = "sys") {
+  if (state.configLoaded && !force) { openSettingsTab(tab); return; }
   const res = await api("/api/v1/config");
   if (!res.ok) {
     if (res.status !== 401) {
@@ -763,6 +776,7 @@ async function loadSettings(force = false) {
   state.config = cfg;
   state.configLoaded = true;
   (cfg.groups || []).forEach(renderGroup);
+  renderCompressionProfiles(cfg);
 
   // brand + title follow the (possibly overridden) APP_NAME
   const nameField = (cfg.groups.find((g) => g.key === "sys")?.fields || []).find((f) => f.key === "APP_NAME");
@@ -778,7 +792,7 @@ async function loadSettings(force = false) {
 
   wireCfgInputs();
   refreshSavebar();
-  openSettingsTab("sys");
+  openSettingsTab(tab);
 }
 
 async function saveSettings(groupKey) {
@@ -792,6 +806,8 @@ async function saveSettings(groupKey) {
   }));
   const keys = Object.keys(updates);
   if (!keys.length) { refreshSavebar(); return; }
+  if (updates.LOSSY_COMPRESSION_ENABLED === true &&
+      !confirm("Allow lossy rules to permanently change stored pixel values when run?")) return;
   const res = await api("/api/v1/config", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -805,7 +821,136 @@ async function saveSettings(groupKey) {
   }
   if (data.partial) toast(`Applied ${data.applied?.length ?? 0}, ${data.errors?.length ?? 0} rejected`, "err");
   else toast(`Applied ${keys.length} setting${keys.length === 1 ? "" : "s"} ✓`, "ok");
-  loadSettings(true); // re-render (also syncs the header brand from APP_NAME)
+  const patientNameSetting = data.applied?.find((field) => field.key === "PATIENT_NAME_DISPLAY");
+  if (patientNameSetting) state.patientNameDisplay = patientNameSetting.value;
+  const activeTab = document.querySelector("#settings-tabs button.active")?.dataset.stab;
+  loadSettings(true, activeTab || "sys");
+}
+
+function renderCompressionProfiles(config) {
+  const status = $("compression-codecs");
+  const codecs = config.readonly?.compression?.codecs || [];
+  status.textContent = codecs.length
+    ? codecs.map((codec) => codec.method + (codec.available ? " available" : " unavailable")).join(" · ")
+    : "Server codec status unavailable.";
+  document.querySelectorAll("[data-compression-profile]").forEach((button) => {
+    const method = button.dataset.compressionProfile;
+    button.disabled = !config.admin || (method !== "AS_SOURCE" && !codecs.some((c) => c.method === method && c.available));
+  });
+}
+
+function selectCompressionProfile(method) {
+  const format = document.querySelector('[data-cfg="DEFAULT_COMPRESSION"]');
+  const enabled = document.querySelector('[data-cfg="COMPRESSION_ENABLED"]');
+  if (!format || !enabled || format.disabled) return;
+  format.value = method;
+  if (method !== "AS_SOURCE") enabled.checked = true;
+  refreshSavebar();
+  toast("Profile selected. Save Compression to apply it.", "ok");
+}
+
+/* ---------------- CD/DVD diagnostics ---------------- */
+const DISC_TOOLS = "/api/v1/export/dicomdir/disc";
+const DISC_PHASES = {
+  queued: "Checking recorder", preparing: "Preparing files", writing: "Writing disc",
+  verifying: "Verifying disc", verified: "Verified", failed: "Failed",
+};
+let discActivityTimer;
+
+async function discTool(path) {
+  const response = await api(DISC_TOOLS + path, { cache: "no-store" });
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data) {
+    throw new Error(typeof data?.detail === "string" ? data.detail : "The server could not complete the check.");
+  }
+  return data;
+}
+
+async function scanDiscRecorders() {
+  const button = $("disc-scan");
+  if (button.disabled) return;
+  const select = $("disc-recorders");
+  const status = $("disc-recorder-status");
+  button.disabled = select.disabled = true;
+  select.replaceChildren(new Option("Choose a recorder", ""));
+  status.textContent = "Scanning for optical recorders…";
+  try {
+    const { recorders } = await discTool("/recorders");
+    for (const recorder of recorders) {
+      select.add(new Option([recorder.drive, recorder.model].filter(Boolean).join(" · "), recorder.drive));
+    }
+    select.disabled = recorders.length === 0;
+    status.textContent = recorders.length
+      ? "Choose a recorder to fill the drive letter above, then save to apply it."
+      : "No compatible optical recorder detected on the Windows server.";
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function checkDiscMedia() {
+  const button = $("disc-check");
+  if (button.disabled) return;
+  const status = $("disc-media-status");
+  const driveInput = document.querySelector('[data-cfg="DISC_BURN_DRIVE"]');
+  if (!driveInput) {
+    status.textContent = "Load the CD/DVD settings before checking media.";
+    return;
+  }
+  const drive = driveInput.value.trim().toUpperCase();
+  if (!/^([A-Z]:)?$/.test(drive)) {
+    status.textContent = "Enter a drive letter such as D: or leave the field blank for automatic selection.";
+    return;
+  }
+  button.disabled = true;
+  status.textContent = "Checking the inserted disc…";
+  try {
+    const media = await discTool("/media?drive=" + encodeURIComponent(drive));
+    status.textContent = "Blank writable disc · " + media.drive + " · " + media.media_type
+      + " · " + fmtBytes(media.available_bytes) + " writable capacity"
+      + " · " + fmtBytes(media.staging_free_bytes) + " temporary space on the server"
+      + " · Checked at " + new Date().toLocaleTimeString();
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function refreshDiscActivity() {
+  window.clearTimeout(discActivityTimer);
+  const button = $("disc-refresh-jobs");
+  if (button.disabled) return;
+  const status = $("disc-job-status");
+  const list = $("disc-jobs");
+  button.disabled = true;
+  try {
+    const { jobs, active } = await discTool("/activity");
+    status.textContent = jobs.length ? "" : "No burn jobs in this server session.";
+    list.replaceChildren();
+    for (const job of jobs) {
+      const item = document.createElement("li");
+      item.dataset.phase = job.phase;
+      const title = document.createElement("strong");
+      title.textContent = DISC_PHASES[job.phase] || job.phase;
+      const detail = document.createElement("span");
+      detail.textContent = [new Date(job.started_at).toLocaleString(), job.drive || "Automatic recorder",
+        job.count + " DICOM instances", job.error].filter(Boolean).join(" · ");
+      item.append(title, detail);
+      list.append(item);
+    }
+    list.hidden = !jobs.length;
+    if (active && $("view-settings").classList.contains("active") && !$("spanel-optical").hidden) {
+      discActivityTimer = window.setTimeout(refreshDiscActivity, 3000);
+    }
+  } catch (error) {
+    list.hidden = true;
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function loadModalityRegistry() {
@@ -836,6 +981,9 @@ function openSettingsTab(stab) {
   if (stab === "modality") loadModalityRegistry();
   if (stab === "db") loadDatabaseTab();
   if (stab === "redis") loadRedisTab();
+  if (stab === "compression") { loadLossy(); loadLifecycle(); loadRouter(); fillNodeSelect(); loadRoutingQueue(); }
+  if (stab === "optical") refreshDiscActivity();
+  else window.clearTimeout(discActivityTimer);
 }
 
 /* ---------------- database tab ---------------- */
@@ -1475,7 +1623,7 @@ function renderReadingTasks(items) {
     <div class="study-row" style="--mod:${modColor};animation-delay:${Math.min((RWL.page - 1) * 20, 300)}ms">
       ${thumb}
       <div class="cell-main">
-        <div class="name">${esc(s.patient_name) || "Unknown patient"}${s.patient_source === "his" ? '<span class="his-badge" title="Patient registered by the hospital HIS">HIS</span>' : ""}</div>
+        <div class="name">${esc(archivePatientName(s.patient_name)) || "Unknown patient"}${s.patient_source === "his" ? '<span class="his-badge" title="Patient registered by the hospital HIS">HIS</span>' : ""}</div>
         <div class="sub mono">${esc(s.patient_id || "—")}${assignee}</div>
       </div>
       <div class="cell-main">
@@ -1787,7 +1935,6 @@ function loadAdminSubTab(tab) {
   const loaders = {
     sys: loadSysInfo,
     services: loadServices,
-    router: () => { loadRouter(); fillNodeSelect(); loadRoutingQueue(); },
     critical: loadCritical,
     storage: loadStoragePanel,
     migration: loadMigration,
@@ -2579,6 +2726,12 @@ async function addRoutingRule() {
   const nodeId = parseInt($("rt-node").value, 10);
   const name = $("rt-name").value.trim();
   if (!name || !nodeId) { toast("Rule name and destination node are required", "err"); return; }
+  const priority = $("rt-priority");
+  const delay = $("rt-delay");
+  if (!priority.value || !priority.checkValidity() || !delay.value || !delay.checkValidity()) {
+    toast("Enter a valid routing priority and delay.", "err");
+    return;
+  }
   const res = await api("/api/v1/routing/rules", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -2586,7 +2739,9 @@ async function addRoutingRule() {
       destination_node_id: nodeId,
       modality: $("rt-modality").value.trim().toUpperCase() || null,
       body_part_examined: $("rt-body").value.trim().toUpperCase() || null,
-      priority: 10,
+      source_aet: $("rt-source").value.trim() || null,
+      priority: Number(priority.value),
+      delay_seconds: Number(delay.value),
     }),
   });
   const data = await res.json().catch(() => ({}));
@@ -2702,8 +2857,6 @@ async function loadStoragePanel() {
     ["Named backends", `${st.backends != null ? st.backends : 0} registered`],
   ].map(([k, v]) => `<div class="sys-row"><span class="sys-k">${k}</span><span class="sys-v">${v}</span></div>`).join("");
   loadBackends();
-  loadLossy();
-  loadLifecycle();
 }
 
 /* ----- multi-storage backends ----- */
@@ -2850,13 +3003,20 @@ async function loadLossy() {
 async function addLossyRule() {
   const name = $("lc-name").value.trim();
   if (!name) { toast("Rule name is required", "err"); return; }
+  const age = $("lc-age");
+  const quality = $("lc-quality");
+  if (!age.value || !age.checkValidity() || !quality.value || !quality.checkValidity()) {
+    toast("Enter a valid age and quality factor.", "err");
+    return;
+  }
   const res = await api("/api/v1/compression/lossy/rules", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       name,
       modality: $("lc-modality").value.trim().toUpperCase() || null,
-      min_age_days: parseInt($("lc-age").value, 10) || 365,
-      quality_factor: parseInt($("lc-quality").value, 10) || 85,
+      min_age_days: Number(age.value),
+      quality_factor: Number(quality.value),
+      transfer_syntax_uid: $("lc-syntax").value,
     }),
   });
   const data = await res.json().catch(() => ({}));
@@ -2868,12 +3028,14 @@ async function addLossyRule() {
 }
 
 async function runLossy() {
+  if (!confirm("Run enabled lossy rules now? Matching original pixel values will be permanently replaced.")) return;
   const btn = $("lc-run");
   btn.disabled = true;
   const res = await api("/api/v1/compression/lossy/run", { method: "POST" });
   btn.disabled = false;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) { toast(data.detail || `Run failed (${res.status})`, "err"); return; }
+  if (data.disabled) { toast(data.message, "err"); return; }
   toast(`Compression run finished — ${data.processed_instances ?? 0} instance(s) processed`, "ok");
 }
 
@@ -2882,6 +3044,7 @@ async function loadLifecycle() {
   const res = await api("/api/v1/lifecycle/rules");
   if (!res.ok) { $("lifecycle-list").innerHTML = `<p class="sub">Failed (${res.status}) — sign in as admin.</p>`; return; }
   const rules = await res.json();
+  loadLifecycleStudies();
   if (!rules.length) { $("lifecycle-list").innerHTML = `<p class="sub">No lifecycle rules yet. Add one to auto-tier aged studies — e.g. ARCHIVE CT after 365 days, or PURGE after retention expiry.</p>`; return; }
   $("lifecycle-list").innerHTML = rules.map((r) => `
     <div class="node-item">
@@ -2891,12 +3054,14 @@ async function loadLifecycle() {
         <div class="sub mono">${esc(r.action)}${r.modality ? ` · ${esc(r.modality)}` : ""}${r.body_part_examined ? ` · ${esc(r.body_part_examined)}` : ""} · age ≥ ${r.min_age_days}d</div>
       </div>
       <div class="actions">
-        <button class="btn sm" data-lc2-toggle="${r.id}" data-lc2-enabled="${r.enabled}">${r.enabled ? "Disable" : "Enable"}</button>
+        <button class="btn sm" data-lc2-toggle="${r.id}" data-lc2-enabled="${r.enabled}" data-lc2-action="${esc(r.action)}">${r.enabled ? "Disable" : "Enable"}</button>
         <button class="btn sm danger" data-lc2-del="${r.id}">Del</button>
       </div>
     </div>`).join("");
   [...document.querySelectorAll("#lifecycle-list [data-lc2-toggle]")].forEach((b) =>
     b.addEventListener("click", async () => {
+      if (b.dataset.lc2Action === "PURGE" && b.dataset.lc2Enabled !== "true" &&
+          !confirm("Enable this purge rule? Matching archived studies may be permanently deleted by the worker.")) return;
       const res = await api(`/api/v1/lifecycle/rules/${b.dataset.lc2Toggle}`, {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: b.dataset.lc2Enabled !== "true" }),
@@ -2910,7 +3075,6 @@ async function loadLifecycle() {
       toast(res.ok ? "Rule deleted" : `Delete failed (${res.status})`, res.ok ? "ok" : "err");
       if (res.ok) loadLifecycle();
     }));
-  loadLifecycleStudies();
 }
 
 async function loadLifecycleStudies() {
@@ -2947,14 +3111,17 @@ async function loadLifecycleStudies() {
 async function addLifecycleRule() {
   const name = $("lc2-name").value.trim();
   if (!name) { toast("Rule name is required", "err"); return; }
+  const age = $("lc2-age");
+  if (!age.value || !age.checkValidity()) { toast("Enter a valid minimum study age.", "err"); return; }
   const res = await api("/api/v1/lifecycle/rules", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       name,
       action: $("lc2-action").value,
+      enabled: $("lc2-action").value !== "PURGE",
       modality: $("lc2-modality").value.trim().toUpperCase() || null,
       body_part_examined: $("lc2-body").value.trim().toUpperCase() || null,
-      min_age_days: parseInt($("lc2-age").value, 10) || 365,
+      min_age_days: Number(age.value),
     }),
   });
   const data = await res.json().catch(() => ({}));
@@ -2966,6 +3133,7 @@ async function addLifecycleRule() {
 }
 
 async function runLifecycle() {
+  if (!confirm("Run enabled retention rules now? Enabled purge rules can permanently delete archived studies.")) return;
   const btn = $("lc2-run");
   btn.disabled = true;
   const res = await api("/api/v1/lifecycle/run", { method: "POST" });
@@ -4165,6 +4333,22 @@ function bind() {
   // settings save bar (static elements — bind once, not per render)
   $("cfg-save")?.addEventListener("click", () => saveSettings());
   $("cfg-discard")?.addEventListener("click", () => { loadSettings(true); });
+  document.querySelectorAll("[data-open-compression]").forEach((button) =>
+    button.addEventListener("click", () => switchView("settings", "compression")));
+  document.querySelectorAll("[data-compression-profile]").forEach((button) =>
+    button.addEventListener("click", () => selectCompressionProfile(button.dataset.compressionProfile)));
+  $("compression-dicom-settings")?.addEventListener("click", () => openSettingsTab("dicom"));
+  $("disc-scan")?.addEventListener("click", scanDiscRecorders);
+  $("disc-check")?.addEventListener("click", checkDiscMedia);
+  $("disc-refresh-jobs")?.addEventListener("click", refreshDiscActivity);
+  $("disc-recorders")?.addEventListener("change", (event) => {
+    const drive = document.querySelector('[data-cfg="DISC_BURN_DRIVE"]');
+    if (!drive || drive.disabled || !event.target.value) return;
+    drive.value = event.target.value;
+    drive.dispatchEvent(new Event("input"));
+  });
+
+
 
   // database tab (static elements — bind once)
   $("db-backend")?.addEventListener("change", syncDbForm);
@@ -4399,6 +4583,7 @@ async function boot() {
     const u = await me.json().catch(() => null);
     state.role = u?.role;
     state.username = u?.username;
+    state.patientNameDisplay = u?.patient_name_display;
     state.gated = false;
     document.body.classList.remove("preboot");
     finishBoot();

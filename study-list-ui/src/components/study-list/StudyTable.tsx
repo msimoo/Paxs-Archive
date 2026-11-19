@@ -1,8 +1,9 @@
+import { displayPatientName } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { Study, StudyFilters } from '@/types/study';
 import { getModColor } from '@/lib/constants';
 import { getViewerUrl } from '@/lib/api';
-import { Eye, Share2, Trash2, Forward, Activity, Info, FileText } from 'lucide-react';
+import { Disc3, Eye, Share2, Trash2, Forward, Activity, Info, FileText } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip';
@@ -14,7 +15,7 @@ interface StudyTableProps {
   setSort: (sort: string, order: 'asc' | 'desc') => void;
   viewMode: 'table' | 'grid';
   onStudyClick: (study: Study) => void;
-  onActionClick: (action: 'share' | 'forward' | 'delete', study: Study) => void;
+  onActionClick: (action: 'share' | 'forward' | 'delete' | 'burn', study: Study) => void;
 }
 
 function getInitials(pn: string) {
@@ -99,7 +100,7 @@ export function StudyTable({ studies, loading, filters, setSort, viewMode, onStu
                     )}
                   </div>
                   <div className="flex flex-col min-w-0">
-                    <span className="text-sm font-semibold text-slate-200 truncate">{study.patient_name.replace(/\^/g, ' ')}</span>
+                    <span className="text-sm font-semibold text-slate-200 truncate">{displayPatientName(study.patient_name)}</span>
                     <span className="text-xs font-mono text-slate-500 mt-0.5">{study.patient_id}</span>
                   </div>
                   <Badge variant="secondary" className="ml-auto text-[9px] h-5" style={{ backgroundColor: modColor, color: '#070c18' }}>
@@ -147,6 +148,14 @@ export function StudyTable({ studies, loading, filters, setSort, viewMode, onStu
                         </TooltipTrigger>
                         <TooltipContent>Share</TooltipContent>
                       </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button type="button" aria-label="Burn study to CD/DVD" className="p-1.5 rounded-full text-slate-400 hover:text-cyan-400 hover:bg-cyan-950/30 transition-colors" onClick={() => onActionClick('burn', study)}>
+                            <Disc3 className="w-4 h-4" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Burn study to CD/DVD</TooltipContent>
+                      </Tooltip>
                     </TooltipProvider>
                    </div>
                    <button 
@@ -167,7 +176,7 @@ export function StudyTable({ studies, loading, filters, setSort, viewMode, onStu
   return (
     <div className="w-full flex flex-col rounded-xl overflow-hidden border border-slate-700/50 bg-[#0c1424]/40 backdrop-blur-xl shadow-[0_10px_32px_rgba(3,7,24,0.45)]">
       {/* Header Row */}
-      <div className="grid grid-cols-[64px_2fr_3fr_150px_120px_100px_180px] gap-4 px-6 py-4 bg-[#070c18]/80 border-b border-slate-800">
+      <div className="grid grid-cols-[64px_2fr_3fr_150px_120px_100px_215px] gap-4 px-6 py-4 bg-[#070c18]/80 border-b border-slate-800">
         <div></div>
         <SortHeader label="Patient" sortKey="patient_name" />
         <SortHeader label="Study" sortKey="date" />
@@ -181,7 +190,7 @@ export function StudyTable({ studies, loading, filters, setSort, viewMode, onStu
       <div className="flex flex-col">
         {loading ? (
           Array.from({ length: 8 }).map((_, i) => (
-            <div key={i} className="grid grid-cols-[64px_2fr_3fr_150px_120px_100px_180px] gap-4 px-6 py-4 border-b border-slate-800/50 items-center">
+            <div key={i} className="grid grid-cols-[64px_2fr_3fr_150px_120px_100px_215px] gap-4 px-6 py-4 border-b border-slate-800/50 items-center">
               <Skeleton className="h-12 w-12 rounded-xl bg-slate-800" />
               <div className="space-y-2"><Skeleton className="h-4 w-32 bg-slate-800"/><Skeleton className="h-3 w-24 bg-slate-800"/></div>
               <div className="space-y-2"><Skeleton className="h-4 w-48 bg-slate-800"/><Skeleton className="h-3 w-32 bg-slate-800"/></div>
@@ -205,7 +214,7 @@ export function StudyTable({ studies, loading, filters, setSort, viewMode, onStu
             return (
               <div 
                 key={study.study_uid} 
-                className="group relative grid grid-cols-[64px_2fr_3fr_150px_120px_100px_180px] gap-4 px-6 py-4 border-b border-slate-800/30 items-center bg-[#0c1424]/20 hover:bg-[#111c30]/80 transition-all duration-200 cursor-pointer hover:-translate-y-[1px] hover:shadow-lg hover:border-slate-700/80 focus-within:ring-1 focus-within:ring-cyan-500/50"
+                className="group relative grid grid-cols-[64px_2fr_3fr_150px_120px_100px_215px] gap-4 px-6 py-4 border-b border-slate-800/30 items-center bg-[#0c1424]/20 hover:bg-[#111c30]/80 transition-all duration-200 cursor-pointer hover:-translate-y-[1px] hover:shadow-lg hover:border-slate-700/80 focus-within:ring-1 focus-within:ring-cyan-500/50"
                 onClick={() => onStudyClick(study)}
               >
                 <div 
@@ -230,7 +239,7 @@ export function StudyTable({ studies, loading, filters, setSort, viewMode, onStu
 
                 {/* Patient */}
                 <div className="flex flex-col min-w-0 pr-4">
-                  <span className="text-sm font-semibold text-slate-200 truncate">{study.patient_name.replace(/\^/g, ' ')}</span>
+                  <span className="text-sm font-semibold text-slate-200 truncate">{displayPatientName(study.patient_name)}</span>
                   <div className="flex items-center gap-2 mt-1">
                     <span className="text-xs font-mono text-slate-500">{study.patient_id}</span>
                     {study.patient_source && (
@@ -313,6 +322,14 @@ export function StudyTable({ studies, loading, filters, setSort, viewMode, onStu
                         </button>
                       </TooltipTrigger>
                       <TooltipContent>Share Study</TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button type="button" aria-label="Burn study to CD/DVD" className="p-1.5 rounded-full text-slate-400 hover:text-cyan-400 hover:bg-cyan-950/30 transition-colors" onClick={() => onActionClick('burn', study)}>
+                          <Disc3 className="w-4 h-4" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>Burn study to CD/DVD</TooltipContent>
                     </Tooltip>
                     <Tooltip>
                       <TooltipTrigger asChild>

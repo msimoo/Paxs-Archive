@@ -1,9 +1,10 @@
 """Application configuration (pydantic-settings, .env aware)."""
 
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The origin used in share links / QR codes / FHIR URLs when PUBLIC_BASE_URL is
@@ -109,6 +110,8 @@ class Settings(BaseSettings):
     # ("storage/1.2.3/..."), still resolve — a compatibility escape hatch for
     # unmigrated archives only, never for ingest. Enable, migrate, turn back off.
     STORAGE_ALLOW_LEGACY_PATHS: bool = False
+    # Explicit read-only roots for legacy objects outside the configured storage root.
+    STORAGE_LEGACY_ROOTS: str = ""
 
     # --- Database administration (Settings > Database tab) ---
     # Where a saved MySQL/SQLite configuration is persisted (rewritten as
@@ -147,12 +150,22 @@ class Settings(BaseSettings):
     # (or for network filesystems, use "delete" — WAL misbehaves there too).
     SQLITE_JOURNAL_MODE: str = "delete"
 
+    # --- Optical media ---
+    DISC_BURN_ENABLED: bool = False
+    DISC_BURN_DRIVE: str = Field(default="", pattern=r"^([A-Za-z]:)?$")
+    DISC_BURN_VOLUME_LABEL: str = Field(default="PAXS_DICOM", pattern=r"^[A-Z0-9_]{1,16}$")
+
     # --- Compression / worker ---
-    DEFAULT_COMPRESSION: str = "JPEG-LS"  # JPEG-LS (lossless fast) | JPEG2000 | HTJ2K | RLE
+    DEFAULT_COMPRESSION: str = "JPEG-LS"  # AS_SOURCE | UNCOMPRESSED | JPEG-LS | JPEG2000 | HTJ2K | RLE
     COMPRESSION_ENABLED: bool = True
+    COMPRESSION_TIMING: Literal["immediate", "scheduled"] = "immediate"
+    COMPRESSION_START_TIME: str = Field(default="22:00", pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+    COMPRESSION_END_TIME: str = Field(default="06:00", pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
     THUMBNAIL_ENABLED: bool = True
+    THUMBNAIL_ON_RECEIPT: bool = False
+    PATIENT_NAME_DISPLAY: Literal["default", "source", "structured", "remove_carets"] = "default"
     WORKER_ENABLED: bool = True
-    WORKER_POLL_SECONDS: float = 3.0
+    WORKER_POLL_SECONDS: float = Field(default=3.0, ge=0.1, le=300)
     # Lossy re-compression is a destructive, irreversible operation (it discards
     # the original sample values), so it is **fail-closed**: OFF by default.
     # Both entry points in app/services/lossy_compression_service.py return
@@ -162,7 +175,7 @@ class Settings(BaseSettings):
     # How many PENDING compression jobs a worker claims per tick. Standalone
     # worker processes (python -m app.services.worker) scale compression
     # ~linearly with cores; this bounds how many each process grabs.
-    WORKER_BATCH_SIZE: int = 15
+    WORKER_BATCH_SIZE: int = Field(default=15, ge=1, le=1000)
 
     # --- /stats storage-usage cache (scalability) ---
     # storage_usage_bytes() walks the storage tree (O(objects)); the dashboard
@@ -394,6 +407,12 @@ class Settings(BaseSettings):
     # C-STORE's them to the destination node with exponential backoff.
     ROUTING_QUEUE_ENABLED: bool = True
     ROUTING_RUN_IN_WORKER: bool = True
+    ROUTING_SCU_AE_TITLE: str = Field(
+        default="PAXS_SCU", pattern=r"^[A-Za-z0-9_.-](?:[A-Za-z0-9_. -]{0,14}[A-Za-z0-9_.-])?$",
+    )
+    ROUTING_TIMING: Literal["immediate", "scheduled"] = "immediate"
+    ROUTING_START_TIME: str = Field(default="22:00", pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+    ROUTING_END_TIME: str = Field(default="06:00", pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
     ROUTING_MAX_ATTEMPTS: int = 5
     ROUTING_RETRY_BACKOFF_SECONDS: int = 60   # base; grows ~attempts^2
     ROUTING_SWEEP_EVERY_TICKS: int = 2

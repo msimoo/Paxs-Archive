@@ -35,6 +35,24 @@ log = logging.getLogger("paxs.settings")
 # key -> {label, group, type, options?, description, restart?}
 # group values match the dashboard's Settings sub-tabs.
 EDITABLE_KEYS: dict[str, dict[str, Any]] = {
+    "DISC_BURN_ENABLED": {
+        "label": "Enable CD/DVD burning",
+        "group": "optical",
+        "type": "bool",
+        "description": "Allow signed-in users to burn studies they can access on the Windows PAXS server.",
+    },
+    "DISC_BURN_DRIVE": {
+        "label": "Recorder drive letter",
+        "group": "optical",
+        "type": "str",
+        "description": "Enter the server drive letter, for example D:. Leave blank to use the only detected recorder.",
+    },
+    "DISC_BURN_VOLUME_LABEL": {
+        "label": "Disc label",
+        "group": "optical",
+        "type": "str",
+        "description": "Name displayed when the disc is opened. Use 1–16 uppercase letters, digits or underscores. Keep patient details out of the label.",
+    },
     # ---- System ----------------------------------------------------------
     "APP_NAME": {
         "label": "Application name",
@@ -247,21 +265,99 @@ EDITABLE_KEYS: dict[str, dict[str, Any]] = {
         "type": "int",
     },
     "DEFAULT_COMPRESSION": {
-        "label": "Default compression",
-        "group": "storage",
+        "label": "Default image format",
+        "group": "compression",
         "type": "select",
-        "options": ["RLE", "JPEG-LS", "JPEG2000", "HTJ2K"],
-        "description": "Transfer syntax used by the background compression worker.",
+        "options": ["AS_SOURCE", "UNCOMPRESSED", "RLE", "JPEG-LS", "JPEG2000", "HTJ2K"],
+        "option_labels": {
+            "AS_SOURCE": "As source image",
+            "UNCOMPRESSED": "Uncompressed",
+            "RLE": "Run Length Encoding (RLE)",
+            "JPEG-LS": "JPEG-LS Lossless",
+            "JPEG2000": "JPEG 2000 Lossless",
+            "HTJ2K": "HTJ2K Lossless",
+        },
+        "description": "Applied to newly received images. Uncompressed can use substantially more disk space.",
     },
     "COMPRESSION_ENABLED": {
-        "label": "Background compression",
-        "group": "storage",
+        "label": "Convert images in background",
+        "group": "compression",
         "type": "bool",
+        "description": "The archive stores incoming files first. The worker converts eligible images after storage.",
+    },
+    "COMPRESSION_TIMING": {
+        "label": "Default store compression time",
+        "group": "compression",
+        "type": "select",
+        "options": ["immediate", "scheduled"],
+        "option_labels": {"immediate": "After receipt", "scheduled": "Only in the time window"},
+        "description": "A running job can finish outside the window. The window uses the server's local time.",
+    },
+    "COMPRESSION_START_TIME": {
+        "label": "Start time",
+        "group": "compression",
+        "type": "str",
+        "input": "time",
+    },
+    "COMPRESSION_END_TIME": {
+        "label": "End time",
+        "group": "compression",
+        "type": "str",
+        "input": "time",
+        "description": "An earlier end time crosses midnight. Equal times allow processing all day.",
     },
     "THUMBNAIL_ENABLED": {
-        "label": "Thumbnails",
-        "group": "storage",
+        "label": "Generate thumbnails",
+        "group": "compression",
         "type": "bool",
+    },
+    "THUMBNAIL_ON_RECEIPT": {
+        "label": "Queue thumbnails on receipt",
+        "group": "compression",
+        "type": "bool",
+        "description": "When thumbnails are enabled, generate them through a separate job that can run outside the compression window.",
+    },
+    "PATIENT_NAME_DISPLAY": {
+        "label": "Patient name display",
+        "group": "compression",
+        "type": "select",
+        "options": ["default", "source", "structured", "remove_carets"],
+        "option_labels": {
+            "default": "Application default",
+            "source": "As stored",
+            "structured": "Family, given, middle, prefix and suffix",
+            "remove_carets": "Remove ^ separators",
+        },
+        "description": "Display only in the archive study lists. DICOM patient names and client viewer overlays keep their own formatting.",
+    },
+    "WORKER_ENABLED": {
+        "label": "Enable background worker",
+        "group": "compression",
+        "type": "bool",
+        "restart": True,
+        "description": "Also runs other background archive services, including transfers and routing.",
+    },
+    "WORKER_BATCH_SIZE": {
+        "label": "Jobs per worker cycle",
+        "group": "compression",
+        "type": "int",
+        "min": 1,
+        "max": 1000,
+        "description": "Each worker processes these jobs sequentially before its next poll.",
+    },
+    "WORKER_POLL_SECONDS": {
+        "label": "Worker poll interval (seconds)",
+        "group": "compression",
+        "type": "float",
+        "min": 0.1,
+        "max": 300,
+        "restart": True,
+    },
+    "LOSSY_COMPRESSION_ENABLED": {
+        "label": "Allow lossy compression runs",
+        "group": "compression",
+        "type": "bool",
+        "description": "Permits manual rules to replace original pixel values permanently. Review the retention policy and backup before enabling.",
     },
     "WARM_ON_OPEN_ENABLED": {
         "label": "Warm on viewer open",
@@ -341,7 +437,7 @@ EDITABLE_KEYS: dict[str, dict[str, Any]] = {
     },
     "LIFECYCLE_RUN_IN_WORKER": {
         "label": "Lifecycle auto-archive sweep",
-        "group": "workflow",
+        "group": "compression",
         "type": "bool",
         "description": "Worker evaluates archive/restore/purge rules on schedule.",
     },
@@ -353,8 +449,34 @@ EDITABLE_KEYS: dict[str, dict[str, Any]] = {
     },
     "ROUTING_QUEUE_ENABLED": {
         "label": "Smart Router send queue",
-        "group": "workflow",
+        "group": "compression",
         "type": "bool",
+    },
+    "ROUTING_SCU_AE_TITLE": {
+        "label": "Auto-route calling AE title",
+        "group": "compression",
+        "type": "str",
+        "description": "The remote destination must accept this calling AE. Applies to the Smart Router's outbound C-STORE associations.",
+    },
+    "ROUTING_TIMING": {
+        "label": "Auto-route dispatch time",
+        "group": "compression",
+        "type": "select",
+        "options": ["immediate", "scheduled"],
+        "option_labels": {"immediate": "Dispatch when due", "scheduled": "Only in the routing window"},
+        "description": "Applies to the durable send queue, using the server's local time.",
+    },
+    "ROUTING_START_TIME": {
+        "label": "Routing window start",
+        "group": "compression",
+        "type": "str",
+        "input": "time",
+    },
+    "ROUTING_END_TIME": {
+        "label": "Routing window end",
+        "group": "compression",
+        "type": "str",
+        "input": "time",
     },
     "ROUTING_MAX_ATTEMPTS": {
         "label": "Router max attempts",
@@ -458,6 +580,8 @@ EDITABLE_KEYS: dict[str, dict[str, Any]] = {
 }
 
 GROUPS: dict[str, dict[str, str]] = {
+    "compression": {"label": "Compression", "description": "Store format, processing window, thumbnails, and background archive controls."},
+    "optical": {"label": "CD/DVD Burning", "description": "Use a blank writable disc in a recorder attached to the Windows server. PAXS verifies every written file."},
     "sys": {"label": "System", "description": "Identity, URLs and sharing defaults."},
     "dicom": {"label": "DICOM", "description": "DIMSE receiver, AE title, TLS and worklist defaults."},
     "interop": {"label": "Interop", "description": "HL7 MLLP (ADT · ORM · ORU) and FHIR R4 gateways."},
@@ -540,6 +664,11 @@ def is_overridden(key: str) -> bool:
 
 
 # ------------------------------------------------------------ mutations ----
+def _validate_new_setting(key: str, value: Any) -> None:
+    if EDITABLE_KEYS[key]["group"] in {"compression", "optical"}:
+        type(settings).model_validate({**settings.model_dump(), key: value})
+
+
 def set_override(key: str, value: Any) -> Any:
     """Persist a validated override and apply it to the runtime settings object.
 
@@ -549,6 +678,7 @@ def set_override(key: str, value: Any) -> Any:
         raise KeyError(f"unknown setting {key!r}")
     stored = _coerce(key, value)
     parsed = _parse(key, stored)
+    _validate_new_setting(key, parsed)
 
     with SyncSessionLocal() as session:
         row = _row(session, key)

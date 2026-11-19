@@ -6,7 +6,7 @@ __pycache__/
 paxs.db
 paxs.db-wal
 paxs.db-shm
-storage/
+/storage/
 test_storage/
 *.egg-info/
 .pytest_cache/

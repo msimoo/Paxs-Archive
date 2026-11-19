@@ -9,8 +9,9 @@ import { StudyDetailDrawer } from './StudyDetailDrawer';
 import { ShareModal } from './ShareModal';
 import { ForwardModal } from './ForwardModal';
 import { DeleteModal } from './DeleteModal';
+import { BurnStudyModal } from './BurnStudyModal';
 import { PaxsFooter } from '../common/PaxsFooter';
-import { appBasePath } from '@/lib/api';
+import { appBasePath, setPatientNameDisplay } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Upload, Calendar, Network, LayoutGrid, List, Eye, FileText, LogOut } from 'lucide-react';
 import type { Study } from '@/types/study';
@@ -48,6 +49,7 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
   const [shareOpen, setShareOpen] = useState(false);
   const [forwardOpen, setForwardOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [burnStudy, setBurnStudy] = useState<Study | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
 
@@ -59,7 +61,10 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
     fetch(`${appBasePath()}/api/v1/auth/me`, { headers, credentials: 'same-origin' })
       .then(res => res.ok ? res.json() : null)
       .then(data => {
-        if (data) setCurrentUser(data);
+        if (data) {
+          setPatientNameDisplay(data.patient_name_display);
+          setCurrentUser(data);
+        }
       })
       .catch(() => {});
   }, []);
@@ -82,7 +87,11 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
     setDrawerOpen(true);
   };
 
-  const handleActionClick = (action: 'share' | 'forward' | 'delete', study: Study) => {
+  const handleActionClick = (action: 'share' | 'forward' | 'delete' | 'burn', study: Study) => {
+    if (action === 'burn') {
+      setBurnStudy(study);
+      return;
+    }
     setSelectedStudy(study);
     if (action === 'share') setShareOpen(true);
     if (action === 'forward') setForwardOpen(true);
@@ -284,6 +293,7 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
         onToast={showToast}
       />
 
+      {burnStudy && <BurnStudyModal study={burnStudy} onClose={() => setBurnStudy(null)} />}
       <DeleteModal 
         study={selectedStudy} 
         isOpen={deleteOpen} 
