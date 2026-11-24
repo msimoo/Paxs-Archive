@@ -18,11 +18,44 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.core.config import settings
-from app.db.models import PrefetchJob, PrefetchRule, Study
+from app.db.models import Patient, PrefetchJob, PrefetchRule, ScheduledProcedureStep, Study
 from app.dicom import sender
-from app.services import audit_service
+from app.services import audit_service, query_service
 
 log = logging.getLogger("paxs.prefetch")
+
+
+async def _trigger_target_is_in_scope(
+    session: AsyncSession,
+    patient_id: str,
+    worklist_step_id: int | None,
+    tenant_id: int | None,
+    include_all: bool,
+) -> bool:
+    """Validate the P0.1 prefetch target before any remote C-FIND is sent."""
+    patient_stmt = select(Patient.id).where(Patient.patient_id == patient_id)
+    patient_stmt = query_service.apply_tenant_scope(
+        patient_stmt, Patient.tenant_id, tenant_id, include_all
+    )
+    patient_exists = (await session.execute(patient_stmt)).scalars().first()
+    if patient_exists is None:
+        return False
+
+    if worklist_step_id is None:
+        return True
+
+    step_stmt = (
+        select(ScheduledProcedureStep.id)
+        .join(Patient, ScheduledProcedureStep.patient_id == Patient.id)
+        .where(
+            ScheduledProcedureStep.id == worklist_step_id,
+            Patient.patient_id == patient_id,
+        )
+    )
+    step_stmt = query_service.apply_tenant_scope(
+        step_stmt, Patient.tenant_id, tenant_id, include_all
+    )
+    return (await session.execute(step_stmt)).scalars().first() is not None
 
 
 def query_remote_priors_sync(
@@ -51,8 +84,11 @@ def query_remote_priors_sync(
         our_ae_title=our_ae_title,
     )
     if not result.get("ok"):
-        log.warning("C-FIND query failed on remote node %s (%s)",
-                    ae_title, result.get("reason"))
+        log.warning(
+            "prefetch_remote_c_find_failed source_ae=%s reason_type=%s",
+            ae_title,
+            type(result.get("reason")).__name__,
+        )
         return []
 
     priors = []
@@ -106,13 +142,21 @@ async def evaluate_and_trigger_prefetch(
     worklist_step_id: int | None = None,
     modality: str | None = None,
     body_part: str | None = None,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
 ) -> list[PrefetchJob]:
     """Evaluate active prefetch rules and dispatch background C-MOVE requests for prior studies."""
+    if not await _trigger_target_is_in_scope(
+        session, patient_id, worklist_step_id, tenant_id, include_all
+    ):
+        return []
+
     # 1. Query active rules
     stmt = (
         select(PrefetchRule)
         .options(joinedload(PrefetchRule.source_node))
-        .where(PrefetchRule.enabled == True)  # noqa: E712
+        .where(PrefetchRule.enabled.is_(True))
         .order_by(PrefetchRule.priority.asc(), PrefetchRule.id.asc())
     )
     rules = (await session.execute(stmt)).scalars().unique().all()
@@ -120,11 +164,20 @@ async def evaluate_and_trigger_prefetch(
         return []
 
     # 2. Get local existing StudyInstanceUIDs for patient (avoid re-fetching)
-    from app.db.models import Patient
-    existing_uids_stmt = select(Study.study_instance_uid).join(Patient).where(Patient.patient_id == patient_id)
+    existing_uids_stmt = (
+        select(Study.study_instance_uid)
+        .join(Patient, Study.patient_id == Patient.id)
+        .where(Patient.patient_id == patient_id)
+    )
+    existing_uids_stmt = query_service.apply_study_tenant_scope(
+        existing_uids_stmt, tenant_id, include_all
+    )
     try:
         existing_uids = set((await session.execute(existing_uids_stmt)).scalars().all())
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - boundary guard: an empty set only means "re-fetch everything"
+        # Prefetching is an optimisation: on a lookup failure we would rather
+        # issue a redundant C-MOVE than skip a legitimate one.
+        log.debug("prefetch_existing_lookup_failed error_type=%s", type(exc).__name__)
         existing_uids = set()
 
     jobs = []
@@ -165,6 +218,8 @@ async def evaluate_and_trigger_prefetch(
         needed_priors = needed_priors[: rule.max_priors_count]
 
         job = PrefetchJob(
+            tenant_id=tenant_id,
+            is_archive_wide=include_all,
             patient_id=patient_id,
             worklist_step_id=worklist_step_id,
             source_node_id=rule.source_node.id,
@@ -197,6 +252,8 @@ async def evaluate_and_trigger_prefetch(
                         settings.DICOM_AE_TITLE,          # dest_ae_title (ourselves)
                         query=_study_move_query(st_uid),
                         our_ae_title=settings.DICOM_AE_TITLE,
+                        # B-16: verify the peer like every other SCU call.
+                        trust_cert=getattr(rule.source_node, "trust_cert", None),
                     ),
                 )
                 if isinstance(result, dict) and result.get("ok"):
@@ -204,11 +261,15 @@ async def evaluate_and_trigger_prefetch(
                 else:
                     reason = result.get("reason") if isinstance(result, dict) else result
                     log.warning(
-                        "C-MOVE prefetch did not succeed for study %s from %s: %s",
-                        st_uid, rule.source_node.ae_title, reason,
+                        "C-MOVE prefetch did not succeed for study %s from %s "
+                        "(reason_type=%s)",
+                        st_uid, rule.source_node.ae_title, type(reason).__name__,
                     )
             except Exception as exc:
-                log.warning("C-MOVE prefetch failed for study %s from %s: %s", st_uid, rule.source_node.ae_title, exc)
+                log.warning(
+                    "C-MOVE prefetch failed for study %s from %s (error_type=%s)",
+                    st_uid, rule.source_node.ae_title, type(exc).__name__,
+                )
 
         job.priors_retrieved = retrieved_count
         job.status = "COMPLETED" if retrieved_count > 0 or len(needed_priors) == 0 else "FAILED"
@@ -265,12 +326,24 @@ async def delete_rule(session: AsyncSession, rule_id: int) -> bool:
     return True
 
 
-async def list_jobs(session: AsyncSession, patient_id: str | None = None, limit: int = 100) -> list[PrefetchJob]:
+async def list_jobs(
+    session: AsyncSession,
+    patient_id: str | None = None,
+    limit: int = 100,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
+) -> list[PrefetchJob]:
     stmt = (
         select(PrefetchJob)
         .options(joinedload(PrefetchJob.source_node), joinedload(PrefetchJob.worklist_step))
     )
     if patient_id:
         stmt = stmt.where(PrefetchJob.patient_id == patient_id)
+    stmt = query_service.apply_tenant_scope(
+        stmt, PrefetchJob.tenant_id, tenant_id, include_all
+    )
+    if not include_all:
+        stmt = stmt.where(PrefetchJob.is_archive_wide.is_(False))
     stmt = stmt.order_by(PrefetchJob.id.desc()).limit(limit)
     return list((await session.execute(stmt)).scalars().unique().all())

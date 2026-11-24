@@ -4,6 +4,12 @@ Tenants are institutions/departments whose studies are isolated. Admins create
 tenants, map DICOM AE titles to them (so ingest + queries from that AE stay in
 the tenant) and assign users to them (REST/QIDO browsing scope). Everything
 unmapped/unassigned keeps the legacy unscoped scope.
+
+Q-3 / FA-2: this router defines the isolation boundary rather than being scoped
+by it, so every statement lives in :mod:`app.services.tenant_service` and the
+routes keep validation + HTTP status mapping. The surface is gated by
+``require_admin`` / ``require_destructive_role``, which is the boundary the AST
+guard pins for it.
 """
 
 from __future__ import annotations
@@ -12,13 +18,12 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import delete as sa_delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user, require_admin, require_destructive_role
-from app.db.models import Study, Tenant, TenantAeTitle, User
+from app.db.models import Tenant, User
 from app.db.session import get_db
-from app.services.tenant_service import invalidate_ae_cache
+from app.services import tenant_service
 
 router = APIRouter(prefix="/api/v1/tenants", tags=["vna"])
 
@@ -58,33 +63,21 @@ class UserAssignment(BaseModel):
 
 
 async def _tenant_or_404(db: AsyncSession, tenant_id: int) -> Tenant:
-    tenant = (
-        await db.execute(select(Tenant).where(Tenant.id == tenant_id))
-    ).scalar_one_or_none()
+    tenant = await tenant_service.get_tenant(db, tenant_id)
     if tenant is None:
         raise HTTPException(404, "Tenant not found")
     return tenant
 
 
 async def _serialize(db: AsyncSession, tenant: Tenant) -> dict:
-    ae_titles = (
-        await db.execute(
-            select(TenantAeTitle.ae_title).where(TenantAeTitle.tenant_id == tenant.id)
-        )
-    ).scalars().all()
-    study_count = (
-        await db.execute(
-            select(func.count(Study.id)).where(Study.tenant_id == tenant.id)
-        )
-    ).scalar_one()
     return {
         "id": tenant.id,
         "name": tenant.name,
         "code": tenant.code,
         "description": tenant.description,
         "is_active": tenant.is_active,
-        "ae_titles": list(ae_titles),
-        "study_count": study_count,
+        "ae_titles": await tenant_service.ae_titles_of(db, tenant.id),
+        "study_count": await tenant_service.study_count_of(db, tenant.id),
         "created_at": tenant.created_at.isoformat() if tenant.created_at else None,
     }
 
@@ -92,8 +85,7 @@ async def _serialize(db: AsyncSession, tenant: Tenant) -> dict:
 @router.get("")
 async def list_tenants(db: AsyncSession = Depends(get_db),
                        user: User = Depends(require_destructive_role)):
-    rows = (await db.execute(select(Tenant).order_by(Tenant.name))).scalars().all()
-    return [await _serialize(db, t) for t in rows]
+    return [await _serialize(db, t) for t in await tenant_service.list_tenants(db)]
 
 
 @router.post("", status_code=201)
@@ -103,24 +95,12 @@ async def create_tenant(body: TenantCreate, db: AsyncSession = Depends(get_db),
     code = body.code.strip().lower().replace(" ", "-")
     if not name or not code:
         raise HTTPException(422, "name and code are required")
-    exists = (
-        await db.execute(
-            select(Tenant.id).where(
-                (Tenant.name == name) | (Tenant.code == code)
-            )
-        )
-    ).scalar_one_or_none()
-    if exists is not None:
+    if await tenant_service.tenant_name_or_code_taken(db, name=name, code=code):
         raise HTTPException(409, "A tenant with that name or code already exists")
-    tenant = Tenant(
-        name=name, code=code,
+    tenant = await tenant_service.create_tenant(
+        db, name=name, code=code,
         description=body.description.strip() if body.description else None,
     )
-    db.add(tenant)
-    await db.flush()
-    # MySQL server-side defaults (created_at) are only loaded on explicit
-    # refresh — lazy-loading them on access would escape the greenlet.
-    await db.refresh(tenant)
     return await _serialize(db, tenant)
 
 
@@ -133,12 +113,9 @@ async def update_tenant(tenant_id: int, body: TenantUpdate,
         name = body.name.strip()
         if not name:
             raise HTTPException(422, "name cannot be empty")
-        clash = (
-            await db.execute(
-                select(Tenant.id).where(Tenant.name == name, Tenant.id != tenant.id)
-            )
-        ).scalar_one_or_none()
-        if clash is not None:
+        if await tenant_service.tenant_name_taken_by_other(
+            db, name=name, tenant_id=tenant.id
+        ):
             raise HTTPException(409, "Another tenant already uses that name")
         tenant.name = name
     if body.description is not None:
@@ -154,20 +131,7 @@ async def update_tenant(tenant_id: int, body: TenantUpdate,
 async def delete_tenant(tenant_id: int, db: AsyncSession = Depends(get_db),
                         user: User = Depends(require_admin)):
     tenant = await _tenant_or_404(db, tenant_id)
-    # Detach everything explicitly (SQLite does not enforce FK cascades without
-    # PRAGMA foreign_keys=ON): AE mappings go away, while studies and users are
-    # released back to the legacy unscoped scope (their data is preserved).
-    await db.execute(
-        sa_delete(TenantAeTitle).where(TenantAeTitle.tenant_id == tenant_id)
-    )
-    await db.execute(
-        update(Study).where(Study.tenant_id == tenant_id).values(tenant_id=None)
-    )
-    await db.execute(
-        update(User).where(User.tenant_id == tenant_id).values(tenant_id=None)
-    )
-    await db.delete(tenant)
-    invalidate_ae_cache()
+    await tenant_service.delete_tenant_cascade(db, tenant)
 
 
 @router.get("/{tenant_id}/aes")
@@ -176,11 +140,7 @@ async def list_ae_titles(tenant_id: int, db: AsyncSession = Depends(get_db),
     tenant = await _tenant_or_404(db, tenant_id)
     return {
         "tenant_id": tenant.id,
-        "ae_titles": (
-            await db.execute(
-                select(TenantAeTitle.ae_title).where(TenantAeTitle.tenant_id == tenant.id)
-            )
-        ).scalars().all(),
+        "ae_titles": await tenant_service.ae_titles_of(db, tenant.id),
     }
 
 
@@ -190,18 +150,14 @@ async def map_ae_title(tenant_id: int, body: AeMapping,
                        user: User = Depends(require_admin)):
     tenant = await _tenant_or_404(db, tenant_id)
     ae_title = normalize_ae_title(body.ae_title)
-    existing = (
-        await db.execute(select(TenantAeTitle).where(TenantAeTitle.ae_title == ae_title))
-    ).scalar_one_or_none()
+    existing = await tenant_service.ae_mapping_owner(db, ae_title)
     if existing is not None:
         if existing.tenant_id == tenant.id:
             raise HTTPException(409, f"{ae_title} is already mapped to this tenant")
         raise HTTPException(
             409, f"{ae_title} is already mapped to tenant {existing.tenant_id}"
         )
-    db.add(TenantAeTitle(tenant_id=tenant.id, ae_title=ae_title))
-    await db.flush()
-    invalidate_ae_cache()
+    await tenant_service.map_ae_title(db, tenant.id, ae_title)
     return {"tenant_id": tenant.id, "ae_title": ae_title}
 
 
@@ -210,18 +166,10 @@ async def unmap_ae_title(tenant_id: int, ae_title: str,
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(require_admin)):
     ae_title = normalize_ae_title(ae_title)
-    row = (
-        await db.execute(
-            select(TenantAeTitle).where(
-                TenantAeTitle.tenant_id == tenant_id,
-                TenantAeTitle.ae_title == ae_title,
-            )
-        )
-    ).scalar_one_or_none()
+    row = await tenant_service.get_ae_mapping(db, tenant_id, ae_title)
     if row is None:
         raise HTTPException(404, "AE title not mapped to this tenant")
-    await db.delete(row)
-    invalidate_ae_cache()
+    await tenant_service.unmap_ae_title(db, row)
 
 
 @router.post("/{tenant_id}/users", status_code=200)
@@ -230,13 +178,9 @@ async def assign_user(tenant_id: int, body: UserAssignment,
                       user: User = Depends(require_admin)):
     """Assign a user to this tenant — their REST/QIDO browsing becomes scoped."""
     tenant = await _tenant_or_404(db, tenant_id)
-    target = (
-        await db.execute(select(User).where(User.username == body.username.strip()))
-    ).scalar_one_or_none()
+    target = await tenant_service.assign_user(db, tenant, body.username.strip())
     if target is None:
         raise HTTPException(404, "User not found")
-    target.tenant_id = tenant.id
-    await db.flush()
     return {"username": target.username, "tenant_id": tenant.id, "tenant_name": tenant.name}
 
 
@@ -246,13 +190,8 @@ async def unassign_user(tenant_id: int, username: str,
                         user: User = Depends(require_admin)):
     """Remove a user's tenant assignment (back to the legacy unscoped scope)."""
     await _tenant_or_404(db, tenant_id)
-    target = (
-        await db.execute(select(User).where(User.username == username))
-    ).scalar_one_or_none()
-    if target is None or target.tenant_id != tenant_id:
+    if not await tenant_service.unassign_user(db, tenant_id, username):
         raise HTTPException(404, "User not assigned to this tenant")
-    target.tenant_id = None
-    await db.flush()
 
 
 @router.get("/context")
@@ -262,8 +201,9 @@ async def tenant_context(db: AsyncSession = Depends(get_db),
     if user.role == "ADMIN":
         return {"is_admin": True, "tenant_id": None, "tenant_name": None}
     tenant = (
-        await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
-    ).scalar_one_or_none() if user.tenant_id else None
+        await tenant_service.get_tenant(db, user.tenant_id)
+        if user.tenant_id else None
+    )
     return {
         "is_admin": False,
         "tenant_id": user.tenant_id,

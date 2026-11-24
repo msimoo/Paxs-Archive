@@ -51,9 +51,12 @@ define('PAXS_VENDOR_PRIVATE_KEY_FILE', '/etc/paxs/vendor_private.pem');
 // define('PORTAL_SECRET_KEY', 'a-long-random-value');
 
 // ---------------------------------------------------------------------------
-// DO NOT change the licence AES salt here.
+// 5. Licence AES salt  (REQUIRED — B-2 / FS-7)
 // ---------------------------------------------------------------------------
-// It is shared with app/core/licensing/crypto.py and changing it makes every
-// previously issued .lic container undecryptable. Any change is a licence
-// migration, not a routine edit.
-// define('PAXS_LIC_AES_SALT', 'PAXS_ARCHIVE_LIC_SEC_2026_AES25');
+// Shared with app/core/licensing/crypto.py (PAXS_LICENSE_AES_KEY) and read by
+// config.php as either this constant or the PAXS_LIC_AES_SALT environment
+// variable. There is no default any more: the old literal is public in git
+// history. Generate one with:
+//   python -c "import secrets; print(secrets.token_urlsafe(32))"
+// define('PAXS_LIC_AES_SALT', '<a-long-random-value>');
+

@@ -7,17 +7,21 @@ does not duplicate rows (SOP/Study/Series UIDs are unique).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import select
+from pydicom.dataset import Dataset
+from sqlalchemy import literal, select, union_all
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import dicom_uids
 from app.core.config import settings
 from app.db.models import (
     AssigningAuthority,
@@ -30,23 +34,202 @@ from app.db.models import (
     Series,
     Study,
 )
-from app.services import storage_service, worklist_service
+from app.services import content_version, query_service, storage_service, worklist_service
+from app.services.dicomweb_service import dataset_to_json_text
 
 log = logging.getLogger("paxs.indexing")
 
 # GSPS SOP Class UID — Grayscale Softcopy Presentation State
 _GSPS_SOP_CLASS_UID = "1.2.840.10008.5.1.4.1.1.11.1"
 
+# DICOM keyword -> tag, for the mandatory Type 1 UIDs (A-17).
+_UID_TAG = dict(dicom_uids.MANDATORY_UIDS)
+
+
+def _require_uid(meta: dict, meta_key: str, keyword: str) -> str:
+    """Return a mandatory Type 1 UID from ``meta``, or raise (A-17).
+
+    Defence in depth behind the ingest boundary, which already refused such a
+    dataset. Reaching here means a caller bypassed that check, so raising is the
+    correct outcome: the previous behaviour filed every UID-less instance under
+    the literal ``"UNKNOWN"``, silently merging unrelated examinations into one
+    study bucket.
+    """
+    return dicom_uids.check_uid(meta.get(meta_key), keyword, _UID_TAG[keyword])
+
 
 class CrossTenantIngestError(ValueError):
-    """An instance tried to join a study owned by a different tenant (C04).
+    """An instance tried to join or replace another tenant's study data (C04/A-9).
 
-    Raised instead of silently appending: ingest turns it into a 400 (STOW-RS)
-    or a Processing Failure (C-STORE), matching the C05 hard-reject behaviour.
+    Raised instead of silently appending or re-pointing: ingest turns it into a
+    **409 Conflict** (STOW-RS) or a Processing Failure (C-STORE), matching the
+    C05 hard-reject behaviour. 409 rather than 400 because the request is
+    well-formed — it conflicts with existing state the caller does not own.
     """
 
 
-def _int(value) -> int | None:
+def tenant_conflict(writer_tenant: int | None, owner_tenant: int | None) -> bool:
+    """True when a tenant-scoped writer may not touch a row owned by ``owner_tenant``.
+
+    The single expression of the C04/A-9 rule, shared by the study, series and
+    instance checks so the three can never drift apart (the FA-1 lesson).
+
+    Deliberately narrow: a *legacy* writer (``writer_tenant is None``) is the
+    pre-VNA unscoped scope and keeps its existing behaviour, and a legacy row
+    (``owner_tenant is None``) stays adoptable — that is the documented
+    migration path for data ingested before tenants existed. What is refused is
+    one tenant reaching into another tenant's row.
+    """
+    return (
+        writer_tenant is not None
+        and owner_tenant is not None
+        and owner_tenant != writer_tenant
+    )
+
+
+def _ingest_owner_matches_scope(owner: Any, writer_tenant: int | None) -> bool:
+    """Require an existing Study and its Patient to share the writer's scope.
+
+    Ingest is stricter than reads: a tenantless source may write only legacy
+    NULL-owned rows, and a tenant source may not adopt an unassigned row.
+    """
+    return bool(
+        owner is not None
+        and owner.patient_id is not None
+        and owner.tenant_id == writer_tenant
+        and owner.patient_tenant_id == writer_tenant
+    )
+
+
+async def assert_tenant_owns_ingest_target(
+    session: AsyncSession, meta: dict, tenant_id: int | None = None,
+    include_all: bool = False,
+) -> None:
+    """A-9: refuse to append to, or re-point, another tenant's study data.
+
+    ``_reject_cross_tenant_ingest`` only compared the *study* tenant, so a
+    replayed ``SeriesInstanceUID``/``SOPInstanceUID`` slipped through and
+    ``upsert_instance`` re-pointed the existing row's ``file_path`` at the
+    caller's object — one institution's images replaced by another's. All three
+    levels are checked here, on the UIDs that identify them globally:
+
+    * study   — C04: do not append into another tenant's study;
+    * series  — do not attach instances to another tenant's series;
+    * instance— do not adopt/re-point another tenant's SOP instance.
+
+    Read-only: nothing is created, moved or mutated. Raises
+    :class:`CrossTenantIngestError` so callers can map it to 409 (STOW-RS) or a
+    DIMSE failure (C-STORE).
+    """
+    if include_all:
+        return
+
+    study_uid = str(meta.get("study_instance_uid") or "")
+    series_uid = str(meta.get("series_instance_uid") or "")
+    sop_uid = str(meta.get("sop_instance_uid") or "")
+
+    # Combine Study / Series / Instance ownership checks into a single SQL
+    # round-trip (eliminating 2 extra queries per incoming DICOM slice while
+    # preserving exact deterministic study -> series -> instance priority).
+    branches = []
+    if study_uid:
+        branches.append(
+            select(
+                literal("study").label("level"),
+                Study.id.label("id"),
+                Study.tenant_id.label("tenant_id"),
+                Patient.id.label("patient_id"),
+                Patient.tenant_id.label("patient_tenant_id"),
+            )
+            .outerjoin(Patient, Patient.id == Study.patient_id)
+            .where(Study.study_instance_uid == study_uid)
+        )
+    if series_uid:
+        branches.append(
+            select(
+                literal("series").label("level"),
+                Study.id.label("id"),
+                Study.tenant_id.label("tenant_id"),
+                Patient.id.label("patient_id"),
+                Patient.tenant_id.label("patient_tenant_id"),
+            )
+            .join(Series, Series.study_id == Study.id)
+            .outerjoin(Patient, Patient.id == Study.patient_id)
+            .where(Series.series_instance_uid == series_uid)
+        )
+    if sop_uid:
+        branches.append(
+            select(
+                literal("instance").label("level"),
+                Study.id.label("id"),
+                Study.tenant_id.label("tenant_id"),
+                Patient.id.label("patient_id"),
+                Patient.tenant_id.label("patient_tenant_id"),
+            )
+            .join(Series, Series.study_id == Study.id)
+            .join(Instance, Instance.series_id == Series.id)
+            .outerjoin(Patient, Patient.id == Study.patient_id)
+            .where(Instance.sop_instance_uid == sop_uid)
+        )
+    if not branches:
+        return
+
+    stmt = branches[0] if len(branches) == 1 else union_all(*branches)
+    rows_by_level = {row.level: row for row in (await session.execute(stmt)).all()}
+
+    if "study" in rows_by_level and not _ingest_owner_matches_scope(rows_by_level["study"], tenant_id):
+        raise CrossTenantIngestError(
+            f"study {study_uid} is outside the source tenant scope; refusing to append"
+        )
+    if "series" in rows_by_level and not _ingest_owner_matches_scope(rows_by_level["series"], tenant_id):
+        raise CrossTenantIngestError(
+            f"series {series_uid} is outside the source tenant scope; refusing to write"
+        )
+    if "instance" in rows_by_level and not _ingest_owner_matches_scope(rows_by_level["instance"], tenant_id):
+        raise CrossTenantIngestError(
+            f"instance {sop_uid} is outside the source tenant scope; refusing to replace"
+        )
+
+
+def _staged_size(read_path: str) -> int | None:
+    """Bytes of the staged object, or ``None`` when it is absent/unreadable."""
+    try:
+        return os.path.getsize(read_path)
+    except OSError:
+        return None
+
+
+async def _resolve_instance_size(
+    file_path: str,
+    file_size_bytes: int | None,
+    read_path: str | None,
+    storage_backend: str | None,
+) -> int:
+    """Bytes for the instance row: caller-measured, staged file, or canonical object.
+
+    H09: while the object is still staged the canonical key has no bytes yet, so
+    the staged file is the only accurate measure. N-4: both filesystem calls run
+    on a worker thread — ingest is async and must not block the loop while a
+    modality is streaming.
+
+    Returns 0 (the documented "size unknown" sentinel) when every source fails;
+    a genuinely unreachable backend must not look like a 0-byte object in the
+    audit trail, so the failure is logged first.
+    """
+    if file_size_bytes is not None:
+        return int(file_size_bytes)
+    if read_path:
+        staged = await asyncio.to_thread(_staged_size, read_path)
+        if staged is not None:
+            return staged
+    try:
+        return storage_service.size(file_path, backend_name=storage_backend)
+    except OSError as exc:  # size is metadata; indexing must proceed
+        log.debug("index_object_size_unavailable error_type=%s", type(exc).__name__)
+        return 0
+
+
+def _int(value: object) -> int | None:
     try:
         return int(str(value))
     except (TypeError, ValueError):
@@ -106,16 +289,21 @@ async def _ensure_authority(session: AsyncSession, oid: str) -> AssigningAuthori
     return authority
 
 
-def _tenant_filter(column, tenant_id: int | None):
-    """Match a tenant, treating NULL as the legacy/unscoped bucket."""
-    return column.is_(None) if tenant_id is None else column == tenant_id
-
-
 async def resolve_patient_identity(
     session: AsyncSession,
     meta: dict,
     tenant_id: int | None = None,
     source: str | None = None,
+) -> PatientResolution:
+    """Resolve patient identity (races are settled by the savepoint retry below)."""
+    return await _resolve_patient_identity_transaction(session, meta, tenant_id, source)
+
+
+async def _resolve_patient_identity_transaction(
+    session: AsyncSession,
+    meta: dict,
+    tenant_id: int | None,
+    source: str | None,
 ) -> PatientResolution:
     """Resolve (tenant, assigning authority, patient id) to a Patient row.
 
@@ -140,21 +328,27 @@ async def resolve_patient_identity(
     authority = await _ensure_authority(session, authority_oid)
 
     # 1) Known identity for this (tenant, authority, identifier)?
-    identity = (
+    identity_patient = (
         await session.execute(
-            select(PatientIdentity)
+            select(PatientIdentity, Patient)
             .join(Patient, PatientIdentity.patient_id == Patient.id)
             .where(
-                _tenant_filter(PatientIdentity.tenant_id, tenant_id),
+                query_service.tenant_predicate(PatientIdentity.tenant_id, tenant_id),
                 PatientIdentity.assigning_authority_id == authority.id,
                 PatientIdentity.identifier == identifier,
             )
         )
-    ).scalar_one_or_none()
+    ).first()
+    identity: PatientIdentity | None = identity_patient[0] if identity_patient else None
+    patient: Patient | None = identity_patient[1] if identity_patient else None
+    if patient is not None and patient.tenant_id != tenant_id:
+        # The identity's direct owner is not authoritative when its linked
+        # Patient disagrees. Reject the corrupted mapping instead of adopting
+        # or mutating another tenant's patient row.
+        raise ValueError("Patient identity ownership does not match tenant")
+
     if identity is not None:
-        patient = (
-            await session.execute(select(Patient).where(Patient.id == identity.patient_id))
-        ).scalar_one()
+        assert patient is not None
     else:
         # 2) Legacy patient row for this tenant that has *no* identity yet?
         #
@@ -166,7 +360,7 @@ async def resolve_patient_identity(
         patient = (
             await session.execute(
                 select(Patient).where(
-                    _tenant_filter(Patient.tenant_id, tenant_id),
+                    query_service.tenant_predicate(Patient.tenant_id, tenant_id),
                     Patient.patient_id == identifier,
                     ~Patient.identities.any(),
                 )
@@ -195,7 +389,7 @@ async def resolve_patient_identity(
                 patient = (
                     await session.execute(
                         select(Patient).where(
-                            _tenant_filter(Patient.tenant_id, tenant_id),
+                            query_service.tenant_predicate(Patient.tenant_id, tenant_id),
                             Patient.patient_id == identifier,
                         )
                     )
@@ -291,7 +485,7 @@ async def get_or_create_study(session: AsyncSession, meta: dict, patient: Patien
                               tenant_id: int | None = None) -> Study:
     """Upsert a study. `tenant_id` (VNA) is applied on first creation only —
     re-imported slices join the tenant of the study's first writer."""
-    study_uid = meta.get("study_instance_uid") or "UNKNOWN"
+    study_uid = _require_uid(meta, "study_instance_uid", "StudyInstanceUID")
     study = (
         await session.execute(select(Study).where(Study.study_instance_uid == study_uid))
     ).scalar_one_or_none()
@@ -318,8 +512,8 @@ async def get_or_create_study(session: AsyncSession, meta: dict, patient: Patien
             await session.flush()
         # First instance of a brand-new study -> notify external systems
         # (webhooks + custom server scripts).
-        from app.services.webhook_service import fire as webhook_fire
         from app.services.scripting_service import fire as script_fire
+        from app.services.webhook_service import fire as webhook_fire
 
         webhook_fire(
             "StudyReceived",
@@ -337,27 +531,20 @@ async def get_or_create_study(session: AsyncSession, meta: dict, patient: Patien
             accession_number=meta.get("accession_number"),
             study_description=meta.get("study_description"),
         )
-        # First instance of a brand-new study -> evaluate auto-routing rules.
-        try:
+        if settings.ROUTING_QUEUE_ENABLED:
+            # Evaluate on this transaction: a second session cannot see the new
+            # uncommitted study and would silently omit its durable routing job.
             from app.services import routing_service
 
-            await routing_service.evaluate_and_route_study(study_uid, meta)
-        except Exception:
-            import logging
-
-            logging.getLogger("paxs.indexing").warning(
-                "Auto-routing evaluation failed for %s", study_uid, exc_info=True
+            await routing_service.evaluate_and_route_study(
+                study_uid, meta, tenant_id=tenant_id, session=session
             )
     else:
         # C04: an instance must not *join* a study owned by another tenant. The
         # tenant is applied on first creation only, so without this check a
         # tenant-A writer would silently append data to a tenant-B study (and
         # the file would land in tenant B's study directory).
-        if (
-            tenant_id is not None
-            and study.tenant_id is not None
-            and study.tenant_id != tenant_id
-        ):
+        if tenant_conflict(tenant_id, study.tenant_id):
             raise CrossTenantIngestError(
                 f"study {study_uid} belongs to another tenant; refusing to append to it"
             )
@@ -368,7 +555,7 @@ async def get_or_create_study(session: AsyncSession, meta: dict, patient: Patien
 
 
 async def get_or_create_series(session: AsyncSession, meta: dict, study: Study) -> Series:
-    series_uid = meta.get("series_instance_uid") or "UNKNOWN"
+    series_uid = _require_uid(meta, "series_instance_uid", "SeriesInstanceUID")
     series = (
         await session.execute(select(Series).where(Series.series_instance_uid == series_uid))
     ).scalar_one_or_none()
@@ -397,8 +584,25 @@ async def get_or_create_series(session: AsyncSession, meta: dict, study: Study) 
 
 async def upsert_instance(session: AsyncSession, series: Series, meta: dict,
                           file_path: str, file_size: int,
-                          storage_backend: str | None = None) -> Instance:
-    sop_uid = meta.get("sop_instance_uid") or "UNKNOWN"
+                          storage_backend: str | None = None,
+                          tenant_id: int | None = None,
+                          metadata_json: str | None = None) -> Instance:
+    """Create the instance row, or refresh an existing one's stored location.
+
+    A-9: the refresh path is a *mutation* of an existing row, so it re-checks
+    ownership at the point of mutation — `assert_tenant_owns_ingest_target` has
+    already run by here, and this second check is what makes "never re-point
+    another tenant's file_path" true even if a caller reaches this function
+    directly. `tenant_id=None` keeps the previous behaviour for the legacy scope.
+
+    ``metadata_json`` is the WADO-RS view of the object, produced by the caller
+    while it already had the dataset open. A re-sent instance *replaces* the
+    object, so it replaces the cached metadata too — a stale copy here would
+    describe a different file (and, after a transfer-syntax change, make the
+    viewer pick the wrong decoder). ``None`` leaves an existing value alone only
+    when nothing was re-read, so callers that did read pass the fresh text.
+    """
+    sop_uid = _require_uid(meta, "sop_instance_uid", "SOPInstanceUID")
     instance = (
         await session.execute(select(Instance).where(Instance.sop_instance_uid == sop_uid))
     ).scalar_one_or_none()
@@ -417,15 +621,38 @@ async def upsert_instance(session: AsyncSession, series: Series, meta: dict,
             bits_allocated=_int(meta.get("bits_allocated")),
             photometric_interpretation=meta.get("photometric_interpretation"),
             slice_thickness=meta.get("slice_thickness"),
+            metadata_json=metadata_json,
         )
         session.add(instance)
         await session.flush()
+        # H-07: remembered (not persisted) so a post-commit promote failure
+        # knows it may delete this row rather than one that pre-existed.
+        instance._paxs_ingest_created = True
     else:
+        if tenant_id is not None:
+            # The instance's owner is the tenant of the study it sits in.
+            owner = (
+                await session.execute(
+                    select(Study.tenant_id)
+                    .join(Series, Series.study_id == Study.id)
+                    .where(Series.id == instance.series_id)
+                )
+            ).scalar_one_or_none()
+            if tenant_conflict(tenant_id, owner):
+                raise CrossTenantIngestError(
+                    f"instance {sop_uid} belongs to another tenant; "
+                    "refusing to replace its stored object"
+                )
         instance.file_path = file_path
         instance.file_size_bytes = file_size
         instance.storage_backend = storage_backend
+        # C-04: a re-sent/corrected object replaces the bytes behind this SOP
+        # UID; advance its version so no cached representation outlives it.
+        content_version.bump(instance)
         if meta.get("transfer_syntax_uid"):
             instance.transfer_syntax_uid = meta["transfer_syntax_uid"]
+        if metadata_json is not None:
+            instance.metadata_json = metadata_json
         await session.flush()
     return instance
 
@@ -437,13 +664,35 @@ async def index_new_instance(session: AsyncSession, meta: dict,
                              storage_backend: str | None = None,
                              read_path: str | None = None,
                              ds: Dataset | None = None,
-                             file_size_bytes: int | None = None) -> Instance:
+                             file_size_bytes: int | None = None,
+                             include_all: bool = False) -> Instance:
     """Full pipeline for one incoming instance (called by C-STORE and STOW-RS).
 
     `tenant_id` (VNA) is the owning tenant; callers resolve it from the source
     AE title (C-STORE) or the authenticated user (STOW-RS).
     `storage_backend` (multi-storage) is the named backend the object was
-    written to; None = the environment default backend."""
+    written to; None = the environment default backend.
+
+    Raises:
+        CrossTenantIngestError: when any of the incoming UIDs already belongs to
+            another tenant (A-9) — checked before anything is written, so a
+            refused ingest leaves no row and no object behind.
+    """
+    # The WADO-RS view of this object, produced now because the dataset is
+    # already parsed here. Doing it on the request path instead costs 13 ms per
+    # instance every time a viewer opens the study (82 s for a 4k-instance
+    # study, measured) — ingest pays it once, off the event loop.
+    metadata_json = (
+        await asyncio.to_thread(dataset_to_json_text, ds) if ds is not None else None
+    )
+
+    # A-9: the authoritative ownership check for *both* ingest paths (STOW-RS and
+    # C-STORE). The STOW router also calls this before staging so a refused
+    # upload never touches disk; this call is what makes the guarantee hold for
+    # every other caller too.
+    await assert_tenant_owns_ingest_target(
+        session, meta, tenant_id, include_all=include_all
+    )
     # C10: identity is scoped to the ingest's tenant, not the whole install.
     patient = await get_or_create_patient(
         session, meta, tenant_id=tenant_id, source=performed_by
@@ -458,18 +707,12 @@ async def index_new_instance(session: AsyncSession, meta: dict,
     # H09: the object is still staged, so the canonical key has no bytes yet.
     # Prefer the size the caller already measured while staging; then the staged
     # file itself; only then the canonical object (non-staged callers).
-    size = 0
-    if file_size_bytes is not None:
-        size = int(file_size_bytes)
-    elif read_path and os.path.exists(str(read_path)):
-        size = os.path.getsize(str(read_path))
-    else:
-        try:
-            size = storage_service.size(file_path, backend_name=storage_backend)
-        except Exception:
-            size = 0
+    size = await _resolve_instance_size(
+        file_path, file_size_bytes, read_path, storage_backend
+    )
     instance = await upsert_instance(
-        session, series, meta, file_path, size, storage_backend=storage_backend
+        session, series, meta, file_path, size, storage_backend=storage_backend,
+        tenant_id=tenant_id, metadata_json=metadata_json,
     )
 
     # Audit trail: STORED with SHA-256 fingerprint (tamper detection).
@@ -483,23 +726,11 @@ async def index_new_instance(session: AsyncSession, meta: dict,
         )
     )
 
-    # DR replication: if this study was already replicated off-site, a new
-    # object arriving now (late series, post-processing, re-routed slices)
-    # must re-trigger the sweep — otherwise the replica would silently drift.
-    # One indexed lookup only when the feature is enabled.
+    # Invalidate the current copy even if replication is already in progress.
     if settings.DR_REPLICATION_ENABLED:
-        from app.db.models import ReplicationRecord
+        from app.services.replication_service import mark_study_dirty
 
-        rec = (
-            await session.execute(
-                select(ReplicationRecord).where(
-                    ReplicationRecord.study_instance_uid == study.study_instance_uid,
-                    ReplicationRecord.status == "REPLICATED",
-                )
-            )
-        ).scalar_one_or_none()
-        if rec is not None:
-            rec.status = "PENDING"
+        await mark_study_dirty(session, study.study_instance_uid)
 
     from app.services.compression_service import SOURCE_METHOD, THUMBNAIL_METHOD, normalize_method
 
@@ -532,11 +763,8 @@ async def index_new_instance(session: AsyncSession, meta: dict,
             # `file_path` is what gets *recorded*, so it must be the canonical
             # key — the staged path is gone once the object is published.
             await index_presentation_state(session, meta, gsps_ds, file_path)
-        except Exception:
-            import logging
-            logging.getLogger("paxs.indexing").warning(
-                "GSPS indexing failed for %s", meta.get("sop_instance_uid"), exc_info=True
-            )
+        except Exception as exc:  # optional GSPS indexing must not fail ingest
+            log.warning("gsps_indexing_failed error_type=%s", type(exc).__name__)
 
     # KIN (Key Object Selection): index key image note metadata.
     if meta.get("sop_class_uid") == "1.2.840.10008.5.1.4.1.1.88.22" or meta.get("modality") == "KO":
@@ -547,11 +775,8 @@ async def index_new_instance(session: AsyncSession, meta: dict,
                 read_path or file_path, stop_before_pixels=True, backend_name=storage_backend
             )
             await index_key_image_note(session, meta, kin_ds, file_path)
-        except Exception:
-            import logging
-            logging.getLogger("paxs.indexing").warning(
-                "KIN indexing failed for %s", meta.get("sop_instance_uid"), exc_info=True
-            )
+        except Exception as exc:  # optional KIN indexing must not fail ingest
+            log.warning("kin_indexing_failed error_type=%s", type(exc).__name__)
 
     # RDSR (Radiation Dose Structured Report): index radiation dose exposure metrics.
     if meta.get("sop_class_uid") == "1.2.840.10008.5.1.4.1.1.88.67":
@@ -562,14 +787,60 @@ async def index_new_instance(session: AsyncSession, meta: dict,
                 read_path or file_path, stop_before_pixels=True, backend_name=storage_backend
             )
             await index_dose_report(session, meta, dose_ds, file_path)
-        except Exception:
-            import logging
-            logging.getLogger("paxs.indexing").warning(
-                "RDSR indexing failed for %s", meta.get("sop_instance_uid"), exc_info=True
-            )
+        except Exception as exc:  # optional dose indexing must not fail ingest
+            log.warning("rdsr_indexing_failed error_type=%s", type(exc).__name__)
 
     await session.flush()
     return instance
+
+
+def instance_was_created(instance: Instance | None) -> bool:
+    """True when this ingest *inserted* the row (H-07), False when it replaced one."""
+    return bool(getattr(instance, "_paxs_ingest_created", False))
+
+
+async def compensate_unpublished_instance(session: AsyncSession, sop_instance_uid: str,
+                                          *, created: bool,
+                                          performed_by: str) -> bool:
+    """Undo a committed index whose object never reached its canonical key (H-07).
+
+    Ingest commits the row, then promotes the staged object. When the promote
+    fails the row points at a key with no bytes: QIDO lists it, WADO 404s. A row
+    this ingest *created* is deleted (with its queued compression jobs, deleted
+    explicitly because SQLite does not enforce the cascade by default). A row
+    that pre-existed is left alone — the previous object is still at the key
+    and deleting it would destroy a good instance. Either way an audit row
+    records the failure. Commits its own transaction; returns True when a row
+    was removed. Rejected alternative: an ``availability`` column — it needs a
+    migration and every read path would have to learn to filter on it.
+    """
+    from sqlalchemy import delete
+
+    removed = False
+    instance = (
+        await session.execute(
+            select(Instance).where(Instance.sop_instance_uid == sop_instance_uid)
+        )
+    ).scalar_one_or_none()
+    if created and instance is not None:
+        await session.execute(
+            delete(CompressionJob).where(CompressionJob.instance_id == instance.id)
+        )
+        await session.delete(instance)
+        removed = True
+    session.add(
+        AuditLog(
+            sop_instance_uid=sop_instance_uid,
+            action="STORE_PUBLISH_FAILED",
+            performed_by=performed_by,
+        )
+    )
+    await session.commit()
+    log.error(
+        "ingest_publish_failed_compensated sop_instance_uid=%s row_removed=%s",
+        sop_instance_uid, removed,
+    )
+    return removed
 
 
 def utcnow() -> datetime:

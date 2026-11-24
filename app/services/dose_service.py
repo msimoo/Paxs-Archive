@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import RadiationDoseReport
-from app.services import audit_service
+from app.services import audit_service, query_service
 
 log = logging.getLogger("paxs.dose")
 
@@ -107,12 +107,15 @@ async def index_dose_report(
 
     content = parse_rdsr(ds)
     patient_id = meta.get("patient_id") or str(getattr(ds, "PatientID", "UNKNOWN"))
+    study_uid = meta.get("study_instance_uid") or ""
 
     existing = (
         await session.execute(
             select(RadiationDoseReport).where(RadiationDoseReport.sop_instance_uid == sop_uid)
         )
     ).scalar_one_or_none()
+    if existing is not None and existing.study_instance_uid != study_uid:
+        raise ValueError("RDSR SOP UID belongs to another study")
 
     payload_json = json.dumps(
         {
@@ -135,7 +138,7 @@ async def index_dose_report(
 
     rdsr = RadiationDoseReport(
         sop_instance_uid=sop_uid,
-        study_instance_uid=meta.get("study_instance_uid") or "",
+        study_instance_uid=study_uid,
         series_instance_uid=meta.get("series_instance_uid") or "",
         patient_id=patient_id,
         modality=content.modality,
@@ -164,27 +167,65 @@ async def index_dose_report(
 
 
 async def get_dose_for_study(
-    session: AsyncSession, study_instance_uid: str
+    session: AsyncSession,
+    study_instance_uid: str,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
 ) -> list[RadiationDoseReport]:
-    """Get all radiation dose reports for a study."""
-    stmt = (
-        select(RadiationDoseReport)
-        .where(RadiationDoseReport.study_instance_uid == study_instance_uid)
-        .order_by(RadiationDoseReport.id.desc())
-    )
+    """Get all radiation dose reports for a study (B-9: tenant-scoped).
+
+    ``radiation_dose_reports`` carries no tenant column, so the predicate is
+    applied to the joined study; another institution's dose reports are not
+    returned and the router turns that into 404.
+    """
+    stmt = query_service.dose_report_query(
+        study_uid=study_instance_uid, tenant_id=tenant_id, include_all=include_all
+    ).order_by(RadiationDoseReport.id.desc())
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def get_dose_report_by_sop(
+    session: AsyncSession,
+    sop_instance_uid: str,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
+) -> RadiationDoseReport | None:
+    """One RDSR by its own SOPInstanceUID, or None (B-9 scoped).
+
+    None covers both "no such report" and "another tenant's report" — the router
+    must not distinguish them, since a 403 would confirm the object exists.
+    """
+    stmt = query_service.dose_report_query(
+        sop_uid=sop_instance_uid, tenant_id=tenant_id, include_all=include_all
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def get_patient_cumulative_dose(
-    session: AsyncSession, patient_id: str
+    session: AsyncSession,
+    patient_id: str,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
 ) -> dict[str, Any]:
-    """Calculate cumulative lifetime radiation dose metrics for a patient across all studies."""
-    stmt = select(
-        func.count(RadiationDoseReport.id),
-        func.sum(RadiationDoseReport.total_dlp_mgy_cm),
-        func.sum(RadiationDoseReport.total_ctdivol_mgy),
-        func.sum(RadiationDoseReport.total_dose_rp_mgy),
-        func.sum(RadiationDoseReport.irradiation_events_count),
+    """Cumulative lifetime radiation dose metrics for a patient (B-9: scoped).
+
+    Patient identifiers are unique per tenant, not globally (A-8), so the
+    aggregate is only meaningful — and only safe — within the caller's tenant.
+    A foreign patient simply has no reports in scope, which reports as zeros.
+    """
+    stmt = query_service.dose_aggregate_query(
+        [
+            func.count(RadiationDoseReport.id),
+            func.sum(RadiationDoseReport.total_dlp_mgy_cm),
+            func.sum(RadiationDoseReport.total_ctdivol_mgy),
+            func.sum(RadiationDoseReport.total_dose_rp_mgy),
+            func.sum(RadiationDoseReport.irradiation_events_count),
+        ],
+        tenant_id=tenant_id,
+        include_all=include_all,
     ).where(RadiationDoseReport.patient_id == patient_id)
 
     res = (await session.execute(stmt)).one()
@@ -201,13 +242,26 @@ async def get_patient_cumulative_dose(
     }
 
 
-async def get_dose_analytics(session: AsyncSession) -> dict[str, Any]:
-    """Get global radiation dose analytics across PAXS archive."""
-    stmt = select(
-        func.count(RadiationDoseReport.id),
-        func.avg(RadiationDoseReport.total_dlp_mgy_cm),
-        func.max(RadiationDoseReport.total_dlp_mgy_cm),
-        func.avg(RadiationDoseReport.total_ctdivol_mgy),
+async def get_dose_analytics(
+    session: AsyncSession,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
+) -> dict[str, Any]:
+    """Radiation dose analytics across the caller's scope (B-9).
+
+    Archive-wide for an ADMIN (``include_all``); otherwise the caller's tenant
+    only, so one institution's dose profile is not disclosed to another.
+    """
+    stmt = query_service.dose_aggregate_query(
+        [
+            func.count(RadiationDoseReport.id),
+            func.avg(RadiationDoseReport.total_dlp_mgy_cm),
+            func.max(RadiationDoseReport.total_dlp_mgy_cm),
+            func.avg(RadiationDoseReport.total_ctdivol_mgy),
+        ],
+        tenant_id=tenant_id,
+        include_all=include_all,
     )
     res = (await session.execute(stmt)).one()
 

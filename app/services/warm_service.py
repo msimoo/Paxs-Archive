@@ -2,7 +2,8 @@
 
 When a study is opened in the viewer (QIDO-RS with a specific
 ``StudyInstanceUID``, or a WADO-RS study-metadata fetch), ``schedule_warm``
-kicks a short-lived daemon thread that:
+enqueues a short warm pass on the shared **bounded** background pool
+(:mod:`app.core.concurrency`, C-4) that:
 
 1. pre-generates any missing 192px PNG thumbnails (``.thumbnails/{sop}.png``)
    so study-list / series thumbnail requests hit the pre-generated fast path,
@@ -14,13 +15,16 @@ kicks a short-lived daemon thread that:
    server-side decode.
 
 Everything is best-effort: missing files, decode failures, or an unreachable
-Redis are logged and skipped — the warm thread never raises and never delays
-the HTTP response that triggered it. Dedup (a Redis lock + in-process set)
-prevents concurrent or rapid re-warms of the same study.
+Redis are logged and skipped — the warm task never raises and never delays the
+HTTP response that triggered it. Dedup (a Redis lock + in-process set) prevents
+concurrent or rapid re-warms of the same study, and the pool's backlog cap is
+the second line of defence: when a burst of opens saturates the pool the
+duplicate warm is **dropped** rather than queued without bound (C-4).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -28,6 +32,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from app.core.concurrency import run_blocking, submit_background
 from app.core.config import settings
 from app.db.models import Instance, Series, Study
 from app.db.session import SyncSessionLocal
@@ -48,11 +53,12 @@ _WARM_LOCK_TTL = 120
 # Public API
 # --------------------------------------------------------------------------- #
 def schedule_warm(study_uid: str) -> bool:
-    """Start a background warm pass for ``study_uid`` (deduped).
+    """Enqueue a background warm pass for ``study_uid`` (deduped, bounded).
 
-    Returns True when a warm pass was scheduled (or is already running for
-    this study — which counts as "taken care of"), False when warm-on-open is
-    disabled or the study UID is empty. Never blocks.
+    Returns True when a warm pass was accepted (or is already running for this
+    study — which counts as "taken care of"), False when warm-on-open is
+    disabled, the study UID is empty, or the background pool is saturated and
+    the task was dropped. Never blocks.
     """
     if not settings.WARM_ON_OPEN_ENABLED or not study_uid:
         return False
@@ -62,14 +68,16 @@ def schedule_warm(study_uid: str) -> bool:
             return True  # already being warmed by a prior trigger
         _WARMING.add(study_uid)
 
-    thread = threading.Thread(
-        target=_warm_worker,
-        args=(study_uid,),
-        name=f"paxs-warm-{study_uid[:12]}",
-        daemon=True,
-    )
-    thread.start()
+    # C-4: the shared bounded pool, not a raw daemon thread per open. When the
+    # pool is saturated the warm is dropped and the in-process guard released,
+    # so a later open can retry instead of the study being stuck "warming".
+    if not submit_background(_warm_worker, study_uid):
+        with _WARMING_LOCK:
+            _WARMING.discard(study_uid)
+        log.debug("warm for study %s dropped: background pool saturated", study_uid)
+        return False
     return True
+
 
 
 # --------------------------------------------------------------------------- #
@@ -78,11 +86,138 @@ def schedule_warm(study_uid: str) -> bool:
 def _warm_worker(study_uid: str) -> None:
     try:
         _warm_study(study_uid)
-    except Exception:
-        log.exception("Warm pass failed for study %s", study_uid)
+    except Exception as exc:  # noqa: BLE001 - boundary guard: background warming must not escape the worker
+        log.error("warm_pass_failed error_type=%s", type(exc).__name__)
     finally:
         with _WARMING_LOCK:
             _WARMING.discard(study_uid)
+
+
+def _warm_instance(
+    inst, r_client, frames_budget: int, tenant_id: int | None
+) -> tuple[int, int, int]:
+    """Warm one instance: thumbnail, Redis thumb key, first frame.
+
+    Extracted from the study loop so each step stays readable and the loop
+    itself is a three-line accumulator. Returns
+    ``(thumbnails_generated, redis_keys_warmed, frames_cached)``; every step is
+    best-effort and a failure is logged, never raised.
+    """
+    bk = getattr(inst, "storage_backend", None) or None
+    if not storage_service.exists(inst.file_path, backend_name=bk):
+        return 0, 0, 0
+
+    thumb_ok = redis_ok = frames_ok = 0
+
+    # 1) Missing pre-generated thumbnail (the WADO thumbnail fast path).
+    thumb_key = storage_service.thumbnail_key(inst.sop_instance_uid)
+    if (
+        settings.THUMBNAIL_ENABLED
+        and not storage_service.exists(thumb_key, backend_name=bk)
+        and thumbnail_service.generate_thumbnail(
+            inst.file_path, thumb_key, backend_name=bk
+        )
+    ):
+        thumb_ok = 1
+
+    # 2) Redis thumbnail cache key (the rendered fallback path's key,
+    #    default 256px PNG — matches wado_thumbnail's cache_key).
+    from app.services.redis_service import cache_get, cache_set
+
+    from app.services import content_version as cv
+
+    version = cv.version_of(inst)
+    cache_key = cv.thumbnail_key(inst.sop_instance_uid, version, "auto", "256", "png")
+    if cache_get(cache_key) is None:
+        try:
+            import io
+
+            from app.services.imaging import dataset_to_image
+
+            ds = storage_service.read_dataset(inst.file_path, backend_name=bk)
+            img = dataset_to_image(ds, max_size=256)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            if cache_set(cache_key, buf.getvalue(), expire_seconds=3600):
+                redis_ok = 1
+        except Exception:  # noqa: BLE001 - boundary guard: a warm step must never fail the pass
+            log.debug("Redis thumb warm failed for %s", inst.sop_instance_uid)
+
+    # 3) Pre-decode the first frame into the in-process frame cache & Redis
+    #    (bounded by WARM_MAX_FRAMES across the study).
+    if frames_budget > 0:
+        try:
+            from app.services import wado_rs_bulk_service
+
+            ds = storage_service.read_dataset(inst.file_path, backend_name=bk)
+            decoded = wado_rs_bulk_service.decode_frames_to_raw(
+                ds, [1], tenant_id=tenant_id, content_version=version
+            )
+            if decoded:
+                frames_ok = 1
+                frame_key = cv.raw_frame_key(tenant_id, inst.sop_instance_uid, version, 1)
+                cache_set(
+                    frame_key,
+                    decoded[0][0], expire_seconds=3600,
+                )
+        except Exception:  # noqa: BLE001 - boundary guard: a warm step must never fail the pass
+            log.debug("Frame warm failed for %s", inst.sop_instance_uid)
+
+    return thumb_ok, redis_ok, frames_ok
+
+
+async def _warm_vol_series(r_client, series_uids: list[str], *,
+                           tenant_id: int | None,
+                           study_uid: str | None) -> int:
+    """Materialise volumetric series into the tenant-scoped volume cache.
+
+    Every step is scoped to ``tenant_id`` (C-6): the slice query is tenant-
+    filtered, and both the Redis presence probe and the cache write use the
+    tenant-scoped key/pattern, so a warm pass for one institution can neither
+    read nor populate another's cache entry.
+
+    Runs on the background pool's worker thread (``asyncio.run`` owns the loop),
+    so the sync DB session above is never used here.
+    """
+    from app.db.session import AsyncSessionLocal
+    from app.services.volume_service import (
+        load_volume_array,
+        series_slices,
+        volume_redis_scan_pattern,
+    )
+    from app.services.redis_service import redis_circuit_call
+
+    warmed = 0
+    async with AsyncSessionLocal() as a_session:
+        for s_uid in series_uids:
+            if r_client is not None:
+                try:
+                    _cursor, matched = await run_blocking(redis_circuit_call, r_client.scan,
+                        cursor=0,
+                        match=volume_redis_scan_pattern(tenant_id, s_uid),
+                        count=1,
+                    )
+                    if matched:
+                        continue  # already cached for this tenant
+                except Exception as exc:  # noqa: BLE001 - boundary guard: a cache probe must never fail the warm
+                    log.debug(
+                        "volume_cache_probe_failed series_uid=%s error_type=%s",
+                        s_uid, type(exc).__name__,
+                    )
+            try:
+                slices = await series_slices(a_session, s_uid, tenant_id=tenant_id)
+                if slices and len(slices) >= 4:
+                    await run_blocking(load_volume_array,
+                        slices, series_uid=s_uid,
+                        tenant_id=tenant_id, study_uid=study_uid,
+                    )
+                    warmed += 1
+            except Exception as v_exc:  # noqa: BLE001 - boundary guard: one series must not fail the pass
+                log.debug(
+                    "volume_pre_warm_failed series_uid=%s error_type=%s",
+                    s_uid, type(v_exc).__name__,
+                )
+    return warmed
 
 
 def _warm_study(study_uid: str) -> None:
@@ -98,12 +233,16 @@ def _warm_study(study_uid: str) -> None:
             if not lock.acquire(blocking=False):
                 log.debug("Another node is warming %s; skipping", study_uid)
                 return
-        except Exception as exc:
-            log.debug("Warm lock skipped for %s: %s", study_uid, exc)
+        except Exception as exc:  # noqa: BLE001 - boundary guard: the cache lock may be unavailable
+            log.debug("warm_lock_skipped error_type=%s", type(exc).__name__)
             lock = None
 
     try:
         with SyncSessionLocal() as session:
+            # The owning tenant scopes every cache this pass touches (C-6).
+            tenant_id = session.execute(
+                select(Study.tenant_id).where(Study.study_instance_uid == study_uid)
+            ).scalar_one_or_none()
             instances = (
                 session.execute(
                     select(Instance)
@@ -116,101 +255,54 @@ def _warm_study(study_uid: str) -> None:
                 .scalars()
                 .all()
             )
+            # Read inside the session — the volumetric series list is needed by
+            # the async pass below, which runs after this block closes.
+            vol_series_list = (
+                session.execute(
+                    select(Series.series_instance_uid)
+                    .join(Study, Series.study_id == Study.id)
+                    .where(Study.study_instance_uid == study_uid)
+                    .where(Series.modality.in_(["CT", "MR", "PT"]))
+                )
+                .scalars()
+                .all()
+                if getattr(settings, "REDIS_CACHE_ENABLED", False)
+                else []
+            )
 
         thumb_ok = 0
         redis_ok = 0
         frames_ok = 0
         for inst in instances:
-            bk = getattr(inst, "storage_backend", None) or None
-            if not storage_service.exists(inst.file_path, backend_name=bk):
-                continue
+            t, r, f = _warm_instance(
+                inst, r_client, settings.WARM_MAX_FRAMES - frames_ok, tenant_id
+            )
+            thumb_ok += t
+            redis_ok += r
+            frames_ok += f
 
-            # 1) Missing pre-generated thumbnail (the WADO thumbnail fast path).
-            thumb_key = storage_service.thumbnail_key(inst.sop_instance_uid)
-            if settings.THUMBNAIL_ENABLED and not storage_service.exists(
-                thumb_key, backend_name=bk
-            ):
-                if thumbnail_service.generate_thumbnail(
-                    inst.file_path, thumb_key, backend_name=bk
-                ):
-                    thumb_ok += 1
-
-            # 2) Redis thumbnail cache key (the rendered fallback path's key,
-            #    default 256px PNG — matches wado_thumbnail's cache_key).
-            from app.services.redis_service import cache_get, cache_set
-
-            cache_key = f"paxs:thumb:{inst.sop_instance_uid}:auto:256:png"
-            if cache_get(cache_key) is None:
-                try:
-                    ds = storage_service.read_dataset(
-                        inst.file_path, backend_name=bk
-                    )
-                    from app.services.imaging import dataset_to_image
-
-                    import io
-
-                    img = dataset_to_image(ds, max_size=256)
-                    buf = io.BytesIO()
-                    img.save(buf, format="PNG")
-                    if cache_set(cache_key, buf.getvalue(), expire_seconds=3600):
-                        redis_ok += 1
-                except Exception:
-                    log.debug("Redis thumb warm failed for %s", inst.sop_instance_uid)
-
-            # 3) Pre-decode the first frame into the in-process frame cache & Redis
-            #    (bounded by WARM_MAX_FRAMES across the study).
-            if frames_ok < settings.WARM_MAX_FRAMES:
-                try:
-                    from app.services import wado_rs_bulk_service
-
-                    ds = storage_service.read_dataset(
-                        inst.file_path, backend_name=bk
-                    )
-                    decoded = wado_rs_bulk_service.decode_frames_to_raw(ds, [1])
-                    if decoded:
-                        frames_ok += 1
-                        cache_set(f"paxs:frame:{inst.sop_instance_uid}:1", decoded[0][0], expire_seconds=3600)
-                except Exception:
-                    log.debug("Frame warm failed for %s", inst.sop_instance_uid)
-
-        # 4) Pre-warm 3D volume cache in Redis for volumetric series (CT/MR)
+        # 4) Pre-warm 3D volume cache in Redis for volumetric series (CT/MR),
+        #    under the study's tenant scope (C-6).
         vol_ok = 0
-        if getattr(settings, "REDIS_CACHE_ENABLED", False):
+        if vol_series_list:
             try:
-                if r_client:
-                    vol_series_list = (
-                        session.execute(
-                            select(Series.series_instance_uid)
-                            .join(Study, Series.study_id == Study.id)
-                            .where(Study.study_instance_uid == study_uid)
-                            .where(Series.modality.in_(["CT", "MR", "PT"]))
+                # _warm_study is submitted to the shared bounded background
+                # pool. Own the loop here and schedule the coroutine as a task;
+                # never call asyncio.run() from a request/event-loop thread.
+                with asyncio.Runner() as runner:
+                    loop = runner.get_loop()
+                    task = loop.create_task(
+                        _warm_vol_series(
+                            r_client, vol_series_list,
+                            tenant_id=tenant_id, study_uid=study_uid,
                         )
-                        .scalars()
-                        .all()
                     )
-                    if vol_series_list:
-                        async def _warm_vol_series():
-                            warmed_count = 0
-                            from app.db.session import AsyncSessionLocal
-                            from app.services.volume_service import load_volume_array, series_slices
-
-                            async with AsyncSessionLocal() as a_session:
-                                for s_uid in vol_series_list:
-                                    canonical_pattern = f"paxs:vol:*{s_uid}*"
-                                    cursor, matched = r_client.scan(cursor=0, match=canonical_pattern, count=1)
-                                    if not matched:
-                                        try:
-                                            slices = await series_slices(a_session, s_uid)
-                                            if slices and len(slices) >= 4:
-                                                load_volume_array(slices, series_uid=s_uid)
-                                                warmed_count += 1
-                                        except Exception as v_exc:
-                                            log.debug("Volume pre-warm failed for %s: %s", s_uid, v_exc)
-                            return warmed_count
-
-                        vol_ok = asyncio.run(_warm_vol_series())
-            except Exception as exc:
-                log.debug("Volume pre-warm pass failed: %s", exc)
+                    vol_ok = runner.run(task)
+            except Exception as exc:  # noqa: BLE001 - boundary guard: volume pre-warm is a background pass
+                log.warning(
+                    "Volume pre-warm pass failed (error_type=%s)",
+                    type(exc).__name__,
+                )
 
         # 5) Record warm summary entry in Redis under paxs:warm:{study_uid}
         if r_client:
@@ -226,8 +318,8 @@ def _warm_study(study_uid: str) -> None:
                     "warmed_at": datetime.now(timezone.utc).isoformat(),
                 }, indent=2)
                 r_client.set(f"paxs:warm:{study_uid}", warm_record, ex=86400)
-            except Exception as exc:
-                log.debug("Warm record write failed: %s", exc)
+            except Exception as exc:  # noqa: BLE001 - boundary guard: a warm record is advisory state
+                log.debug("warm_record_write_failed error_type=%s", type(exc).__name__)
 
         if thumb_ok or redis_ok or frames_ok or vol_ok:
             log.info(
@@ -239,5 +331,7 @@ def _warm_study(study_uid: str) -> None:
         if lock is not None:
             try:
                 lock.release()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - boundary guard: the cache lock may already have expired
+                # A Redis lock that expired mid-warm is expected; the study was
+                # still warmed, so this must not surface as a failure.
+                log.debug("warm_lock_release_failed error_type=%s", type(exc).__name__)

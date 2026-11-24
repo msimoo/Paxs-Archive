@@ -1,6 +1,6 @@
 """Admin → DB Pool panel API (read-replica / connection-pool dashboard).
 
-* ``GET  /api/v1/db/perf``            — pool stats + MySQL counters + replica
+* ``GET  /api/v1/db/perf``            — pool stats + PostgreSQL counters + replica
 * ``POST /api/v1/db/perf/slow-query`` — toggle / threshold for the slow-query log
 * ``GET  /api/v1/db/perf/slow-queries``— recent slow statements (ring buffer)
 * ``GET  /api/v1/db/perf/explain``     — EXPLAIN for a hot query or custom SQL
@@ -35,7 +35,7 @@ class ReplicaBody(BaseModel):
 
 @router.get("")
 async def perf(_user: User = Depends(require_destructive_role)):
-    """Live pool stats, MySQL counters, replica status and slow-query state."""
+    """Live pool stats, PostgreSQL counters, replica status and slow-query state."""
     return await db_panel.perf_panel()
 
 

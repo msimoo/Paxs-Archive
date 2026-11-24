@@ -24,7 +24,7 @@ from sqlalchemy.orm import joinedload
 from app.core.config import settings
 from app.db.models import DicomNode, InstanceAvailabilityNotification, Series, Study
 from app.db.session import AsyncSessionLocal, SyncSessionLocal
-from app.services import audit_service
+from app.services import audit_service, query_service
 from app.services.node_service import get_node_sync
 
 log = logging.getLogger("paxs.ian")
@@ -77,13 +77,8 @@ def send_ian_notification_sync(
 
     assoc = ae.associate(host, port, ae_title=ae_title)
     if not assoc.is_established:
-        reason = "Association rejected by remote AE"
-        try:
-            reason = getattr(assoc.acceptor, "reason", reason) or reason
-        except Exception:
-            pass
         assoc.release()
-        return {"ok": False, "reason": str(reason)}
+        return {"ok": False, "reason": "Association rejected by remote AE"}
 
     results = {"ok": False, "status": None}
     try:
@@ -96,8 +91,11 @@ def send_ian_notification_sync(
         code = int(status.Status) if status is not None else None
         results["status"] = code
         results["ok"] = (code == 0x0000)
-    except Exception as exc:
-        results["reason"] = str(exc)
+    except Exception as exc:  # noqa: BLE001 - boundary guard: the caller reads the failure from "reason"
+        # IAN delivery is best-effort: a refused/failed N-CREATE must not raise
+        # into the finalize path, but it must be visible in the log.
+        log.warning("ian_send_failed error_type=%s", type(exc).__name__)
+        results["reason"] = "IAN N-CREATE failed"
     finally:
         assoc.release()
 
@@ -108,16 +106,19 @@ async def notify_study_available(
     session: AsyncSession,
     study_instance_uid: str,
     target_ae_title: str | None = None,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
 ) -> list[InstanceAvailabilityNotification]:
     """Build IAN payload and send N-CREATE notifications to registered RIS nodes."""
     # 1. Fetch study + series + instances
-    study = (
-        await session.execute(
-            select(Study)
-            .options(joinedload(Study.series_list).joinedload(Series.instances))
-            .where(Study.study_instance_uid == study_instance_uid)
-        )
-    ).scalars().unique().one_or_none()
+    statement = (
+        select(Study)
+        .options(joinedload(Study.series_list).joinedload(Series.instances))
+        .where(Study.study_instance_uid == study_instance_uid)
+    )
+    statement = query_service.apply_study_tenant_scope(statement, tenant_id, include_all)
+    study = (await session.execute(statement)).scalars().unique().one_or_none()
 
     if not study:
         log.warning("Cannot send IAN: Study %s not found", study_instance_uid)
@@ -146,7 +147,7 @@ async def notify_study_available(
         node = (
             await session.execute(
                 select(DicomNode).where(
-                    DicomNode.ae_title == target_ae_title, DicomNode.enabled == True  # noqa: E712
+                    DicomNode.ae_title == target_ae_title, DicomNode.enabled.is_(True)
                 )
             )
         ).scalar_one_or_none()
@@ -157,7 +158,7 @@ async def notify_study_available(
         nodes = list(
             (
                 await session.execute(
-                    select(DicomNode).where(DicomNode.enabled == True)  # noqa: E712
+                    select(DicomNode).where(DicomNode.enabled.is_(True))
                 )
             ).scalars().all()
         )
@@ -207,13 +208,19 @@ async def notify_study_available(
             notif.sent_at = now
             audit_service.add_audit(
                 session,
+                sop_instance_uid=None,
                 study_instance_uid=study_instance_uid,
                 action="IAN_NOTIFICATION_SENT",
                 performed_by=f"ian:{node.ae_title}",
             )
         else:
             notif.status = "FAILED"
-            notif.error_message = res.get("reason", f"Status code: {res.get('status')}")
+            failure_status = res.get("status")
+            notif.error_message = (
+                f"IAN N-CREATE failed (status=0x{failure_status:04X})"
+                if isinstance(failure_status, int)
+                else "IAN N-CREATE failed"
+            )
 
         notification_records.append(notif)
 
@@ -226,12 +233,39 @@ async def list_notifications(
     study_instance_uid: str | None = None,
     status: str | None = None,
     limit: int = 100,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
 ) -> list[InstanceAvailabilityNotification]:
     """List IAN notification logs."""
-    stmt = select(InstanceAvailabilityNotification)
+    stmt = (
+        select(InstanceAvailabilityNotification)
+        .join(
+            Study,
+            Study.study_instance_uid == InstanceAvailabilityNotification.study_instance_uid,
+        )
+    )
     if study_instance_uid:
         stmt = stmt.where(InstanceAvailabilityNotification.study_instance_uid == study_instance_uid)
     if status:
         stmt = stmt.where(InstanceAvailabilityNotification.status == status.upper())
+    stmt = query_service.apply_study_tenant_scope(stmt, tenant_id, include_all)
     stmt = stmt.order_by(InstanceAvailabilityNotification.id.desc()).limit(limit)
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def get_notification(
+    session: AsyncSession, notification_id: int, *,
+    tenant_id: int | None = None, include_all: bool = False,
+) -> InstanceAvailabilityNotification | None:
+    """Fetch one IAN record only through its owning study's tenant boundary."""
+    statement = (
+        select(InstanceAvailabilityNotification)
+        .join(
+            Study,
+            Study.study_instance_uid == InstanceAvailabilityNotification.study_instance_uid,
+        )
+        .where(InstanceAvailabilityNotification.id == notification_id)
+    )
+    statement = query_service.apply_study_tenant_scope(statement, tenant_id, include_all)
+    return (await session.execute(statement)).scalar_one_or_none()

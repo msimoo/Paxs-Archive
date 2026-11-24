@@ -6,7 +6,7 @@ stored only as SHA-256). Access tokens are short (TOKEN_EXPIRE_MINUTES, 15 by
 default) and silently renewed via POST /auth/refresh, which rotates the
 refresh token. Reuse of a rotated token revokes the whole session family
 (theft detection, plan §4.3). The cookie also gates /viewer + /studies-ui
-(the viewer auth gate in app/main.py).
+(the viewer auth gate in app/main/middleware.py).
 
 Brute-force lockout (plan §4.1): MAX_FAILED_ATTEMPTS bad logins lock the
 account for LOCKOUT_DURATION_MINUTES; attempts 1-4 return a generic error,
@@ -18,7 +18,6 @@ appended to auth_audit_log (plan §3.3).
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -26,10 +25,18 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
+from app.api.ratelimit import rate_limit
+from app.api.v1.deps import get_current_user_any
+from app.core.config import (
+    MIN_ADMIN_PASSWORD_LENGTH,
+    bootstrap_enabled,
+    is_weak_admin_password,
+    settings,
+    setup_token_matches,
+)
+from app.core.csrf import clear_csrf_cookie, csrf_token_for, set_csrf_cookie
 from app.core.roles import DESTRUCTIVE_ROLES, ROLES
 from app.core.security import (
     clear_session_cookie,
@@ -41,10 +48,9 @@ from app.core.security import (
     set_session_cookie,
     verify_password,
 )
-from app.db.models import AuthAuditLog, Session, User
+from app.db.models import AuthSource, User
 from app.db.session import get_db
-from app.api.v1.deps import get_current_user, get_current_user_any
-from app.api.ratelimit import rate_limit
+from app.services import auth_service, user_service
 
 log = logging.getLogger("paxs.auth")
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -62,6 +68,7 @@ ROLE_LANDING = {
     "RADIOLOGIST": "/viewer",
     "PHYSICIAN": "/viewer",
     "TECHNOLOGIST": "/viewer",
+    "REPORT_WRITER": "/viewer",
 }
 
 
@@ -86,6 +93,14 @@ class RegisterBody(BaseModel):
     password: str = Field(min_length=6, max_length=128)
     full_name: str | None = None
     role: str | None = None
+    # B-4: required only for the FIRST account (the bootstrap administrator),
+    # and only when SETUP_TOKEN is configured. Ignored afterwards.
+    setup_token: str | None = None
+
+
+class ChangePasswordBody(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class LoginBody(BaseModel):
@@ -97,14 +112,20 @@ async def write_audit(db: AsyncSession, user_id: int | None, action: str,
                       request: Request | None = None,
                       details: dict | None = None) -> None:
     """Append one row to auth_audit_log (plan §3.3). Details is small JSON,
-    never PHI. Committed by the caller (get_db commits on success)."""
-    db.add(AuthAuditLog(
+    never PHI. Committed by the caller (get_db commits on success).
+
+    The row and its JSON encoding live in ``auth_service.record_event`` (Q-3);
+    this thin wrapper keeps the call sites reading as *policy* ("record that
+    this happened") instead of persistence details.
+    """
+    await auth_service.record_event(
+        db,
         user_id=user_id,
         action=action,
         ip_address=_client_ip(request) if request else None,
         user_agent=_client_ua(request) if request else None,
-        details=json.dumps(details) if details else None,
-    ))
+        details=details,
+    )
 
 
 def _user_dict(user: User) -> dict:
@@ -112,6 +133,8 @@ def _user_dict(user: User) -> dict:
         "username": user.username,
         "full_name": user.full_name,
         "role": user.role,
+        # B-4: the client forces a password change when this is true.
+        "must_change_password": bool(getattr(user, "must_change_password", False)),
         "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
@@ -139,15 +162,10 @@ async def _revoke_family(db: AsyncSession, family_id: str) -> None:
     """Revoke every session sharing a family id (theft response)."""
     if not family_id:
         return
-    sessions = (
-        await db.execute(select(Session).where(Session.family_id == family_id))
-    ).scalars().all()
-    for s in sessions:
-        s.is_revoked = True
-        s.revoke_reason = "token_reuse"
-    if sessions:
+    revoked = await auth_service.revoke_family(db, family_id, reason="token_reuse")
+    if revoked:
         log.warning("revoked session family %s (%d session(s))",
-                    family_id[:8], len(sessions))
+                    family_id[:8], revoked)
 
 
 async def _create_session(db: AsyncSession, user: User,
@@ -155,23 +173,31 @@ async def _create_session(db: AsyncSession, user: User,
     """Insert a session row; return (family_id, refresh_token)."""
     family_id = uuid.uuid4().hex
     refresh_token = generate_refresh_token(family_id)
-    db.add(Session(
-        id=uuid.uuid4().hex,
+    await auth_service.open_session(
+        db,
+        session_id=uuid.uuid4().hex,
         user_id=user.id,
         refresh_token_hash=hash_refresh_token(refresh_token),
         family_id=family_id,
         ip_address=_client_ip(request),
         user_agent=_client_ua(request),
         expires_at=_session_expiry(),
-    ))
+    )
     return family_id, refresh_token
 
 
 def _auth_response(user: User, access_token: str, next_url: str | None,
-                   root_path: str = "") -> JSONResponse:
+                   root_path: str = "", csrf_token: str = "") -> JSONResponse:
+    """The login/refresh body: access token, CSRF token, user, landing page.
+
+    ``csrf_token`` (B-19/FS-10) is the signed double-submit value the SPA echoes
+    in the ``X-CSRF-Token`` header; it is also delivered as a JS-readable cookie
+    by the callers, so a client may use either source.
+    """
     return JSONResponse({
         "access_token": access_token,
         "token_type": "bearer",
+        "csrf_token": csrf_token,
         "user": _user_dict(user),
         "redirect_to": role_landing(user.role, next_url, root_path),
     })
@@ -180,17 +206,33 @@ def _auth_response(user: User, access_token: str, next_url: str | None,
 @router.post("/register", status_code=201,
             dependencies=[Depends(rate_limit("auth", settings.RATE_LIMIT_LOGIN_PER_MINUTE, 60))])
 async def register(body: RegisterBody, request: Request, db: AsyncSession = Depends(get_db)):
-    existing = (
-        await db.execute(select(User).where(User.username == body.username))
-    ).scalar_one_or_none()
-    if existing is not None:
+    if await auth_service.username_taken(db, body.username):
         raise HTTPException(409, "Username already taken")
 
-    total = (await db.execute(select(func.count(User.id)))).scalar_one()
+    total = await auth_service.account_count(db)
 
-    # The bootstrap account (the very first user) is always allowed — otherwise
-    # a fresh install with ALLOW_REGISTER=false could never be set up.
-    if total == 0:
+    # B-4: the very first account is the bootstrap ADMIN. It is no longer free:
+    # the caller must present the configured SETUP_TOKEN, and with no token
+    # configured the API cannot create it at all (use the CLI / db/init instead).
+    # This closes "the first unauthenticated caller on an empty database becomes
+    # ADMIN".
+    bootstrap = total == 0
+    if bootstrap:
+        if not bootstrap_enabled(settings):
+            raise HTTPException(
+                403,
+                "Bootstrap is disabled: set SETUP_TOKEN to create the first "
+                "administrator, or initialize the database with the CLI.",
+            )
+        if not setup_token_matches(body.setup_token, settings):
+            # Deliberately generic: the token is a credential.
+            raise HTTPException(403, "Invalid or missing setup token")
+        if is_weak_admin_password(body.password):
+            raise HTTPException(
+                422,
+                "The bootstrap administrator password is too weak - use at least "
+                f"{MIN_ADMIN_PASSWORD_LENGTH} characters and avoid common values.",
+            )
         role = "ADMIN"
     else:
         if not settings.ALLOW_REGISTER:
@@ -203,7 +245,7 @@ async def register(body: RegisterBody, request: Request, db: AsyncSession = Depe
             r.strip().upper()
             for r in settings.REGISTER_ALLOWED_ROLES.split(",")
             if r.strip()
-        } - set(DESTRUCTIVE_ROLES)
+        } - {*DESTRUCTIVE_ROLES, "REPORT_WRITER"}
         requested = (body.role or "").strip().upper()
         if requested and requested not in ROLES:
             raise HTTPException(422, f"Invalid role, use one of {ROLES}")
@@ -216,40 +258,47 @@ async def register(body: RegisterBody, request: Request, db: AsyncSession = Depe
             )
         role = requested or (sorted(allowed)[0] if allowed else "PHYSICIAN")
 
-    user = User(
+    # The bootstrap admin chose its own (validated) password, so it is not
+    # forced to rotate; accounts created by automation are (see db_admin).
+    user = await auth_service.create_local_account(
+        db,
         username=body.username,
         password_hash=hash_password(body.password),
         full_name=body.full_name,
         role=role,
     )
-    db.add(user)
-    await db.flush()
-    # MySQL has no INSERT..RETURNING: server-generated columns (created_at)
-    # are unloaded after the flush and accessing them triggers a sync lazy
-    # refresh -> MissingGreenlet in the async handler. Reload inside the
-    # async context (same pattern as users.py admin create).
-    await db.refresh(user)
     await write_audit(db, user.id, "login_success", request, {"via": "register"})
 
     access_token = create_access_token(user.username, user.role, settings.SECRET_KEY,
                                        settings.TOKEN_EXPIRE_MINUTES)
     _, refresh_token = await _create_session(db, user, request)
+    # Commit before answering: get_db's own commit runs after the response is
+    # sent, so a client using the new cookie at once could reach a server that
+    # has not stored the session yet and get 401 (observed on the first
+    # request after login).
+    await db.commit()
     response = _auth_response(user, access_token, request.query_params.get("next"),
-                              request.scope.get("root_path") or "")
+                              request.scope.get("root_path") or "",
+                              csrf_token_for(refresh_token))
     response.status_code = 201
     set_session_cookie(response, refresh_token)
+    set_csrf_cookie(response, refresh_token)
     return response
 
 
 @router.post("/login",
             dependencies=[Depends(rate_limit("auth", settings.RATE_LIMIT_LOGIN_PER_MINUTE, 60))])
 async def login(body: LoginBody, request: Request, db: AsyncSession = Depends(get_db)):
-    user = (
-        await db.execute(select(User).where(User.username == body.username))
-    ).scalar_one_or_none()
+    user = await user_service.get_user_by_username(db, body.username)
 
     if user is None:
         # Unknown username: generic message, no lockout state to touch.
+        raise HTTPException(401, "Invalid username or password")
+
+    if user.auth_source != AuthSource.LOCAL:
+        await write_audit(db, user.id, "login_failed", request,
+                          {"reason": "auth_source_mismatch"})
+        await db.commit()
         raise HTTPException(401, "Invalid username or password")
 
     if user.locked_until is not None and user.locked_until > _now():
@@ -296,9 +345,16 @@ async def login(body: LoginBody, request: Request, db: AsyncSession = Depends(ge
     access_token = create_access_token(user.username, user.role, settings.SECRET_KEY,
                                        settings.TOKEN_EXPIRE_MINUTES)
     _, refresh_token = await _create_session(db, user, request)
+    # Commit before answering: get_db's own commit runs after the response is
+    # sent, so a client using the new cookie at once could reach a server that
+    # has not stored the session yet and get 401 (observed on the first
+    # request after login).
+    await db.commit()
     response = _auth_response(user, access_token, request.query_params.get("next"),
-                              request.scope.get("root_path") or "")
+                              request.scope.get("root_path") or "",
+                              csrf_token_for(refresh_token))
     set_session_cookie(response, refresh_token)
+    set_csrf_cookie(response, refresh_token)
     return response
 
 
@@ -315,9 +371,7 @@ async def refresh(request: Request, db: AsyncSession = Depends(get_db)):
         raise HTTPException(401, "No session")
 
     token_hash = hash_refresh_token(token)
-    sess = (
-        await db.execute(select(Session).where(Session.refresh_token_hash == token_hash))
-    ).scalar_one_or_none()
+    sess = await auth_service.find_session(db, token_hash)
 
     if sess is None or sess.is_revoked:
         # Rotated token replayed (or a deleted session) — possible theft.
@@ -339,9 +393,7 @@ async def refresh(request: Request, db: AsyncSession = Depends(get_db)):
         await db.commit()
         raise HTTPException(401, "Session expired")
 
-    user = (
-        await db.execute(select(User).where(User.id == sess.user_id))
-    ).scalar_one_or_none()
+    user = await auth_service.load_account(db, sess.user_id)
     if user is None or not user.is_active:
         raise HTTPException(401, "Account disabled")
 
@@ -352,11 +404,18 @@ async def refresh(request: Request, db: AsyncSession = Depends(get_db)):
     sess.expires_at = _session_expiry()
 
     await write_audit(db, user.id, "token_refresh", request)
+    # Commit before answering: get_db's own commit runs after the response is
+    # sent, so a client using the new cookie at once could reach a server that
+    # has not stored the session yet and get 401 (observed on the first
+    # request after login or refresh).
+    await db.commit()
     access_token = create_access_token(user.username, user.role, settings.SECRET_KEY,
                                        settings.TOKEN_EXPIRE_MINUTES)
     response = _auth_response(user, access_token, request.query_params.get("next"),
-                              request.scope.get("root_path") or "")
+                              request.scope.get("root_path") or "",
+                              csrf_token_for(new_token))
     set_session_cookie(response, new_token)
+    set_csrf_cookie(response, new_token)
     return response
 
 
@@ -365,17 +424,57 @@ async def logout(request: Request, db: AsyncSession = Depends(get_db)):
     """Revoke the session row behind the cookie and clear it."""
     token = request.cookies.get(settings.AUTH_COOKIE_NAME)
     if token:
-        sess = (
-            await db.execute(select(Session).where(
-                Session.refresh_token_hash == hash_refresh_token(token)))
-        ).scalar_one_or_none()
+        sess = await auth_service.find_session(db, hash_refresh_token(token))
         if sess is not None:
-            sess.is_revoked = True
-            sess.revoke_reason = "logout"
+            auth_service.mark_revoked(sess, "logout")
             await write_audit(db, sess.user_id, "logout", request)
     response = JSONResponse({"ok": True})
     clear_session_cookie(response)
+    clear_csrf_cookie(response)
     return response
+
+
+@router.post("/change-password")
+async def change_password(body: ChangePasswordBody, request: Request,
+                          db: AsyncSession = Depends(get_db),
+                          user: User = Depends(get_current_user_any)):
+    """Change the caller's own password (B-4).
+
+    Verifies the current password, stores the new one and clears the
+    ``must_change_password`` flag. Every session is revoked (mirroring the admin
+    reset) so a credential that was issued by automation — or a cookie stolen
+    before the change — stops working immediately; the caller signs in again
+    with the new password.
+    """
+    if not verify_password(body.current_password, user.password_hash):
+        await write_audit(db, user.id, "login_failed", request,
+                          {"reason": "password_change_wrong_current"})
+        await db.commit()  # the audit entry must survive the raised error
+        raise HTTPException(401, "Current password is incorrect")
+
+    # A privileged account must not be able to rotate onto a weak value.
+    if user.role in DESTRUCTIVE_ROLES and is_weak_admin_password(body.new_password):
+        raise HTTPException(
+            422,
+            "New password is too weak for a privileged account - use at least "
+            f"{MIN_ADMIN_PASSWORD_LENGTH} characters and avoid common values.",
+        )
+
+    # `get_current_user_any` resolves the user in its OWN session and returns a
+    # detached instance, so writing to it here would be silently discarded.
+    # Re-load it inside this request's session (the same pattern users.py uses
+    # for the admin reset).
+    account = await auth_service.load_account(db, user.id)
+    if account is None:
+        raise HTTPException(401, "User not found")
+
+    account.password_hash = hash_password(body.new_password)
+    account.must_change_password = False
+    revoked = await user_service.revoke_all_sessions(db, account.id)
+    await write_audit(db, account.id, "password_change", request)
+    await db.flush()
+    return {"ok": True, "username": account.username,
+            "must_change_password": False, "sessions_revoked": revoked or 0}
 
 
 @router.get("/me")

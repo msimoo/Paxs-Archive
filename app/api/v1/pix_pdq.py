@@ -13,27 +13,34 @@ Endpoints:
   GET  /api/v1/pix/query                           PIX Query by identifier or demographics
   GET  /api/v1/pdq/query                           PDQ Query by identifier or demographics
 
-All endpoints require authentication (get_current_user).
-Admin endpoints for AA management require admin role.
+All endpoints accept bearer or session-cookie authentication. Patient reads use
+the caller's tenant scope; patient identity writes are ADMIN-only and CSRF
+protected when authenticated by a browser cookie.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from collections.abc import Iterable
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user, require_admin
-from app.db.models import AssigningAuthority, Patient, PatientIdentity, User
-from app.db.session import get_db
-from app.services import pix_pdq_service
+from app.api.v1.deps import get_current_user_any, require_admin, require_csrf, tenant_scope
+from app.db.models import User
+from app.services import pix_pdq_admin, pix_pdq_rest_service, pix_pdq_service
 
-router = APIRouter(prefix="/api/v1/pix", tags=["PIX/PDQ"])
+# Statements behind this router live in PIX/PDQ services. The handlers only
+# shape requests and responses; sync database work runs in a worker thread so
+# the event loop remains available (N-4).
+
+router = APIRouter(
+    prefix="/api/v1/pix",
+    tags=["PIX/PDQ"],
+    dependencies=[Depends(require_csrf)],
+)
 
 
 # Request/Response Models
@@ -105,98 +112,78 @@ class PatientDemographicsResponse(BaseModel):
     source: str
 
 
-# Assigning Authority Management (Admin)
-@router.post("/assigning-authorities", status_code=201)
-async def create_assigning_authority(
-    body: AssigningAuthorityCreate,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin),
-):
-    """Register a new Assigning Authority (Admin only)."""
-    # Check for duplicate OID
-    existing = await db.execute(
-        select(AssigningAuthority).where(AssigningAuthority.oid == body.oid)
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(409, f"Assigning authority with OID {body.oid!r} already exists")
-    
-    aa = AssigningAuthority(
-        oid=body.oid,
-        name=body.name,
-        is_authoritative=body.is_authoritative,
-        description=body.description,
-    )
-    db.add(aa)
-    await db.commit()
-    await db.refresh(aa)
+def _authority_response(aa: pix_pdq_admin.AssigningAuthorityEntry) -> AssigningAuthorityResponse:
+    """Service entry -> response model (kept here: response shape is HTTP's job)."""
     return AssigningAuthorityResponse(
         id=aa.id,
         oid=aa.oid,
         name=aa.name,
         is_authoritative=aa.is_authoritative,
         description=aa.description,
-        created_at=aa.created_at.isoformat() if aa.created_at else None,
+        created_at=aa.created_at,
     )
+
+
+def _identity_response(entry: pix_pdq_admin.PatientIdentityEntry) -> PatientIdentityResponse:
+    return PatientIdentityResponse(
+        id=entry.id,
+        patient_id=entry.patient_id,
+        assigning_authority_oid=entry.assigning_authority_oid,
+        assigning_authority_name=entry.assigning_authority_name,
+        identifier=entry.identifier,
+        id_type=entry.id_type,
+        is_primary=entry.is_primary,
+    )
+
+
+# Assigning Authority Management (Admin)
+@router.post("/assigning-authorities", status_code=201)
+async def create_assigning_authority(
+    body: AssigningAuthorityCreate,
+    user: User = Depends(require_admin),
+) -> AssigningAuthorityResponse:
+    """Register a new Assigning Authority (Admin only)."""
+    aa = await asyncio.to_thread(
+        pix_pdq_admin.register_assigning_authority,
+        body.oid,
+        body.name,
+        body.is_authoritative,
+        body.description,
+    )
+    if aa is None:
+        raise HTTPException(409, f"Assigning authority with OID {body.oid!r} already exists")
+    return _authority_response(aa)
 
 
 @router.get("/assigning-authorities")
 async def list_assigning_authorities(
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
+    user: User = Depends(get_current_user_any),
+) -> list[AssigningAuthorityResponse]:
     """List all registered Assigning Authorities."""
-    aas = await db.execute(select(AssigningAuthority))
-    return [
-        AssigningAuthorityResponse(
-            id=aa.id,
-            oid=aa.oid,
-            name=aa.name,
-            is_authoritative=aa.is_authoritative,
-            description=aa.description,
-            created_at=aa.created_at.isoformat() if aa.created_at else None,
-        )
-        for aa in aas.scalars().all()
-    ]
+    aas = await asyncio.to_thread(pix_pdq_admin.list_assigning_authority_entries)
+    return [_authority_response(aa) for aa in aas]
 
 
 @router.get("/assigning-authorities/{oid}")
 async def get_assigning_authority(
     oid: str,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
+    user: User = Depends(get_current_user_any),
+) -> AssigningAuthorityResponse:
     """Get Assigning Authority details by OID."""
-    aa = await db.execute(
-        select(AssigningAuthority).where(AssigningAuthority.oid == oid)
-    )
-    aa = aa.scalar_one_or_none()
-    if not aa:
+    aa = await asyncio.to_thread(pix_pdq_admin.get_assigning_authority_entry, oid)
+    if aa is None:
         raise HTTPException(404, f"Assigning authority {oid!r} not found")
-    return AssigningAuthorityResponse(
-        id=aa.id,
-        oid=aa.oid,
-        name=aa.name,
-        is_authoritative=aa.is_authoritative,
-        description=aa.description,
-        created_at=aa.created_at.isoformat() if aa.created_at else None,
-    )
+    return _authority_response(aa)
 
 
 @router.delete("/assigning-authorities/{oid}", status_code=204)
 async def delete_assigning_authority(
     oid: str,
-    db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin),
-):
+) -> None:
     """Delete an Assigning Authority (Admin only)."""
-    aa = await db.execute(
-        select(AssigningAuthority).where(AssigningAuthority.oid == oid)
-    )
-    aa = aa.scalar_one_or_none()
-    if not aa:
+    if not await asyncio.to_thread(pix_pdq_admin.delete_assigning_authority, oid):
         raise HTTPException(404, f"Assigning authority {oid!r} not found")
-    await db.delete(aa)
-    await db.commit()
     return None
 
 
@@ -204,13 +191,12 @@ async def delete_assigning_authority(
 @router.post("/identities", status_code=201)
 async def create_patient_identity(
     body: PatientIdentityCreate,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Create or update a patient identity mapping."""
+    user: User = Depends(require_admin),
+) -> PatientIdentityResponse:
+    """Create or update a patient identity mapping (Admin only)."""
     try:
-        identity = await asyncio.to_thread(
-            pix_pdq_service.upsert_patient_identity,
+        entry = await asyncio.to_thread(
+            pix_pdq_admin.register_patient_identity,
             body.patient_id,
             body.assigning_authority_oid,
             body.identifier,
@@ -218,65 +204,36 @@ async def create_patient_identity(
             body.is_primary,
         )
     except ValueError as exc:
-        raise HTTPException(404, str(exc))
-    except Exception as exc:
-        raise HTTPException(400, f"Failed to create identity: {exc}")
-    
-    # Fetch AA name for response
-    aa = await db.execute(
-        select(AssigningAuthority).where(AssigningAuthority.id == identity.assigning_authority_id)
-    )
-    aa = aa.scalar_one()
-    
-    return PatientIdentityResponse(
-        id=identity.id,
-        patient_id=identity.patient_id,
-        assigning_authority_oid=aa.oid,
-        assigning_authority_name=aa.name,
-        identifier=identity.identifier,
-        id_type=identity.id_type,
-        is_primary=identity.is_primary,
-    )
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # database failures may include patient identifiers
+        raise HTTPException(400, "Failed to create identity") from None
+    return _identity_response(entry)
 
 
 @router.get("/patients/{patient_id}/identities")
 async def list_patient_identities(
     patient_id: int,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
+    user: User = Depends(get_current_user_any),
+) -> list[PatientIdentityResponse]:
     """Get all identities for a patient across all assigning authorities."""
-    patient = await db.get(Patient, patient_id)
-    if not patient:
-        raise HTTPException(404, f"Patient {patient_id} not found")
-    
-    identities = await db.execute(
-        select(PatientIdentity, AssigningAuthority)
-        .join(AssigningAuthority, PatientIdentity.assigning_authority_id == AssigningAuthority.id)
-        .where(PatientIdentity.patient_id == patient_id)
+    tenant_id, include_all = tenant_scope(user)
+    entries = await asyncio.to_thread(
+        pix_pdq_admin.list_patient_identity_entries,
+        patient_id,
+        tenant_id,
+        include_all,
     )
-    
-    return [
-        PatientIdentityResponse(
-            id=pi.id,
-            patient_id=pi.patient_id,
-            assigning_authority_oid=aa.oid,
-            assigning_authority_name=aa.name,
-            identifier=pi.identifier,
-            id_type=pi.id_type,
-            is_primary=pi.is_primary,
-        )
-        for pi, aa in identities.all()
-    ]
+    if entries is None:
+        raise HTTPException(404, f"Patient {patient_id} not found")
+    return [_identity_response(entry) for entry in entries]
 
 
 @router.delete("/patients/{patient_id}/identities/{aa_oid}", status_code=204)
 async def delete_patient_identity(
     patient_id: int,
     aa_oid: str,
-    db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin),
-):
+) -> None:
     """Delete a patient identity mapping (Admin only)."""
     deleted = await asyncio.to_thread(
         pix_pdq_service.delete_patient_identity,
@@ -289,6 +246,63 @@ async def delete_patient_identity(
 
 
 # PIX Query (Patient Identity Cross-referencing)
+def _pix_query_has_criteria(
+    assigning_authority_oid: str | None,
+    identifier: str | None,
+    patient_name: str | None,
+    birth_date: str | None,
+    sex: str | None,
+) -> bool:
+    """Require either a complete identifier pair or at least one demographic filter."""
+    return bool(
+        (assigning_authority_oid and identifier)
+        or patient_name
+        or birth_date
+        or sex
+    )
+
+
+def _pix_identity_response(results: Iterable[Any]) -> JSONResponse:
+    """Serialize only the identity fields supported by the PIX response."""
+    payload = [
+        PatientIdentityResultResponse(
+            assigning_authority_oid=result.assigning_authority_oid,
+            assigning_authority_name=result.assigning_authority_name,
+            identifier=result.identifier,
+            id_type=result.id_type,
+            is_primary=result.is_primary,
+        ).model_dump()
+        for result in results
+    ]
+    return JSONResponse(payload)
+
+
+def _pdq_demographics_response(results: Iterable[Any]) -> JSONResponse:
+    """Serialize demographic matches without leaking ORM objects."""
+    payload = [
+        PatientDemographicsResponse(
+            patient_id=demographic.patient_id,
+            identities=[
+                PatientIdentityResultResponse(
+                    assigning_authority_oid=identity.assigning_authority_oid,
+                    assigning_authority_name=identity.assigning_authority_name,
+                    identifier=identity.identifier,
+                    id_type=identity.id_type,
+                    is_primary=identity.is_primary,
+                )
+                for identity in demographic.identities
+            ],
+            patient_name=demographic.patient_name,
+            birth_date=demographic.birth_date,
+            sex=demographic.sex,
+            phone=demographic.phone,
+            source=demographic.source,
+        ).model_dump()
+        for demographic in results
+    ]
+    return JSONResponse(payload)
+
+
 @router.get("/query")
 async def pix_query(
     assigning_authority_oid: str | None = Query(None),
@@ -296,40 +310,34 @@ async def pix_query(
     patient_name: str | None = Query(None),
     birth_date: str | None = Query(None),
     sex: str | None = Query(None),
-    user: User = Depends(get_current_user),
-):
-    """PIX Query: Find patient identifiers across all assigning authorities.
-    
+    user: User = Depends(get_current_user_any),
+) -> JSONResponse:
+    """PIX Query: Find patient identifiers within the caller's tenant.
+
     Either provide (assigning_authority_oid + identifier) for exact match,
     or demographics (patient_name, birth_date, sex) for fuzzy match.
     Returns all known identities for matching patient(s).
     """
-    if assigning_authority_oid and identifier:
-        results = await asyncio.to_thread(
-            pix_pdq_service.pix_query_by_identifier,
-            assigning_authority_oid,
-            identifier,
-        )
-    elif patient_name or birth_date or sex:
-        results = await asyncio.to_thread(
-            pix_pdq_service.pix_query_by_demographics,
-            patient_name,
-            birth_date,
-            sex,
-        )
-    else:
+    if not _pix_query_has_criteria(
+        assigning_authority_oid, identifier, patient_name, birth_date, sex
+    ):
         raise HTTPException(422, "Provide either (assigning_authority_oid + identifier) or demographics")
-    
-    return JSONResponse([
-        PatientIdentityResultResponse(
-            assigning_authority_oid=r.assigning_authority_oid,
-            assigning_authority_name=r.assigning_authority_name,
-            identifier=r.identifier,
-            id_type=r.id_type,
-            is_primary=r.is_primary,
-        ).model_dump()
-        for r in results
-    ])
+    if assigning_authority_oid and identifier:
+        patient_name = birth_date = sex = None
+    else:
+        assigning_authority_oid = identifier = None
+    tenant_id, include_all = tenant_scope(user)
+    results = await asyncio.to_thread(
+        pix_pdq_rest_service.pix_query,
+        assigning_authority_oid,
+        identifier,
+        patient_name,
+        birth_date,
+        sex,
+        tenant_id,
+        include_all,
+    )
+    return _pix_identity_response(results)
 
 
 # PDQ Query (Patient Demographics Query)
@@ -340,50 +348,30 @@ async def pdq_query(
     patient_name: str | None = Query(None),
     birth_date: str | None = Query(None),
     sex: str | None = Query(None),
-    user: User = Depends(get_current_user),
-):
-    """PDQ Query: Find patient demographics across all assigning authorities.
-    
+    user: User = Depends(get_current_user_any),
+) -> JSONResponse:
+    """PDQ Query: Find patient demographics within the caller's tenant.
+
     Either provide (assigning_authority_oid + identifier) for exact match,
     or demographics (patient_name, birth_date, sex) for fuzzy match.
     Optionally filter by assigning_authority_oid.
     Returns full demographics for matching patient(s).
     """
-    if assigning_authority_oid and identifier:
-        results = await asyncio.to_thread(
-            pix_pdq_service.pdq_query_by_identifier,
-            assigning_authority_oid,
-            identifier,
-        )
-    elif patient_name or birth_date or sex:
-        results = await asyncio.to_thread(
-            pix_pdq_service.pdq_query_by_demographics,
-            patient_name,
-            birth_date,
-            sex,
-            assigning_authority_oid,
-        )
-    else:
+    if not ((assigning_authority_oid and identifier) or patient_name or birth_date or sex):
         raise HTTPException(422, "Provide either (assigning_authority_oid + identifier) or demographics")
-    
-    return JSONResponse([
-        PatientDemographicsResponse(
-            patient_id=d.patient_id,
-            identities=[
-                PatientIdentityResultResponse(
-                    assigning_authority_oid=i.assigning_authority_oid,
-                    assigning_authority_name=i.assigning_authority_name,
-                    identifier=i.identifier,
-                    id_type=i.id_type,
-                    is_primary=i.is_primary,
-                )
-                for i in d.identities
-            ],
-            patient_name=d.patient_name,
-            birth_date=d.birth_date,
-            sex=d.sex,
-            phone=d.phone,
-            source=d.source,
-        ).model_dump()
-        for d in results
-    ])
+    if assigning_authority_oid and identifier:
+        patient_name = birth_date = sex = None
+    else:
+        identifier = None
+    tenant_id, include_all = tenant_scope(user)
+    results = await asyncio.to_thread(
+        pix_pdq_rest_service.pdq_query,
+        assigning_authority_oid,
+        identifier,
+        patient_name,
+        birth_date,
+        sex,
+        tenant_id,
+        include_all,
+    )
+    return _pdq_demographics_response(results)

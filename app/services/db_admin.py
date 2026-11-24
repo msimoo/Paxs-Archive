@@ -2,14 +2,14 @@
 
 Everything the dashboard's Database tab needs, kept out of the API layer:
 
-* connection-string parsing / masking / building (sqlite + MySQL)
+* connection-string parsing / masking / building (PostgreSQL only)
 * persisting a configured backend to ``.env`` (DATABASE_URL) and to a
   ``server_settings`` row (``db_config``) so Test / Initialize can reuse it
 * Alembic state (current vs. head revision) and running migrations against an
-  arbitrary target URL (a fresh install, or the configured MySQL)
-* MySQL connection probes and ``CREATE DATABASE`` for new installations
-* database backups — SQLite hot copy via the sqlite3 backup API, MySQL via
-  ``mysqldump`` with a pure-SQLAlchemy export fallback
+  arbitrary target URL (a fresh install, or the configured PostgreSQL)
+* PostgreSQL connection probes and ``CREATE DATABASE`` for new installations
+* database backups — ``pg_dump`` (custom format) with a pure-SQLAlchemy
+  export fallback
 * seeding the first ADMIN account on a brand-new installation
 
 All functions are synchronous; endpoints call them via ``asyncio.to_thread``.
@@ -17,82 +17,101 @@ All functions are synchronous; endpoints call them via ``asyncio.to_thread``.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
 import os
 import re
 import shutil
-import sqlite3
 import subprocess
 import time
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 from app.core.security import hash_password
-from app.db.models import ServerSetting, User
+from app.db.models import AuthSource, ServerSetting, User
 from app.db.session import SyncSessionLocal, to_sync_url
 
 log = logging.getLogger("paxs.db_admin")
 
+
+class MigrationDriftError(RuntimeError):
+    """Raised when a pending migration conflicts with existing schema objects."""
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = PROJECT_ROOT / "alembic.ini"
 DB_CONFIG_KEY = "db_config"
+BACKUP_SCHEDULE_KEY = "backup_schedule"
+_TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _BACKUP_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 # --------------------------------------------------------------- parsing ----
+_PG_PREFIXES = ("postgresql+asyncpg://", "postgresql+psycopg://", "postgresql://", "postgres://")
+DEFAULT_PG_PORT = 5432
+
+
 def parse_db_url(url: str) -> dict:
-    """Split a SQLAlchemy URL into its parts (backend + connection fields)."""
-    if url.startswith("sqlite+aiosqlite://"):
-        return {"backend": "sqlite", "file": url[len("sqlite+aiosqlite://"):]}
-    if url.startswith("sqlite://"):
-        return {"backend": "sqlite", "file": url[len("sqlite://"):]}
-    for prefix in ("mysql+aiomysql://", "mysql+pymysql://", "mysql://"):
+    """Split a PostgreSQL SQLAlchemy URL into its parts."""
+    for prefix in _PG_PREFIXES:
         if url.startswith(prefix):
             rest = url[len(prefix):]
-            cred, _, hostport = rest.partition("@")
+            if "@" in rest:
+                cred, _, hostport = rest.rpartition("@")
+            else:
+                cred, hostport = "", rest
             user, _, password = cred.partition(":")
             hostport, _, database = hostport.partition("/")
-            # Strip URL query params (e.g. ?charset=utf8mb4) — they belong to
-            # the driver, not the database name.
+            # Strip URL query params (e.g. ?ssl=require) — they belong to the
+            # driver, not the database name.
             database = database.split("?", 1)[0]
             host, _, port = hostport.partition(":")
             return {
-                "backend": "mysql",
+                "backend": "postgresql",
                 "user": urllib.parse.unquote(user),
                 "password": urllib.parse.unquote(password),
-                "host": host,
-                "port": int(port) if port.isdigit() else 3306,
-                "database": database,
+                "host": host or "127.0.0.1",
+                "port": int(port) if port.isdigit() else DEFAULT_PG_PORT,
+                "database": urllib.parse.unquote(database),
             }
     return {"backend": url.split("://")[0], "url": url}
 
 
-def build_mysql_url(cfg: dict) -> str:
-    """Assemble a mysql+aiomysql URL from {host, port, user, password, name}."""
+def build_postgres_url(cfg: dict) -> str:
+    """Assemble a postgresql+asyncpg URL from {host, port, user, password, name}."""
     user = urllib.parse.quote_plus(cfg["user"])
     password = urllib.parse.quote_plus(cfg.get("password") or "")
-    port = int(cfg.get("port") or 3306)
+    port = int(cfg.get("port") or DEFAULT_PG_PORT)
     name = cfg.get("name") or ""
-    # utf8mb4 is the MySQL default for PAXS (full Unicode — DICOM names
-    # carry accented + Arabic characters; latin1 would truncate them).
-    return f"mysql+aiomysql://{user}:{password}@{cfg['host']}:{port}/{name}?charset=utf8mb4"
+    return f"postgresql+asyncpg://{user}:{password}@{cfg['host']}:{port}/{name}"
 
 
 def masked_url(url: str) -> str:
     """Connection string with the password hidden."""
     p = parse_db_url(url)
-    if p["backend"] == "sqlite":
-        return f"sqlite://{p.get('file') or ':memory:'}"
+    if p["backend"] != "postgresql":
+        return f"{p['backend']}://****"
     cred = f"{p['user']}:{'*' * max(4, len(p.get('password') or ''))}" if p.get("user") else "*" * 4
-    return f"mysql://{cred}@{p['host']}:{p['port']}/{p['database']}"
+    return f"postgresql://{cred}@{p['host']}:{p['port']}/{p['database']}"
+
+
+def _connect_kwargs(p: dict, database: str | None = None) -> dict:
+    """psycopg connection keywords from parsed URL parts (no URL string to leak)."""
+    return {
+        "host": p.get("host") or "127.0.0.1",
+        "port": int(p.get("port") or DEFAULT_PG_PORT),
+        "user": p.get("user") or "",
+        "password": p.get("password") or "",
+        "dbname": database if database is not None else (p.get("database") or "postgres"),
+    }
 
 
 # -------------------------------------------------- persisted configuration ----
@@ -133,13 +152,15 @@ def save_config(cfg: dict) -> None:
 
 
 def saved_password() -> str:
-    """The saved MySQL password, read back from the .env DATABASE_URL."""
+    """The saved PostgreSQL password, read back from the .env DATABASE_URL."""
     try:
         url = read_env().get("DATABASE_URL", "")
-        if url.startswith("mysql"):
+        if url.startswith(_PG_PREFIXES):
             return parse_db_url(url).get("password") or ""
-    except Exception:  # pragma: no cover - defensive
-        log.warning("Could not read saved password from env file", exc_info=True)
+    except Exception as exc:  # Defensive fallback; the exception may contain DATABASE_URL.
+        log.warning(
+            "db_saved_password_read_failed error_type=%s", type(exc).__name__
+        )
     return ""
 
 
@@ -156,11 +177,8 @@ def clear_saved_config() -> None:
 def resolve_url(cfg: dict | None = None) -> str:
     """Turn a (possibly partial) config dict into a DATABASE_URL."""
     if cfg:
-        backend = cfg.get("backend") or "mysql"
-        if backend == "sqlite":
-            return "sqlite+aiosqlite:///./paxs.db"
         if cfg.get("host") and cfg.get("name"):
-            return build_mysql_url(cfg)
+            return build_postgres_url(cfg)
     return settings.DATABASE_URL
 
 
@@ -208,8 +226,8 @@ def head_revision() -> str | None:
     try:
         sd = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
         return sd.get_current_head()
-    except Exception:  # pragma: no cover - defensive
-        log.warning("Could not resolve alembic head", exc_info=True)
+    except Exception as exc:  # Defensive discovery fallback; omit local config details.
+        log.warning("db_alembic_head_unavailable error_type=%s", type(exc).__name__)
         return None
 
 
@@ -227,9 +245,26 @@ def current_revision(url: str) -> str | None:
         eng.dispose()
 
 
+def revision_status(database_url: str) -> tuple[set[str], set[str]]:
+    """Return ``(current database revisions, code migration heads)``."""
+    from alembic.config import Config
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(ALEMBIC_INI))
+    heads = set(ScriptDirectory.from_config(cfg).get_heads())
+    engine = create_engine(to_sync_url(database_url), poolclass=NullPool)
+    try:
+        with engine.connect() as connection:
+            current = set(MigrationContext.configure(connection).get_current_heads())
+    finally:
+        engine.dispose()
+    return current, heads
+
+
 def _is_already_exists(exc: Exception) -> bool:
     """True when a migration failed because the schema is already present
-    (sqlite "table x already exists", MySQL "Duplicate column name")."""
+    (PostgreSQL ``relation "x" already exists`` / ``column "y" ... already exists``)."""
     msg = str(exc).lower()
     return "already exists" in msg or msg.startswith("duplicate ")
 
@@ -272,33 +307,53 @@ def _migration_config(url: str):
     return cfg
 
 
-def _advisory_lock(engine, name: str = "paxs_migrations") -> bool:
-    """Take a DB-level advisory lock where the backend supports one.
+_MIGRATION_LOCK_KEY = 0x50415853  # "PAXS" — one cluster-wide advisory lock id
+_MIGRATION_LOCK_WAIT_SECONDS = 30
 
-    Serialises migrations across processes on MySQL; SQLite has no equivalent,
-    so the in-process lock is the only guard there.
+
+def _advisory_lock(engine):
+    """Hold a PostgreSQL advisory lock for the whole migration run.
+
+    Returns the connection that owns the lock (session-level locks live as long
+    as their connection), or None when it could not be taken in time — the
+    caller then proceeds, and Alembic's transactional DDL still keeps a
+    concurrent run from half-applying a revision.
     """
-    if engine.dialect.name != "mysql":
-        return True
     try:
-        with engine.connect() as conn:
+        conn = engine.connect()
+    except Exception as exc:  # noqa: BLE001 - the upgrade itself will surface the error
+        log.warning("db_advisory_lock_unavailable error_type=%s", type(exc).__name__)
+        return None
+    deadline = time.monotonic() + _MIGRATION_LOCK_WAIT_SECONDS
+    try:
+        while True:
             got = conn.exec_driver_sql(
-                f"SELECT GET_LOCK('{name}', 30)"
+                f"SELECT pg_try_advisory_lock({_MIGRATION_LOCK_KEY})"
             ).scalar()
-        return bool(got)
-    except Exception:  # noqa: BLE001 - never block a migration on lock support
-        log.warning("advisory lock unavailable; continuing without it", exc_info=True)
-        return True
+            conn.commit()
+            if got:
+                return conn
+            if time.monotonic() >= deadline:
+                log.warning("db_advisory_lock_timeout seconds=%d", _MIGRATION_LOCK_WAIT_SECONDS)
+                conn.close()
+                return None
+            time.sleep(0.5)
+    except Exception as exc:  # noqa: BLE001 - documented fallback, no driver details
+        log.warning("db_advisory_lock_unavailable error_type=%s", type(exc).__name__)
+        conn.close()
+        return None
 
 
-def _release_advisory_lock(engine, name: str = "paxs_migrations") -> None:
-    if engine.dialect.name != "mysql":
+def _release_advisory_lock(conn) -> None:
+    if conn is None:
         return
     try:
-        with engine.connect() as conn:
-            conn.exec_driver_sql(f"SELECT RELEASE_LOCK('{name}')")
-    except Exception:  # noqa: BLE001
-        log.warning("could not release the advisory lock", exc_info=True)
+        conn.exec_driver_sql(f"SELECT pg_advisory_unlock({_MIGRATION_LOCK_KEY})")
+        conn.commit()
+    except Exception as exc:  # Release failure must not mask the migration result.
+        log.warning("db_advisory_lock_release_failed error_type=%s", type(exc).__name__)
+    finally:
+        conn.close()
 
 
 def run_migrations(url: str, stamp_on_exists: bool = False) -> tuple[list[str], bool]:
@@ -325,9 +380,9 @@ def run_migrations(url: str, stamp_on_exists: bool = False) -> tuple[list[str], 
     mig_logger.addHandler(handler)
     cfg = _migration_config(url)
     engine = create_engine(to_sync_url(url), poolclass=NullPool)
-    locked = False
+    lock_conn = None
     try:
-        locked = _advisory_lock(engine)
+        lock_conn = _advisory_lock(engine)
         command.upgrade(cfg, "head")
         return [ln for ln in buf.getvalue().splitlines() if ln.strip()], False
     except Exception as exc:
@@ -335,7 +390,7 @@ def run_migrations(url: str, stamp_on_exists: bool = False) -> tuple[list[str], 
             raise
         drift = schema_drift(url)
         detail = ", ".join(drift[:10]) if drift else "no missing objects detected"
-        raise RuntimeError(
+        raise MigrationDriftError(
             "Migration stopped: the target already contains objects a pending "
             f"migration would create, so its schema state is ambiguous. "
             f"Missing per the models: {detail}. "
@@ -343,8 +398,7 @@ def run_migrations(url: str, stamp_on_exists: bool = False) -> tuple[list[str], 
             "requires a clean parity check) — this is never done automatically."
         ) from exc
     finally:
-        if locked:
-            _release_advisory_lock(engine)
+        _release_advisory_lock(lock_conn)
         engine.dispose()
         mig_logger.removeHandler(handler)
 
@@ -372,68 +426,61 @@ def stamp_head(url: str) -> dict:
 
 
 def ensure_database(url: str) -> bool:
-    """Create the MySQL database if it does not exist (no-op for sqlite)."""
+    """Create the PostgreSQL database if it does not exist (UTF8 encoding)."""
     p = parse_db_url(url)
-    if p["backend"] != "mysql" or not p["database"]:
+    if p["backend"] != "postgresql" or not p["database"]:
         return False
     if not _NAME_RE.match(p["database"]):
         raise ValueError("Invalid database name (letters, digits, underscore only)")
-    import pymysql
+    import psycopg
 
-    conn = pymysql.connect(
-        host=p["host"], port=p["port"], user=p["user"], password=p["password"],
-        connect_timeout=5, charset="utf8mb4",
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"CREATE DATABASE IF NOT EXISTS `{p['database']}` "
-                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
-            )
-        conn.commit()
-    finally:
-        conn.close()
+    with psycopg.connect(**_connect_kwargs(p, "postgres"), connect_timeout=5, autocommit=True) as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM pg_database WHERE datname = %s", (p["database"],)
+        ).fetchone()
+        if exists:
+            return False
+        # CREATE DATABASE cannot run inside a transaction; the name is validated
+        # above (letters, digits, underscore) and quoted as an identifier.
+        conn.execute(
+            f"CREATE DATABASE \"{p['database']}\" ENCODING 'UTF8' TEMPLATE template0"
+        )
     return True
 
 
 # ------------------------------------------------------------ connectivity ----
-def test_mysql_connection(cfg: dict) -> dict:
-    """Probe a MySQL server (connect_timeout=3). No state is written."""
-    import pymysql
+def test_postgres_connection(cfg: dict) -> dict:
+    """Probe a PostgreSQL server (connect_timeout=3). No state is written."""
+    import psycopg
 
     t0 = time.perf_counter()
+    p = {
+        "host": cfg.get("host") or "127.0.0.1",
+        "port": int(cfg.get("port") or DEFAULT_PG_PORT),
+        "user": cfg.get("user") or "",
+        "password": cfg.get("password") or "",
+    }
     try:
-        conn = pymysql.connect(
-            host=cfg.get("host") or "127.0.0.1",
-            port=int(cfg.get("port") or 3306),
-            user=cfg.get("user") or "",
-            password=cfg.get("password") or "",
-            connect_timeout=3,
-        )
-    except Exception as exc:
+        conn = psycopg.connect(**_connect_kwargs(p, "postgres"), connect_timeout=3)
+    except Exception:
+        # Driver messages can echo the submitted username, password, or URL.
         return {
             "ok": False,
             "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
-            "error": str(exc),
+            "error": "Database connection failed",
         }
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT VERSION()")
-            version = cur.fetchone()[0]
-            name = cfg.get("name") or ""
-            db_exists = False
-            if name:
-                cur.execute(
-                    "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=%s",
-                    (name,),
-                )
-                db_exists = cur.fetchone()[0] > 0
+        version = str(conn.execute("SHOW server_version").fetchone()[0])
+        name = cfg.get("name") or ""
+        db_exists = bool(name) and conn.execute(
+            "SELECT 1 FROM pg_database WHERE datname = %s", (name,)
+        ).fetchone() is not None
     finally:
         conn.close()
     return {
         "ok": True,
         "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
-        "version": version,
+        "version": f"PostgreSQL {version}",
         "database": cfg.get("name") or "",
         "database_exists": db_exists,
     }
@@ -446,41 +493,25 @@ def backup_dir() -> Path:
     return path
 
 
-def _backup_sqlite(src_path: str, dest: Path) -> None:
-    src = sqlite3.connect(src_path)
-    try:
-        # The app's engines use busy_timeout=30s; match it here so a backup
-        # during active ingest waits instead of failing with SQLITE_BUSY.
-        src.execute("PRAGMA busy_timeout=30000")
-        dst = sqlite3.connect(str(dest))
-        try:
-            src.backup(dst)
-        finally:
-            dst.close()
-    finally:
-        src.close()
-
-
-def _dump_mysql_mysqldump(url: str, dest: Path) -> bool:
-    if not shutil.which("mysqldump"):
+def _dump_pg_dump(url: str, dest: Path) -> bool:
+    """``pg_dump`` custom-format archive (restore with ``pg_restore``)."""
+    if not shutil.which("pg_dump"):
         return False
     p = parse_db_url(url)
-    env = {**os.environ, "MYSQL_PWD": p.get("password") or ""}
+    env = {**os.environ, "PGPASSWORD": p.get("password") or ""}
     cmd = [
-        "mysqldump", "-h", p["host"], "-P", str(p["port"] or 3306),
-        "-u", p["user"], "--single-transaction", "--routines",
-        "--default-character-set=utf8mb4", p["database"],
+        "pg_dump", "-h", p["host"], "-p", str(p["port"] or DEFAULT_PG_PORT),
+        "-U", p["user"], "-F", "c", "--no-owner", "-f", str(dest), p["database"],
     ]
     try:
-        with open(dest, "wb") as fh:
-            result = subprocess.run(cmd, env=env, stdout=fh, stderr=subprocess.PIPE, timeout=300)
+        result = subprocess.run(cmd, env=env, stderr=subprocess.PIPE, timeout=1800)
         return result.returncode == 0
-    except Exception:  # pragma: no cover - mysqldump unavailable / broken
+    except Exception:  # pragma: no cover - pg_dump unavailable / broken
         return False
 
 
-def _dump_mysql_sqlalchemy(url: str, dest: Path) -> None:
-    """Pure-Python export fallback — CREATE TABLE + literal-binds INSERTs."""
+def _dump_sqlalchemy(url: str, dest: Path) -> None:
+    """Pure-Python export fallback — CREATE TABLE + literal-binds INSERTs (plain SQL)."""
     from sqlalchemy import MetaData
     from sqlalchemy.schema import CreateTable
 
@@ -489,9 +520,9 @@ def _dump_mysql_sqlalchemy(url: str, dest: Path) -> None:
     meta.reflect(bind=eng)
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out = [
-        "-- PAXS database dump (SQLAlchemy export)",
+        "-- PAXS database dump (SQLAlchemy export, PostgreSQL)",
         f"-- generated {stamp}",
-        "SET FOREIGN_KEY_CHECKS=0;",
+        "BEGIN;",
         "",
     ]
     with eng.connect() as conn:
@@ -506,10 +537,13 @@ def _dump_mysql_sqlalchemy(url: str, dest: Path) -> None:
                         stmt.compile(dialect=eng.dialect, compile_kwargs={"literal_binds": True})
                     )
                     out.append(sql + ";")
-                except Exception:
+                except Exception as exc:  # noqa: BLE001 - one bad row must not abort the dump
+                    # The dump stays usable: the row is skipped and the reason is
+                    # recorded in the SQL text itself, so the operator sees it.
+                    log.debug("db_dump_row_skipped error_type=%s", type(exc).__name__)
                     out.append(f"-- row skipped (unencodable literal) in {table.name}")
             out.append("")
-    out.append("SET FOREIGN_KEY_CHECKS=1;")
+    out.append("COMMIT;")
     eng.dispose()
     dest.write_text("\n".join(out), encoding="utf-8")
 
@@ -519,14 +553,11 @@ def create_backup() -> dict:
     url = settings.DATABASE_URL
     p = parse_db_url(url)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dest = backup_dir() / (
-        f"paxs-sqlite-{stamp}.sqlite" if p["backend"] == "sqlite"
-        else f"paxs-mysql-{stamp}.sql"
-    )
-    if p["backend"] == "sqlite":
-        _backup_sqlite(p["file"], dest)
-    elif not _dump_mysql_mysqldump(url, dest):
-        _dump_mysql_sqlalchemy(url, dest)
+    dest = backup_dir() / f"paxs-postgresql-{stamp}.dump"
+    if not _dump_pg_dump(url, dest):
+        dest.unlink(missing_ok=True)
+        dest = backup_dir() / f"paxs-postgresql-{stamp}.sql"
+        _dump_sqlalchemy(url, dest)
     return {
         "file": dest.name,
         "size": dest.stat().st_size,
@@ -555,6 +586,122 @@ def list_backups() -> list[dict]:
     ]
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        while chunk := fh.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_backup(name: str) -> dict[str, Any]:
+    """Verify a backup archive's readability, format markers, and SHA-256 checksum."""
+    path = backup_path(name)
+    size = path.stat().st_size
+    if size <= 0:
+        return {"ok": False, "file": name, "size": 0, "error": "Backup file is empty"}
+    sha256 = _file_sha256(path)
+    if path.suffix.lower() == ".dump":
+        with path.open("rb") as fh:
+            magic = fh.read(5)
+        if magic != b"PGDMP":
+            return {"ok": False, "file": name, "size": size, "sha256": sha256, "error": "Invalid pg_dump header"}
+        if shutil.which("pg_restore"):
+            res = subprocess.run(["pg_restore", "--list", str(path)], capture_output=True, timeout=60)
+            if res.returncode != 0:
+                return {"ok": False, "file": name, "size": size, "sha256": sha256, "error": "pg_restore verification failed"}
+        return {"ok": True, "file": name, "format": "pg_dump", "size": size, "sha256": sha256}
+    text = path.read_text(encoding="utf-8", errors="strict")
+    has_markers = "BEGIN;" in text and "COMMIT;" in text
+    if not has_markers:
+        return {"ok": False, "file": name, "size": size, "sha256": sha256, "error": "SQL dump missing BEGIN/COMMIT markers"}
+    return {"ok": True, "file": name, "format": "sql", "size": size, "sha256": sha256}
+
+
+def prune_old_backups(retention_count: int) -> int:
+    """Keep the newest ``retention_count`` backup files and remove older ones."""
+    keep = max(1, int(retention_count))
+    files = sorted(backup_dir().glob("paxs-*"), key=lambda x: x.stat().st_mtime, reverse=True)
+    removed = 0
+    for stale in files[keep:]:
+        stale.unlink(missing_ok=True)
+        removed += 1
+    return removed
+
+
+def get_backup_schedule() -> dict[str, Any]:
+    """Return persisted scheduled-backup settings from ``server_settings``."""
+    default: dict[str, Any] = {
+        "enabled": False, "time": "02:00", "retention_count": 7,
+        "last_run_date": None, "last_file": None, "last_verified": None,
+    }
+    try:
+        with SyncSessionLocal() as session:
+            row = session.execute(
+                select(ServerSetting).where(ServerSetting.key == BACKUP_SCHEDULE_KEY)
+            ).scalar_one_or_none()
+        if row is not None:
+            parsed = json.loads(row.value)
+            if isinstance(parsed, dict):
+                default.update(parsed)
+    except Exception as exc:  # noqa: BLE001 - safe fallback on fresh DB
+        log.debug("backup_schedule_read_failed error_type=%s", type(exc).__name__)
+    return default
+
+
+def save_backup_schedule(
+    enabled: bool, schedule_time: str, retention_count: int,
+    *, last_run_date: str | None = None, last_file: str | None = None, last_verified: bool | None = None,
+) -> dict[str, Any]:
+    """Persist scheduled-backup settings in ``server_settings``."""
+    clean_time = schedule_time.strip()
+    if not _TIME_RE.match(clean_time):
+        raise ValueError("schedule_time must be HH:MM (24-hour)")
+    keep = max(1, min(90, int(retention_count)))
+    current = get_backup_schedule()
+    updated = {
+        "enabled": bool(enabled),
+        "time": clean_time,
+        "retention_count": keep,
+        "last_run_date": last_run_date if last_run_date is not None else current.get("last_run_date"),
+        "last_file": last_file if last_file is not None else current.get("last_file"),
+        "last_verified": last_verified if last_verified is not None else current.get("last_verified"),
+    }
+    with SyncSessionLocal() as session:
+        row = session.execute(
+            select(ServerSetting).where(ServerSetting.key == BACKUP_SCHEDULE_KEY)
+        ).scalar_one_or_none()
+        payload = json.dumps(updated, ensure_ascii=False)
+        if row is None:
+            session.add(ServerSetting(key=BACKUP_SCHEDULE_KEY, value=payload))
+        else:
+            row.value = payload
+        session.commit()
+    return updated
+
+
+def run_scheduled_backup_if_due() -> dict[str, Any] | None:
+    """Run at most one verified backup per day when the scheduled window is reached."""
+    sched = get_backup_schedule()
+    if not sched.get("enabled"):
+        return None
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    if sched.get("last_run_date") == today:
+        return None
+    if now.strftime("%H:%M") < str(sched.get("time") or "02:00"):
+        return None
+    created = create_backup()
+    check = verify_backup(created["file"])
+    pruned = prune_old_backups(int(sched.get("retention_count") or 7))
+    save_backup_schedule(
+        True, str(sched["time"]), int(sched["retention_count"]),
+        last_run_date=today, last_file=created["file"], last_verified=bool(check.get("ok")),
+    )
+    log.info("Scheduled backup created=%s verified=%s pruned=%d", created["file"], check.get("ok"), pruned)
+    return {"created": created, "verification": check, "pruned": pruned}
+
+
 # ------------------------------------------------------------------ status ----
 def db_status() -> dict:
     url = settings.DATABASE_URL
@@ -570,7 +717,7 @@ def db_status() -> dict:
         "url_masked": masked_url(url),
         "host": p.get("host"),
         "port": p.get("port"),
-        "database": p.get("database") or p.get("file"),
+        "database": p.get("database"),
         "head_revision": head,
         "current_revision": cur,
         "up_to_date": bool(head and head == cur),
@@ -583,7 +730,12 @@ def db_status() -> dict:
 
 # --------------------------------------------------------- admin seeding -----
 def seed_admin(url: str, username: str, password: str, full_name: str | None = None) -> dict:
-    """Create the first ADMIN account on a target DB if none exists."""
+    """Create the first ADMIN account on a target DB if none exists.
+
+    B-4: the account is flagged ``must_change_password`` so the client forces a
+    rotation at first login — this path is automation-driven and the password
+    may have been generated or chosen by an operator on someone else's behalf.
+    """
     from sqlalchemy.orm import sessionmaker
 
     eng = create_engine(to_sync_url(url), poolclass=NullPool)
@@ -599,9 +751,11 @@ def seed_admin(url: str, username: str, password: str, full_name: str | None = N
                     password_hash=hash_password(password),
                     full_name=full_name,
                     role="ADMIN",
+                    auth_source=AuthSource.LOCAL,
+                    must_change_password=True,
                 )
             )
             session.commit()
-        return {"created": True, "username": username}
+        return {"created": True, "username": username, "must_change_password": True}
     finally:
         eng.dispose()

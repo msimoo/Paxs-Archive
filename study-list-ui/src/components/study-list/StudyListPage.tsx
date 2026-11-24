@@ -1,19 +1,41 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useStudies } from '@/hooks/use-studies';
 import { StatusChips } from './StatusChips';
 import { SearchToolbar } from './SearchToolbar';
 import { StudyTable } from './StudyTable';
 import { Pagination } from './Pagination';
-import { KpiHeader } from './KpiHeader';
+import { VitalsStrip } from './VitalsStrip';
 import { StudyDetailDrawer } from './StudyDetailDrawer';
 import { ShareModal } from './ShareModal';
 import { ForwardModal } from './ForwardModal';
 import { DeleteModal } from './DeleteModal';
 import { BurnStudyModal } from './BurnStudyModal';
 import { PaxsFooter } from '../common/PaxsFooter';
-import { appBasePath, setPatientNameDisplay } from '@/lib/api';
+import { ThemeToggle } from '../common/ThemeToggle';
+import { useTheme } from '@/hooks/use-theme';
+import {
+  apiFetch,
+  appBasePath,
+  canDeleteStudies,
+  clearAuthToken,
+  displayPatientName,
+  fetchCurrentUser,
+  getMediaExporterSession,
+  openMediaExporterLauncher,
+  type ExporterSessionStatus,
+} from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { Upload, Calendar, Network, LayoutGrid, List, Eye, FileText, LogOut } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import {
+  IconGrid,
+  IconNodes,
+  IconReport,
+  IconSchedule,
+  IconStudies,
+  IconTable,
+  IconUpload,
+} from '@/components/icons/PaxsIcons';
+import { LogOut } from 'lucide-react';
 import type { Study } from '@/types/study';
 
 interface CurrentUser {
@@ -26,7 +48,14 @@ interface StudyListPageProps {
   onOpenViewer?: () => void;
 }
 
-export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
+function isCurrentUser(value: unknown): value is CurrentUser {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.username === 'string' && typeof candidate.role === 'string';
+}
+
+export function StudyListPage(_props: StudyListPageProps) {
+  const { theme } = useTheme();
   const {
     studies,
     total,
@@ -40,7 +69,9 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
     setPage,
     setStatusFilter,
     toggleSpecialFilter,
-    setDateRange
+    setDateRange,
+    removeStudy,
+    refresh,
   } = useStudies();
 
   const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
@@ -50,35 +81,47 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
   const [forwardOpen, setForwardOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [burnStudy, setBurnStudy] = useState<Study | null>(null);
+  const [exporterTracker, setExporterTracker] = useState<{
+    sessionId: string;
+    studyLabel: string;
+    status: ExporterSessionStatus | null;
+  } | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
 
-  useEffect(() => {
-    const token = localStorage.getItem('paxs_token');
-    const headers: Record<string, string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
+  // Delete is administrator-only. The role loads asynchronously, so this fails
+  // closed: the control is not rendered until an ADMIN identity is known.
+  const canDelete = canDeleteStudies(currentUser?.role);
 
-    fetch(`${appBasePath()}/api/v1/auth/me`, { headers, credentials: 'same-origin' })
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        if (data) {
-          setPatientNameDisplay(data.patient_name_display);
-          setCurrentUser(data);
-        }
-      })
-      .catch(() => {});
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    window.setTimeout(() => setToastMessage(null), 3000);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void fetchCurrentUser()
+      .then((data) => {
+        if (!isCurrentUser(data)) throw new Error('The signed-in user response was invalid.');
+        if (active) setCurrentUser(data);
+      })
+      .catch((error: unknown) => {
+        if (active && !(error instanceof Error && error.name === 'AbortError')) {
+          showToast(error instanceof Error ? error.message : 'Could not load the signed-in user.');
+        }
+      });
+    return () => { active = false; };
+  }, [showToast]);
 
   const handleLogout = async () => {
     try {
-      await fetch(`${appBasePath()}/api/v1/auth/logout`, { method: 'POST', credentials: 'same-origin' });
-    } catch (err) {
-      console.error('Logout error:', err);
+      const response = await apiFetch(`${appBasePath()}/api/v1/auth/logout`, { method: 'POST' });
+      if (!response.ok) throw new Error(`Sign out failed (${response.status}).`);
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : 'Sign out failed.');
     } finally {
-      try {
-        localStorage.removeItem('paxs_token');
-      } catch (_) {}
-      window.location.href = '/login';
+      clearAuthToken();
+      window.location.assign(`${appBasePath()}/login`);
     }
   };
 
@@ -87,9 +130,94 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
     setDrawerOpen(true);
   };
 
-  const handleActionClick = (action: 'share' | 'forward' | 'delete' | 'burn', study: Study) => {
-    if (action === 'burn') {
+  // Poll live progress from standalone PAXS-MediaExporter.exe until verified or failed.
+  useEffect(() => {
+    if (!exporterTracker) return;
+    const phase = exporterTracker.status?.phase;
+    if (phase === 'verified' || phase === 'failed') return;
+
+    const controller = new AbortController();
+    let timer = 0;
+
+    async function poll() {
+      if (!exporterTracker) return;
+      try {
+        const next = await getMediaExporterSession(exporterTracker.sessionId, controller.signal);
+        if (controller.signal.aborted) return;
+        setExporterTracker((prev) =>
+          prev && prev.sessionId === exporterTracker.sessionId ? { ...prev, status: next } : prev,
+        );
+        if (next.phase === 'verified' || next.phase === 'failed') return;
+      } catch {
+        if (controller.signal.aborted) return;
+      }
+      timer = window.setTimeout(poll, 900);
+    }
+
+    timer = window.setTimeout(poll, 700);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [exporterTracker]);
+
+  const launchStandaloneExporter = async (study: Study, mode: 'media' | 'dicom-zip') => {
+    const studyLabel = displayPatientName(study.patient_name) || study.patient_id || study.study_uid;
+    try {
+      const res = await openMediaExporterLauncher(study.study_uid, mode);
+      if (res.launched) {
+        setExporterTracker({
+          sessionId: res.session_id,
+          studyLabel,
+          status: {
+            session_id: res.session_id,
+            study_uid: study.study_uid,
+            mode,
+            phase: 'launching',
+            percent: 0,
+            message: 'PAXS Media Exporter Studio opened — waiting for destination selection…',
+            target_label: '',
+            output_path: null,
+            files_done: 0,
+            files_total: study.n_instances || 0,
+            bytes_written: 0,
+            speed_mbps: 0,
+            microdicom_verified: false,
+            error: null,
+          },
+        });
+        showToast(
+          mode === 'media'
+            ? 'Launched PAXS Media Exporter Studio (CD/DVD/USB + MicroDicom 2026.5).'
+            : 'Launched PAXS Media Exporter Studio — choose your export directory.',
+        );
+        return;
+      }
+    } catch {
+      // Fall back cleanly to built-in web modal / direct browser download below.
+    }
+
+    if (mode === 'media') {
       setBurnStudy(study);
+    } else {
+      const href = `${appBasePath()}/api/v1/export/dicomdir/client/${encodeURIComponent(study.study_uid)}/dicom-zip`;
+      window.location.assign(href);
+    }
+  };
+
+  const handleActionClick = (action: 'share' | 'forward' | 'delete' | 'burn' | 'export-zip', study: Study) => {
+    if (action === 'burn') {
+      void launchStandaloneExporter(study, 'media');
+      return;
+    }
+    if (action === 'export-zip') {
+      void launchStandaloneExporter(study, 'dicom-zip');
+      return;
+    }
+    // The delete control is only rendered for an ADMIN, but a stale role (or a
+    // keyboard/programmatic dispatch) must not reach the modal either.
+    if (action === 'delete' && !canDelete) {
+      showToast('Only an administrator can delete studies.');
       return;
     }
     setSelectedStudy(study);
@@ -98,205 +226,342 @@ export function StudyListPage({ onOpenViewer }: StudyListPageProps) {
     if (action === 'delete') setDeleteOpen(true);
   };
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
-  };
-
   const handleDeleteConfirm = (uid: string) => {
+    removeStudy(uid);
+    setSelectedStudy((current) => current?.study_uid === uid ? null : current);
+    setDrawerOpen(false);
+    void refresh();
     showToast(`Study ${uid} deleted successfully.`);
   };
 
   return (
-    <div className="min-h-screen bg-[#070c18] text-slate-200 font-sans relative overflow-hidden selection:bg-cyan-500/30">
-      <div className="absolute top-[-20%] right-[-10%] w-[50%] h-[50%] rounded-full bg-cyan-900/20 blur-[120px] pointer-events-none" />
-      <div className="absolute bottom-[-20%] left-[-10%] w-[40%] h-[40%] rounded-full bg-teal-900/10 blur-[120px] pointer-events-none" />
+    /* A workstation, not a document: on a desktop viewport the page itself never
+       scrolls — the table does, and the header, command bar and pagination stay
+       put. Below `lg` the shell relaxes back to normal document flow so a phone
+       can still scroll the whole page. */
+    <div className="relative flex min-h-[100dvh] flex-col overflow-x-hidden bg-ink text-foreground lg:h-[100dvh] lg:overflow-hidden">
+      {/* The room: auroras + instrument grid, purely decorative. */}
+      <div className="room-backdrop" aria-hidden="true" />
 
-      {toastMessage && (
-        <div className="fixed bottom-4 right-4 bg-emerald-950/90 border border-emerald-500/50 text-emerald-200 px-4 py-3 rounded-lg shadow-lg z-50 animate-in slide-in-from-bottom-5">
+      {exporterTracker && exporterTracker.status && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="animate-slide-up fixed bottom-5 right-5 z-50 w-[360px] max-w-[calc(100vw-2rem)] rounded-2xl border border-accent/40 bg-panel/95 p-3.5 text-foreground shadow-[var(--paxs-shadow)] backdrop-blur-xl"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-accent">
+                <span
+                  className={cn(
+                    'h-2 w-2 rounded-full',
+                    exporterTracker.status.phase === 'verified'
+                      ? 'bg-ok'
+                      : exporterTracker.status.phase === 'failed'
+                        ? 'bg-danger'
+                        : 'animate-pulse bg-accent',
+                  )}
+                />
+                PAXS Media Exporter · {exporterTracker.status.phase}
+              </div>
+              <div className="mt-0.5 truncate text-[13px] font-semibold">{exporterTracker.studyLabel}</div>
+            </div>
+            <button
+              type="button"
+              aria-label="Dismiss export tracker"
+              onClick={() => setExporterTracker(null)}
+              className="rounded-md px-1.5 py-0.5 text-xs text-muted hover:bg-raised-2 hover:text-foreground"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-raised-2">
+            <div
+              className={cn(
+                'h-full transition-all duration-300',
+                exporterTracker.status.phase === 'verified'
+                  ? 'bg-ok'
+                  : exporterTracker.status.phase === 'failed'
+                    ? 'bg-danger'
+                    : 'bg-accent',
+              )}
+              style={{ width: `${Math.max(4, Math.min(100, exporterTracker.status.percent))}%` }}
+            />
+          </div>
+          <p className="mt-1.5 text-[11.5px] text-muted">
+            {exporterTracker.status.error || exporterTracker.status.message}
+          </p>
+          <div className="mt-1.5 flex items-center justify-between font-mono text-[10.5px] text-faint">
+            <span>
+              {exporterTracker.status.percent}% · {exporterTracker.status.files_done}/{exporterTracker.status.files_total} files
+            </span>
+            <span>
+              {exporterTracker.status.microdicom_verified
+                ? '✓ MicroDicom 2026.5 Ready'
+                : exporterTracker.status.speed_mbps > 0
+                  ? `${exporterTracker.status.speed_mbps.toFixed(1)} MB/s`
+                  : exporterTracker.status.target_label || ''}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {toastMessage && !exporterTracker && (
+        <div
+          role="status"
+          className="animate-slide-up fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-xl border border-ok/40 bg-panel px-4 py-3 text-sm font-medium text-foreground shadow-[var(--paxs-shadow)]"
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-ok" aria-hidden="true" />
           {toastMessage}
         </div>
       )}
 
-      <main className="relative z-10 max-w-[1600px] mx-auto p-6 md:p-8 flex flex-col gap-6 min-h-screen">
-        
-        {/* Header */}
-        <header className="flex flex-col md:flex-row md:items-end justify-between gap-4 pb-2 border-b border-slate-800/60">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
-              Patient Studies
-              {loading && <span className="flex h-3 w-3 relative"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-cyan-500"></span></span>}
-            </h1>
-            <p className="text-slate-500 mt-1 text-sm">Manage and review radiological examinations</p>
+      {/* ── Top bar: brand · title · vitals · session ─────────────── */}
+      <header className="sticky top-0 z-40 shrink-0 border-b border-hairline bg-ink/80 backdrop-blur-xl">
+        <div className="mx-auto flex h-[52px] max-w-[1680px] items-center gap-2.5 px-3 sm:px-6 lg:px-8">
+          <img
+            src={theme === 'light' ? '/static/logo/dark-viewer.png' : '/static/logo/light-viewer.png'}
+            alt="PAXS Archive logo"
+            title="PAXS Archive · Study list"
+            data-paxs-theme-logo="1"
+            className="h-8 w-[84px] shrink-0 object-contain"
+          />
+
+          <span aria-hidden="true" className="hidden h-6 w-px shrink-0 bg-hairline-strong sm:block" />
+
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="grid size-7 place-items-center rounded-lg border border-accent/25 bg-accent/10">
+              <IconStudies className="size-4" />
+            </span>
+            <h1 className="text-[15px] font-bold tracking-tight sm:text-base">Patient studies</h1>
+            {loading && (
+              <span role="status" className="relative flex size-2" aria-label="Refreshing studies">
+                <span className="absolute inline-flex size-full animate-ping rounded-full bg-accent opacity-70" />
+                <span className="relative inline-flex size-2 rounded-full bg-accent" />
+              </span>
+            )}
           </div>
-          <div className="flex flex-wrap items-center gap-3" data-paxs-react-user-chip="1">
+
+          <VitalsStrip counts={counts} className="ml-1 hidden xl:flex" />
+
+          {/* One right-aligned cluster: the listener heartbeat, then the session
+              controls. Both margins must not be `auto`, or free space splits
+              between them and the pill drifts away from the buttons. */}
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            {/* Listener heartbeat — the one fact that is about the service, not the data. */}
+            <span
+              title="DICOM DIMSE listener: C-STORE · C-FIND · C-MOVE"
+              className="hidden shrink-0 items-center gap-1.5 rounded-full border border-ok/35 bg-ok/[0.08] py-[3px] pl-2 pr-2.5 xl:inline-flex"
+            >
+              <span className="relative flex size-1.5" aria-hidden="true">
+                <span className="absolute inline-flex size-full animate-ping rounded-full bg-ok opacity-70" />
+                <span className="relative inline-flex size-1.5 rounded-full bg-ok" />
+              </span>
+              <span className="font-mono text-[11px] font-bold leading-none text-ok">:10400</span>
+              <span className="text-[9px] font-semibold uppercase leading-none tracking-[0.13em] text-faint">dicom live</span>
+            </span>
+
+            <ThemeToggle />
+
+            <div
+              className="hidden items-center gap-2 rounded-full border border-hairline bg-panel/60 py-1 pl-1 pr-3 sm:flex"
+              data-paxs-react-user-chip="1"
+            >
+              <span className="grid h-6 w-6 place-items-center rounded-full bg-gradient-to-tr from-accent to-teal text-[10px] font-black text-[#04121f]">
+                {(currentUser?.full_name || currentUser?.username || '?').charAt(0).toUpperCase()}
+              </span>
+              <span className="flex max-w-[150px] flex-col leading-none">
+                <span className="truncate text-[11.5px] font-semibold text-foreground">
+                  {currentUser ? (currentUser.full_name || currentUser.username) : 'Signing in…'}
+                </span>
+                <span className="mt-0.5 font-mono text-[8.5px] font-bold uppercase tracking-[0.14em] text-accent">
+                  {currentUser?.role ?? '—'}
+                </span>
+              </span>
+            </div>
+
             <Button
-              onClick={() => {
-                // H16: bound to the explicit selection — never to whatever
-                // happens to be first in the (sortable) list.
-                if (selectedStudy) {
-                  (window as any).paxsOpenReportModal?.(selectedStudy.study_uid);
-                }
-              }}
-              disabled={!selectedStudy}
-              title={
-                selectedStudy
-                  ? `Open report for ${selectedStudy.patient_name.replace(/\^/g, ' ')} — ${selectedStudy.study_uid}`
-                  : 'Select a study to open/create report'
-              }
-              className="bg-gradient-to-r from-emerald-600 to-teal-500 text-white font-bold hover:brightness-110 shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:brightness-100"
+              onClick={handleLogout}
+              variant="ghost"
+              size="sm"
+              title="Sign out of your account"
+              aria-label="Sign out"
+              className="h-8 gap-1.5 px-2.5 text-[12px] text-danger hover:bg-danger/10 hover:text-danger"
             >
-              <FileText className="w-4 h-4 mr-2" />
-              📝 Diagnostic Report
+              <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="hidden sm:inline">Sign out</span>
             </Button>
-            <Button 
-              onClick={() => window.location.href = '/#nodes'}
-              variant="ghost" 
-              className="text-slate-400 hover:text-cyan-400 hover:bg-cyan-950/30 border border-slate-800 cursor-pointer"
-            >
-              <Network className="w-4 h-4 mr-2" />
-              Nodes
-            </Button>
-            <Button 
-              onClick={() => window.location.href = '/#workflow'}
-              variant="outline" 
-              className="bg-[#0c1424] border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800 cursor-pointer"
-            >
-              <Calendar className="w-4 h-4 mr-2" />
-              Schedule
-            </Button>
-            <Button 
-              onClick={() => window.location.href = '/#studies'}
-              className="bg-cyan-600 hover:bg-cyan-500 text-white shadow-[0_0_15px_rgba(34,211,238,0.3)] cursor-pointer"
-            >
-              <Upload className="w-4 h-4 mr-2" />
-              Upload DICOM
-            </Button>
+          </div>
+        </div>
+      </header>
 
-            {/* User Profile Info & Logout */}
-            <div className="flex items-center gap-2 pl-2 border-l border-slate-800/80">
-              {currentUser ? (
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-[#0c1424]/90 border border-slate-700/60 rounded-full shadow-inner">
-                  <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-cyan-600 to-teal-400 text-[#04121f] font-black text-xs flex items-center justify-center shadow-sm">
-                    {(currentUser.full_name || currentUser.username || '?').charAt(0).toUpperCase()}
-                  </div>
-                  <div className="flex flex-col leading-none">
-                    <span className="text-xs font-bold text-slate-200 truncate max-w-[120px]">
-                      {currentUser.full_name || currentUser.username}
-                    </span>
-                    <span className="text-[9px] font-extrabold text-cyan-400 uppercase tracking-wider">
-                      {currentUser.role}
-                    </span>
-                  </div>
-                </div>
-              ) : null}
+      <main className="relative z-10 mx-auto flex w-full min-h-0 max-w-[1680px] flex-1 flex-col gap-2 px-3 py-2 sm:px-6 lg:px-8">
 
+        {/* ── Command bar: search · filters · view · verbs ──────────── */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="min-w-[240px] flex-1">
+            <SearchToolbar
+              filters={filters}
+              setSearch={setSearch}
+              setModality={setModality}
+              setDateRange={setDateRange}
+            />
+          </div>
+
+          <div className="flex shrink-0 items-center gap-1.5">
+            <div
+              role="group"
+              aria-label="View mode"
+              className="flex items-center gap-0.5 rounded-lg border border-hairline bg-panel/60 p-0.5"
+            >
+              {([
+                { mode: 'table' as const, icon: IconTable, label: 'Table view' },
+                { mode: 'grid' as const, icon: IconGrid, label: 'Grid view' },
+              ]).map(({ mode, icon: Icon, label }) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-label={label}
+                  aria-pressed={viewMode === mode}
+                  onClick={() => setViewMode(mode)}
+                  className={cn(
+                    'focus-ring grid h-8 w-8 place-items-center rounded-md transition-colors',
+                    viewMode === mode
+                      ? 'bg-raised-2 shadow-[inset_0_1px_0_var(--paxs-sheen)]'
+                      : 'opacity-55 hover:bg-raised/60 hover:opacity-100',
+                  )}
+                >
+                  <Icon className="size-4" />
+                </button>
+              ))}
+            </div>
+
+            <span aria-hidden="true" className="mx-0.5 hidden h-5 w-px bg-hairline-strong sm:block" />
+
+            <div className="flex items-center gap-1.5">
               <Button
-                onClick={handleLogout}
+                onClick={() => {
+                  // H16: bound to the explicit selection — never to whatever
+                  // happens to be first in the (sortable) list.
+                  if (selectedStudy) {
+                    window.paxsOpenReportModal?.(selectedStudy.study_uid);
+                  }
+                }}
+                disabled={!selectedStudy}
+                title={
+                  selectedStudy
+                    ? `Open report for ${displayPatientName(selectedStudy.patient_name)} — ${selectedStudy.study_uid}`
+                    : 'Select a study to open/create report'
+                }
+                size="sm"
+                variant="outline"
+                className="h-9 gap-1.5 px-2.5"
+              >
+                <IconReport className="size-4" />
+                <span className="hidden 2xl:inline">Report</span>
+              </Button>
+              <Button
+                onClick={() => window.location.href = '/#nodes'}
                 variant="outline"
                 size="sm"
-                className="bg-rose-950/20 border-rose-800/40 text-rose-300 hover:text-white hover:bg-rose-600/90 hover:border-rose-500 transition-all font-semibold text-xs px-3 shadow-sm cursor-pointer"
-                title="Sign out of your account"
+                title="DICOM nodes"
+                className="h-9 gap-1.5 px-2.5"
               >
-                <LogOut className="w-3.5 h-3.5 mr-1.5" />
-                Logout
+                <IconNodes className="size-4" />
+                <span className="hidden 2xl:inline">Nodes</span>
+              </Button>
+              <Button
+                onClick={() => window.location.href = '/#workflow'}
+                variant="outline"
+                size="sm"
+                title="Modality worklist"
+                className="h-9 gap-1.5 px-2.5"
+              >
+                <IconSchedule className="size-4" />
+                <span className="hidden 2xl:inline">Schedule</span>
+              </Button>
+              <Button
+                onClick={() => window.location.href = '/#studies'}
+                variant="secondary"
+                size="sm"
+                title="Upload DICOM"
+                className="h-9 gap-1.5 px-2.5"
+              >
+                <IconUpload className="size-4" />
+                <span className="hidden 2xl:inline">Upload</span>
               </Button>
             </div>
           </div>
-        </header>
-
-        <KpiHeader counts={counts} />
+        </div>
 
         {error && (
-          <div className="bg-rose-950/50 border border-rose-500/50 text-rose-200 px-4 py-3 rounded-lg flex items-center backdrop-blur-sm">
-            <span className="font-semibold mr-2">Error:</span> {error}
+          <div
+            role="alert"
+            className="flex items-center gap-2 rounded-xl border border-danger/40 bg-danger/10 px-4 py-2 text-[13px] text-danger"
+          >
+            <span className="font-semibold">Error:</span> {error}
           </div>
         )}
 
-        {/* Filters & View Toggles */}
-        <section className="flex flex-col gap-5 z-20">
-          <div className="flex justify-between items-start gap-4">
-            <div className="flex-1">
-              <StatusChips 
-                filters={filters} 
-                counts={counts} 
-                setStatusFilter={setStatusFilter} 
-                toggleSpecialFilter={toggleSpecialFilter} 
-              />
-            </div>
-            <div className="flex bg-[#0c1424] p-1 rounded-lg border border-slate-700/50">
-              <button 
-                onClick={() => setViewMode('table')} 
-                className={`p-1.5 rounded-md transition-colors ${viewMode === 'table' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:text-slate-300'}`}
-              >
-                <List className="w-4 h-4" />
-              </button>
-              <button 
-                onClick={() => setViewMode('grid')} 
-                className={`p-1.5 rounded-md transition-colors ${viewMode === 'grid' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:text-slate-300'}`}
-              >
-                <LayoutGrid className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-          <SearchToolbar 
-            filters={filters} 
-            setSearch={setSearch} 
-            setModality={setModality} 
-            setDateRange={setDateRange} 
-          />
-        </section>
+        <StatusChips
+          filters={filters}
+          counts={counts}
+          setStatusFilter={setStatusFilter}
+          toggleSpecialFilter={toggleSpecialFilter}
+        />
 
-        {/* Table Area */}
-        <section className="flex-1 min-h-0 flex flex-col gap-4 relative z-10">
-          <StudyTable 
-            studies={studies} 
-            loading={loading} 
-            filters={filters} 
+        {/* ── The list ────────────────────────────────────────────── */}
+        <section className="flex min-h-0 flex-1 flex-col gap-1.5" aria-label="Study list">
+          <StudyTable
+            studies={studies}
+            loading={loading}
+            filters={filters}
             setSort={setSort}
             viewMode={viewMode}
             onStudyClick={handleStudyClick}
             onActionClick={handleActionClick}
+            canDelete={canDelete}
           />
-          <Pagination 
-            page={filters.page || 1} 
-            limit={filters.limit || 20} 
-            total={total} 
-            setPage={setPage} 
+          <Pagination
+            page={filters.page || 1}
+            limit={filters.limit || 20}
+            total={total}
+            setPage={setPage}
           />
         </section>
       </main>
 
-      {/* PAXS Archive Site Footer */}
       <PaxsFooter />
 
-      {/* Modals & Drawers */}
-      <StudyDetailDrawer 
-        study={selectedStudy} 
-        isOpen={drawerOpen} 
-        onClose={() => setDrawerOpen(false)} 
+      {/* Modals & Drawer */}
+      <StudyDetailDrawer
+        study={selectedStudy}
+        isOpen={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
         onAction={handleActionClick}
         onToast={showToast}
+        canDelete={canDelete}
       />
-      
-      <ShareModal 
-        study={selectedStudy} 
-        isOpen={shareOpen} 
+
+      <ShareModal
+        study={selectedStudy}
+        isOpen={shareOpen}
         onClose={() => setShareOpen(false)}
         onToast={showToast}
       />
 
-      <ForwardModal 
-        study={selectedStudy} 
-        isOpen={forwardOpen} 
+      <ForwardModal
+        study={selectedStudy}
+        isOpen={forwardOpen}
         onClose={() => setForwardOpen(false)}
         onToast={showToast}
       />
 
       {burnStudy && <BurnStudyModal study={burnStudy} onClose={() => setBurnStudy(null)} />}
-      <DeleteModal 
-        study={selectedStudy} 
-        isOpen={deleteOpen} 
+
+      <DeleteModal
+        study={selectedStudy}
+        isOpen={deleteOpen}
         onClose={() => setDeleteOpen(false)}
         onConfirm={handleDeleteConfirm}
       />

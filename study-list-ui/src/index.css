@@ -2,24 +2,112 @@
 
 @import 'tailwindcss';
 
-@theme {
-  /* Custom colors */
-  --color-ink: #070c18;
-  --color-panel: #0c1424;
-  --color-raised: #111c30;
-  --color-raised-2: #16233c;
-  --color-accent: #22d3ee;
-  --color-teal: #2dd4bf;
-  --color-danger: #f87171;
-  --color-ok: #34d399;
-  --color-text-primary: #e2e8f0;
-  --color-text-muted: #8b9bb4;
-  --color-text-faint: #5b6b85;
-  --color-hairline: rgba(148, 163, 184, 0.14);
-  --color-hairline-strong: rgba(148, 163, 184, 0.28);
-  --color-glow: rgba(34, 211, 238, 0.06);
-  
-  /* Modality colors */
+/* ============================================================
+   PAXS Archive — Study List workstation
+   Two rooms, one token set:
+     · dark  = reading room (default, `data-theme="dark"`)
+     · light = clinical daylight (`data-theme="light"`)
+   The names and values mirror `app/static/styles.css` so the
+   dashboard and this SPA are the same product, not two skins.
+   ============================================================ */
+
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --paxs-ink: #070c18;
+  --paxs-panel: #0c1424;
+  --paxs-raised: #111c30;
+  --paxs-raised-2: #16233c;
+
+  --paxs-text: #e2e8f0;
+  --paxs-muted: #8b9bb4;
+  --paxs-faint: #5b6b85;
+
+  --paxs-accent: #22d3ee;
+  --paxs-accent-ink: #04121f;
+  --paxs-teal: #2dd4bf;
+  --paxs-ok: #34d399;
+  --paxs-danger: #f87171;
+  --paxs-warn: #fbbf24;
+
+  --paxs-hairline: rgba(148, 163, 184, 0.14);
+  --paxs-hairline-strong: rgba(148, 163, 184, 0.28);
+
+  --paxs-glass: rgba(12, 20, 36, 0.65);
+  --paxs-glass-strong: rgba(12, 20, 36, 0.92);
+  --paxs-veil: rgba(6, 10, 18, 0.78);
+  --paxs-glow: rgba(34, 211, 238, 0.06);
+
+  --paxs-shadow: 0 24px 60px rgba(2, 8, 20, 0.45);
+  --paxs-shadow-soft: 0 8px 24px rgba(3, 7, 24, 0.35);
+  --paxs-sheen: rgba(255, 255, 255, 0.04);
+
+  --paxs-aurora-a: rgba(34, 211, 238, 0.16);
+  --paxs-aurora-b: rgba(45, 212, 191, 0.1);
+  --paxs-grid-line: rgba(148, 163, 184, 0.07);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --paxs-ink: #eef2f7;
+  --paxs-panel: #ffffff;
+  --paxs-raised: #ffffff;
+  --paxs-raised-2: #e7edf6;
+
+  --paxs-text: #0f172a;
+  --paxs-muted: #475569;
+  --paxs-faint: #64748b;
+
+  --paxs-accent: #0e7490;
+  --paxs-accent-ink: #ffffff;
+  --paxs-teal: #0f766e;
+  --paxs-ok: #059669;
+  --paxs-danger: #dc2626;
+  --paxs-warn: #b45309;
+
+  --paxs-hairline: rgba(15, 23, 42, 0.1);
+  --paxs-hairline-strong: rgba(15, 23, 42, 0.2);
+
+  --paxs-glass: rgba(255, 255, 255, 0.78);
+  --paxs-glass-strong: rgba(255, 255, 255, 0.96);
+  --paxs-veil: rgba(15, 23, 42, 0.35);
+  --paxs-glow: rgba(8, 145, 178, 0.05);
+
+  --paxs-shadow: 0 24px 50px rgba(15, 23, 42, 0.12);
+  --paxs-shadow-soft: 0 6px 18px rgba(15, 23, 42, 0.08);
+  --paxs-sheen: rgba(15, 23, 42, 0.03);
+
+  --paxs-aurora-a: rgba(8, 145, 178, 0.12);
+  --paxs-aurora-b: rgba(15, 118, 110, 0.08);
+  --paxs-grid-line: rgba(15, 23, 42, 0.055);
+}
+
+/* `inline` keeps the utilities pointing at the live custom property, so a
+   theme flip re-colours every component without re-rendering React. */
+@theme inline {
+  --color-ink: var(--paxs-ink);
+  --color-panel: var(--paxs-panel);
+  --color-raised: var(--paxs-raised);
+  --color-raised-2: var(--paxs-raised-2);
+
+  --color-foreground: var(--paxs-text);
+  --color-muted: var(--paxs-muted);
+  --color-faint: var(--paxs-faint);
+
+  --color-accent: var(--paxs-accent);
+  --color-accent-ink: var(--paxs-accent-ink);
+  --color-teal: var(--paxs-teal);
+  --color-ok: var(--paxs-ok);
+  --color-danger: var(--paxs-danger);
+  --color-warn: var(--paxs-warn);
+
+  --color-hairline: var(--paxs-hairline);
+  --color-hairline-strong: var(--paxs-hairline-strong);
+  --color-glass: var(--paxs-glass);
+
+  /* Modality inks — identical in both themes: a CT is always sky. */
   --color-mod-ct: #38bdf8;
   --color-mod-mr: #a78bfa;
   --color-mod-cr: #fbbf24;
@@ -30,66 +118,114 @@
   --color-mod-xa: #22d3ee;
   --color-mod-mg: #e879f9;
   --color-mod-ot: #94a3b8;
-  
-  /* Fonts */
+
   --font-sans: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, monospace;
-  
-  /* Radius */
-  --radius-panel: 14px;
-  --radius-card: 10px;
-  --radius-sm: 6px;
+
+  --radius-panel: 18px;
+  --radius-card: 14px;
+  --radius-sm: 8px;
 }
 
-:root {
-  /* Custom non-Tailwind properties */
-  --bg-radial-gradient: radial-gradient(circle at 50% -20%, rgba(34, 211, 238, 0.15) 0%, rgba(7, 12, 24, 0) 70%);
-  --glass-bg: rgba(12, 20, 36, 0.65);
-  --glass-border: rgba(148, 163, 184, 0.1);
+* {
+  border-color: var(--paxs-hairline);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
-  background-color: var(--color-ink);
-  background-image: var(--bg-radial-gradient);
-  background-attachment: fixed;
-  color: var(--color-text-primary);
+  margin: 0;
+  background-color: var(--paxs-ink);
+  color: var(--paxs-text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.28s ease, color 0.28s ease;
 }
 
-/* Glassmorphism utility */
+/* The room: two soft auroras over a faint instrument grid. Purely decorative,
+   `pointer-events: none`, and it never scrolls with content. */
+.room-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(60% 45% at 78% -8%, var(--paxs-aurora-a) 0%, transparent 70%),
+    radial-gradient(50% 40% at 4% 104%, var(--paxs-aurora-b) 0%, transparent 70%),
+    linear-gradient(var(--paxs-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--paxs-grid-line) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 56px 56px, 56px 56px;
+  mask-image: radial-gradient(120% 100% at 50% 0%, #000 35%, transparent 85%);
+  -webkit-mask-image: radial-gradient(120% 100% at 50% 0%, #000 35%, transparent 85%);
+}
+
+/* Glass surfaces. One definition, both themes. */
 .glass-panel {
-  background: var(--glass-bg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid var(--glass-border);
-  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+  background: var(--paxs-glass);
+  backdrop-filter: blur(18px) saturate(1.15);
+  -webkit-backdrop-filter: blur(18px) saturate(1.15);
+  border: 1px solid var(--paxs-hairline);
+  box-shadow: var(--paxs-shadow-soft);
 }
 
-/* Scrollbar styling */
+.glass-panel-strong {
+  background: var(--paxs-glass-strong);
+  backdrop-filter: blur(22px) saturate(1.2);
+  -webkit-backdrop-filter: blur(22px) saturate(1.2);
+  border: 1px solid var(--paxs-hairline);
+  box-shadow: var(--paxs-shadow);
+}
+
+/* A hairline that reads as a lit edge, not a box border. */
+.edge-lit {
+  position: relative;
+}
+.edge-lit::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(160deg, var(--paxs-sheen), transparent 38%, transparent 62%, var(--paxs-sheen));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Focus ring that works on both grounds. */
+.focus-ring:focus-visible {
+  outline: 2px solid var(--paxs-accent);
+  outline-offset: 2px;
+}
+
+/* Scrollbars */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
-
 ::-webkit-scrollbar-track {
   background: transparent;
 }
-
 ::-webkit-scrollbar-thumb {
-  background: var(--color-raised-2);
-  border-radius: 4px;
+  background: var(--paxs-hairline-strong);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
-
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-faint);
+  background: var(--paxs-faint);
+  background-clip: content-box;
 }
 
 /* Animations */
 @keyframes pulse-subtle {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
+  50% { opacity: 0.55; }
 }
 
 @keyframes shimmer {
@@ -102,12 +238,71 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes sweep {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 0 var(--paxs-glow), 0 0 18px -6px var(--paxs-accent); }
+  50% { box-shadow: 0 0 0 6px transparent, 0 0 26px -4px var(--paxs-accent); }
+}
+
 .animate-shimmer {
-  background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.05) 50%, rgba(255,255,255,0) 100%);
+  background: linear-gradient(90deg, transparent 0%, var(--paxs-sheen) 50%, transparent 100%);
   background-size: 200% 100%;
   animation: shimmer 2.5s infinite linear;
 }
 
 .animate-slide-up {
   animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* The modality rail on a row: a colour that is never the only signal —
+   the modality code is printed next to it in text. */
+.mod-rail {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  opacity: 0.55;
+  transition: opacity 0.2s ease, width 0.2s ease;
+}
+.group:hover .mod-rail {
+  opacity: 1;
+  width: 5px;
+}
+
+/* Thumbnail well: the image sits on a dark well in both themes, because a
+   greyscale CT window looks wrong on white. */
+.thumb-well {
+  background:
+    radial-gradient(circle at 50% 40%, rgba(148, 163, 184, 0.16), transparent 70%),
+    #050a14;
+}
+
+/* Scanline that sweeps a thumbnail on hover — the one flourish on a row. */
+.scan-sweep::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent, rgba(34, 211, 238, 0.35), transparent);
+  height: 40%;
+  opacity: 0;
+  pointer-events: none;
+}
+.group:hover .scan-sweep::before {
+  opacity: 1;
+  animation: sweep 1.1s ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

@@ -80,7 +80,10 @@ def accelerated_stow_upload(node, targets: list[dict], workers: int | None = Non
         try:
             return stow_upload(node, batch, stream=True)
         except Exception as exc:  # connection refused/reset, timeout, DNS…
-            log.warning("Transfer Accelerator batch upload failed: %s", exc)
+            log.warning(
+                "transfer_accelerator_batch_upload_failed error_type=%s",
+                type(exc).__name__,
+            )
             return {
                 "ok": False, "sent": 0, "failed": len(batch),
                 "http_status": None, "reason": str(exc), "bytes": 0,

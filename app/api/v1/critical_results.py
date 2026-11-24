@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import get_current_user, require_study_access, tenant_scope
 from app.db.models import CriticalResult, User
 from app.db.session import get_db
 from app.services import critical_results_service
@@ -69,6 +69,11 @@ async def create_critical_result(
     user: User = Depends(get_current_user),
 ):
     """Flag a critical or urgent radiology finding on a study."""
+    # B-9: a finding is a study-keyed object. Prove the caller may see the study
+    # before creating one, so a foreign study UID answers 404 (never a row that
+    # discloses another institution's patient identifier).
+    await require_study_access(db, req.study_instance_uid, user)
+    tenant_id, include_all = tenant_scope(user)
     try:
         res = await critical_results_service.create_critical_result(
             db,
@@ -81,6 +86,8 @@ async def create_critical_result(
             patient_id=req.patient_id,
             communicated_to=req.communicated_to,
             communication_channel=req.communication_channel,
+            tenant_id=tenant_id,
+            include_all=include_all,
         )
         await db.commit()
         # MySQL has no RETURNING: the server_default columns are expired by the
@@ -88,8 +95,9 @@ async def create_critical_result(
         await db.refresh(res)
         return JSONResponse(_result_to_dict(res), status_code=201)
     except Exception as exc:
-        log.exception("Failed to create critical result for study %s", req.study_instance_uid)
-        raise HTTPException(500, f"Failed to create critical result: {exc}") from exc
+        # Database and DICOM failures may include clinical values; return only a stable message.
+        log.error("critical_result_create_failed error_type=%s", type(exc).__name__)
+        raise HTTPException(500, "Failed to create critical result") from None
 
 
 @router.post("/{result_id}/acknowledge", response_class=JSONResponse)
@@ -100,20 +108,24 @@ async def acknowledge_critical_result(
     user: User = Depends(get_current_user),
 ):
     """Formally acknowledge receipt of a critical finding."""
+    tenant_id, include_all = tenant_scope(user)
     try:
         res = await critical_results_service.acknowledge_critical_result(
             db,
             result_id=result_id,
             acknowledged_by=user.username,
             notes=req.notes,
+            tenant_id=tenant_id,
+            include_all=include_all,
         )
         await db.commit()
         return JSONResponse(_result_to_dict(res), status_code=200)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:
-        log.exception("Failed to acknowledge critical result #%d", result_id)
-        raise HTTPException(500, f"Acknowledgement failed: {exc}") from exc
+        # Acknowledgement notes and database parameters are clinical data; do not log or echo them.
+        log.error("critical_result_acknowledge_failed error_type=%s", type(exc).__name__)
+        raise HTTPException(500, "Acknowledgement failed") from None
 
 
 @router.get("", response_class=JSONResponse)
@@ -125,8 +137,14 @@ async def list_critical_results(
     user: User = Depends(get_current_user),
 ):
     """Query critical results with filters."""
+    tenant_id, include_all = tenant_scope(user)
     results = await critical_results_service.list_critical_results(
-        db, status=status, finding_level=finding_level, patient_id=patient_id
+        db,
+        status=status,
+        finding_level=finding_level,
+        patient_id=patient_id,
+        tenant_id=tenant_id,
+        include_all=include_all,
     )
     return JSONResponse([_result_to_dict(r) for r in results])
 
@@ -138,8 +156,15 @@ async def get_study_critical_results(
     user: User = Depends(get_current_user),
 ):
     """List all critical findings associated with a specific study."""
+    # B-9: a foreign study UID must 404, not return an empty list — an empty 200
+    # would confirm the UID exists and leave the caller guessing.
+    await require_study_access(db, study_uid, user)
+    tenant_id, include_all = tenant_scope(user)
     results = await critical_results_service.list_critical_results(
-        db, study_instance_uid=study_uid
+        db,
+        study_instance_uid=study_uid,
+        tenant_id=tenant_id,
+        include_all=include_all,
     )
     return JSONResponse([_result_to_dict(r) for r in results])
 
@@ -151,7 +176,10 @@ async def get_critical_result(
     user: User = Depends(get_current_user),
 ):
     """Get details of a specific critical result."""
-    res = await critical_results_service.get_critical_result(db, result_id)
+    tenant_id, include_all = tenant_scope(user)
+    res = await critical_results_service.get_critical_result(
+        db, result_id, tenant_id=tenant_id, include_all=include_all
+    )
     if not res:
         raise HTTPException(404, f"Critical result #{result_id} not found")
     return JSONResponse(_result_to_dict(res))

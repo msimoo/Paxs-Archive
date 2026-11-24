@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import require_admin
 from app.db.models import MigrationJob, User
 from app.db.session import get_db
 from app.services import migration_service
@@ -57,7 +57,7 @@ async def start_folder_migration(
     req: FolderMigrationRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Trigger a background migration job scanning and importing a local folder."""
     job = await migration_service.create_migration_job(
@@ -82,7 +82,7 @@ async def start_cmove_migration(
     req: CMoveMigrationRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Trigger a batch C-MOVE migration job pulling studies from a remote DICOM Node."""
     if not req.study_instance_uids:
@@ -109,7 +109,7 @@ async def start_cmove_migration(
 @router.get("/jobs", response_class=JSONResponse)
 async def list_migration_jobs(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """List all migration jobs."""
     stmt = select(MigrationJob).order_by(MigrationJob.id.desc())
@@ -121,7 +121,7 @@ async def list_migration_jobs(
 async def get_migration_job(
     job_id: int,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Get status & metrics for a specific migration job."""
     job = (

@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
+from typing import Any
 
+from app.core.concurrency import submit_background
 from app.core.config import settings
 
 log = logging.getLogger("paxs.webhooks")
@@ -28,7 +29,7 @@ def configured_urls() -> list[str]:
     return [u.strip() for u in raw.split(",") if u.strip()]
 
 
-def _deliver(url: str, payload: dict) -> None:
+def _deliver(url: str, payload: dict[str, Any]) -> None:
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -41,16 +42,21 @@ def _deliver(url: str, payload: dict) -> None:
             with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
                 if 200 <= resp.status < 300:
                     return
-                log.warning("webhook %s -> HTTP %s", url, resp.status)
+                log.warning("webhook_delivery_failed status=%d", resp.status)
         except Exception as exc:
+            # Delivery is best effort; exception strings can contain the
+            # configured URL, credentials, response data, or patient data.
             if attempt < _MAX_RETRIES - 1:
                 time.sleep(1.5 * (attempt + 1))
             else:
-                log.warning("webhook %s failed after %d tries: %s",
-                            url, _MAX_RETRIES, exc)
+                log.warning(
+                    "webhook_delivery_failed attempts=%d error_type=%s",
+                    _MAX_RETRIES,
+                    type(exc).__name__,
+                )
 
 
-def fire(event: str, **data) -> None:
+def fire(event: str, **data: Any) -> None:
     """Queue a webhook delivery (non-blocking). Emits nothing if no webhooks\n    are configured."""
     urls = configured_urls()
     if not urls:
@@ -61,6 +67,5 @@ def fire(event: str, **data) -> None:
         **data,
     }
     for url in urls:
-        threading.Thread(
-            target=_deliver, args=(url, payload), daemon=True, name=f"webhook-{event[:12]}"
-        ).start()
+        if not submit_background(_deliver, url, payload):
+            log.warning("webhook_dispatch_dropped reason=background_pool_saturated")

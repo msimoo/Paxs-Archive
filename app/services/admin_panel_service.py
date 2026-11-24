@@ -8,7 +8,8 @@ mounted at ``/admin``) monitors the Viewers/Orthanc stack:
 * Viewer Python proxy           (default port 3000)
 * Admin Node API                (default port 4000)
 * Admin frontend (Vite)         (default port 5173)
-* MySQL (Windows service / systemd unit)
+* PostgreSQL — the archive database (Windows service / systemd unit, then a
+  TCP probe of the DATABASE_URL host:port)
 
 The Electron original performed the checks and process control in its main
 process; this module mirrors that behaviour on the PAXS server so the same UI
@@ -40,12 +41,14 @@ SERVICE_NAMES = {
     "orthanc": "Orthanc DICOM Server",
     "proxy": "Viewer Proxy",
     "api": "Admin API Server",
-    "mysql": "MySQL Database",
+    # Wire key kept as "mysql": the prebuilt control-panel bundle reads it. It
+    # now reports the archive's PostgreSQL server.
+    "mysql": "PostgreSQL Database",
     "adminFront": "Admin Frontend",
 }
 
-# Services the panel exposes start/stop/restart for (MySQL is managed by the
-# OS service manager and only health-checked).
+# Services the panel exposes start/stop/restart for (PostgreSQL is managed by
+# the OS service manager and only health-checked).
 CONTROLLABLE = ("orthanc", "proxy", "api", "adminFront")
 
 DEFAULT_CONFIG: dict = {
@@ -53,7 +56,8 @@ DEFAULT_CONFIG: dict = {
     "proxyPort": 3000,
     "apiPort": 4000,
     "adminFrontPort": 5173,
-    "mysqlServiceName": "MySQL80",
+    # Wire key kept for the prebuilt bundle; holds the PostgreSQL service name.
+    "mysqlServiceName": "postgresql-x64-17",
     "orthancPath": "../orthanc/Orthanc.exe",
     "apiDir": "../Viewers/platform/server/",
     "proxyDir": "../Viewers/platform/app/dist-orthanc/",
@@ -96,20 +100,26 @@ class AdminPanelService:
                 merged = dict(DEFAULT_CONFIG)
                 merged.update({k: v for k, v in saved.items() if k in DEFAULT_CONFIG})
                 self._config = self._validate(merged)
-        except Exception:  # noqa: BLE001 - a broken config must never kill the panel
-            log.warning("admin_panel config unreadable, using defaults", exc_info=True)
+        except (OSError, ValueError, TypeError) as exc:  # a broken config must never kill the panel
+            # Type only, never the message or a traceback: the config holds
+            # operator paths, and the defaults below are a complete recovery.
+            log.warning("admin_panel_config_unreadable error_type=%s", type(exc).__name__)
 
     def _validate(self, cfg: dict) -> dict:
         out = dict(cfg)
         for key in _PORT_KEYS:
             try:
                 out[key] = int(out[key])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as exc:
+                # A hand-edited config with a bad port falls back to the default;
+                # debug keeps the correction visible without a traceback.
+                log.debug("admin_panel_port_invalid error_type=%s", type(exc).__name__)
                 out[key] = DEFAULT_CONFIG[key]
             out[key] = min(65535, max(1, out[key]))
         try:
             out["monitorIntervalMs"] = min(60000, max(1000, int(out["monitorIntervalMs"])))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            log.debug("admin_panel_interval_invalid error_type=%s", type(exc).__name__)
             out["monitorIntervalMs"] = 5000
         for key in ("mysqlServiceName", "orthancPath", "apiDir", "proxyDir", "adminFrontDir"):
             out[key] = str(out.get(key) or DEFAULT_CONFIG[key])
@@ -160,8 +170,21 @@ class AdminPanelService:
                 return "stopped"
         return "running"
 
-    def _check_mysql(self, service_name: str) -> str:
-        """Windows: ``sc query`` on the service; otherwise systemctl/pgrep."""
+    @staticmethod
+    def _database_endpoint() -> tuple[str, int]:
+        from app.services.db_admin import parse_db_url
+
+        p = parse_db_url(settings.DATABASE_URL)
+        return str(p.get("host") or "127.0.0.1"), int(p.get("port") or 5432)
+
+    def _check_database(self, service_name: str) -> str:
+        """Archive PostgreSQL: OS service state first, then a TCP probe.
+
+        Windows: ``sc query`` exits 0 for any *installed* service, running or
+        not, so the state line is read instead of the exit code. Elsewhere:
+        systemctl/pgrep. When no service is found (remote server, container),
+        the DATABASE_URL host:port decides.
+        """
         try:
             if os.name == "nt":
                 result = subprocess.run(
@@ -169,20 +192,26 @@ class AdminPanelService:
                     capture_output=True, text=True, timeout=4,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
-                return "running" if result.returncode == 0 else "stopped"
-            for probe in (
-                ["systemctl", "is-active", "--quiet", service_name],
-                ["systemctl", "is-active", "--quiet", "mysqld"],
-                ["pgrep", "-x", "mysqld"],
-            ):
-                try:
-                    result = subprocess.run(probe, capture_output=True, timeout=4)
-                    if result.returncode == 0:
-                        return "running"
-                except OSError:
-                    continue
-            return "stopped"
-        except Exception:  # noqa: BLE001
+                if result.returncode == 0 and "RUNNING" in (result.stdout or ""):
+                    return "running"
+            else:
+                for probe in (
+                    ["systemctl", "is-active", "--quiet", service_name],
+                    ["systemctl", "is-active", "--quiet", "postgresql"],
+                    ["pgrep", "-x", "postgres"],
+                ):
+                    try:
+                        result = subprocess.run(probe, capture_output=True, timeout=4)
+                        if result.returncode == 0:
+                            return "running"
+                    except OSError as exc:
+                        # The probe binary is absent on this host — try the next one.
+                        log.debug("admin_panel_db_probe_unavailable error_type=%s",
+                                  type(exc).__name__)
+                        continue
+            host, port = self._database_endpoint()
+            return self._check_port(port, host)
+        except Exception:  # noqa: BLE001 - boundary guard: a failed probe maps to the "error" state
             return "error"
 
     def snapshot(self) -> dict:
@@ -192,7 +221,7 @@ class AdminPanelService:
             "proxy": self._check_port(cfg["proxyPort"]),
             "api": self._check_port(cfg["apiPort"]),
             "adminFront": self._check_port(cfg["adminFrontPort"]),
-            "mysql": self._check_mysql(cfg["mysqlServiceName"]),
+            "mysql": self._check_database(cfg["mysqlServiceName"]),
         }
         return {**checks, "lastChecked": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
@@ -300,8 +329,9 @@ class AdminPanelService:
                 capture_output=True, timeout=10,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except (OSError, subprocess.SubprocessError) as exc:  # best-effort cleanup
+            log.debug("admin_panel_stop_service_failed error_type=%s",
+                      type(exc).__name__)
         self._append_log(f"○ Stopped {name}")
         return {"name": name, "status": "stopped"}
 
@@ -339,7 +369,7 @@ class AdminPanelService:
         if not os.environ.get("PAXS_DISABLE_BROWSER"):
             try:
                 webbrowser.open(url, new=2)
-            except Exception as exc:  # noqa: BLE001
+            except (webbrowser.Error, OSError) as exc:  # no browser on a headless host
                 log.warning("webbrowser.open failed: %s", exc)
         self._append_log(f"Opened {target} → {url}")
         return {"ok": True, "url": url}

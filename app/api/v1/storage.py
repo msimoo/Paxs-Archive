@@ -15,25 +15,32 @@ The first backend created becomes the default; at most one row may be the
 default. Instances record their backend in ``instances.storage_backend``; every
 read/write path passes it through, so objects always resolve to the backend
 that actually holds them.
+
+Q-3 / FA-2: every statement lives in :mod:`app.services.storage_admin_service`
+(rows and aggregates) or :mod:`app.services.storage_service` (the move). This
+module keeps validation, the connection probe and the HTTP shape.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import time
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import require_admin
 from app.core.config import settings
-from app.db.models import Instance, StorageBackendConfig, User
+from app.db.models import User
 from app.db.session import get_db
-from app.services import storage_service
+from app.services import storage_admin_service, storage_service
 from app.services.storage import get_storage_backend, reset_storage_backend
 
 router = APIRouter(prefix="/api/v1/storage", tags=["storage"])
+log = logging.getLogger("paxs.api.storage")
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -67,63 +74,23 @@ class StudyMove(BaseModel):
     target_backend: str = Field(min_length=1, max_length=64)
 
 
-def _serialize(row, instances: int, usage: int) -> dict:
-    return {
-        "name": row.name,
-        "kind": row.kind,
-        "is_default": bool(row.is_default),
-        "enabled": bool(row.enabled),
-        "root_path": row.root_path,
-        "endpoint_url": row.endpoint_url,
-        "region": row.region,
-        "bucket": row.bucket,
-        "presign_expires": row.presign_expires,
-        "instances": instances,
-        "usage_bytes": usage,
-        "has_secret": bool(row.secret_key),
-    }
-
-
-def _counts_by_backend(db) -> tuple[dict[str, int], dict[str, int]]:
-    """Per-backend instance counts and usage bytes, keyed by backend name
-    (None = env backend)."""
-
-    async def _load():
-        inst_rows = (
-            await db.execute(
-                select(Instance.storage_backend, func.count(Instance.id)).group_by(
-                    Instance.storage_backend
-                )
-            )
-        ).all()
-        usage_rows = (
-            await db.execute(
-                select(
-                    Instance.storage_backend,
-                    func.coalesce(func.sum(Instance.file_size_bytes), 0),
-                ).group_by(Instance.storage_backend)
-            )
-        ).all()
-        return (
-            {k: int(n) for k, n in inst_rows},
-            {k: int(u) for k, u in usage_rows},
-        )
-
-    return _load()
+async def _backend_or_404(db: AsyncSession, name: str):
+    row = await storage_admin_service.get_backend(db, name)
+    if row is None:
+        raise HTTPException(404, f"Backend {name!r} not found")
+    return row
 
 
 @router.get("/backends")
 async def list_backends(db: AsyncSession = Depends(get_db),
                         user: User = Depends(require_admin)):
-    counts, usage = await _counts_by_backend(db)
-    rows = (await db.execute(select(StorageBackendConfig).order_by(
-        StorageBackendConfig.is_default.desc(), StorageBackendConfig.name
-    ))).scalars().all()
-    backends = [
-        _serialize(r, counts.get(r.name, 0), usage.get(r.name, 0)) for r in rows
-    ]
+    counts, usage = await storage_admin_service.counts_by_backend(db)
+    rows = await storage_admin_service.list_backends(db)
     return {
-        "backends": backends,
+        "backends": [
+            storage_admin_service.serialize(r, counts.get(r.name, 0), usage.get(r.name, 0))
+            for r in rows
+        ],
         "env_backend": {
             "name": None,
             "kind": (settings.STORAGE_BACKEND or "local").lower(),
@@ -143,48 +110,37 @@ async def create_backend(body: BackendCreate,
     kind = (body.kind or "local").strip().lower()
     if kind not in ("local", "s3"):
         raise HTTPException(422, "kind must be 'local' or 's3'")
-    existing = (await db.execute(
-        select(StorageBackendConfig).where(StorageBackendConfig.name == name)
-    )).scalar_one_or_none()
-    if existing is not None:
+    if await storage_admin_service.get_backend(db, name) is not None:
         raise HTTPException(409, f"Backend {name!r} already exists")
-
     if kind == "local" and not body.root_path:
         raise HTTPException(422, "root_path is required for local backends")
     if kind == "s3" and not body.bucket:
         raise HTTPException(422, "bucket is required for s3 backends")
 
     # First backend becomes the default automatically.
-    count = (await db.execute(select(func.count(StorageBackendConfig.id)))).scalar_one()
-    make_default = body.is_default or count == 0
+    make_default = body.is_default or await storage_admin_service.backend_count(db) == 0
     if make_default:
-        await db.execute(StorageBackendConfig.__table__.update().values(is_default=False))
+        await storage_admin_service.clear_default_flag(db)
 
-    row = StorageBackendConfig(
+    row = await storage_admin_service.create_backend(
+        db,
         name=name, kind=kind, is_default=make_default,
         root_path=body.root_path, endpoint_url=body.endpoint_url,
         region=body.region or "us-east-1", bucket=body.bucket,
         access_key=body.access_key, secret_key=body.secret_key,
         presign_expires=body.presign_expires or 900,
     )
-    db.add(row)
-    await db.flush()
     reset_storage_backend()
-    return _serialize(row, 0, 0)
+    return storage_admin_service.serialize(row, 0, 0)
 
 
 @router.patch("/backends/{name}")
 async def patch_backend(name: str, body: BackendPatch,
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(require_admin)):
-    row = (await db.execute(
-        select(StorageBackendConfig).where(StorageBackendConfig.name == name)
-    )).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(404, f"Backend {name!r} not found")
-
+    row = await _backend_or_404(db, name)
     if body.is_default is True:
-        await db.execute(StorageBackendConfig.__table__.update().values(is_default=False))
+        await storage_admin_service.clear_default_flag(db)
         row.is_default = True
     elif body.is_default is False:
         row.is_default = False
@@ -202,21 +158,15 @@ async def patch_backend(name: str, body: BackendPatch,
             setattr(row, field, value)
     await db.flush()
     reset_storage_backend()
-    return _serialize(row, 0, 0)
+    return storage_admin_service.serialize(row, 0, 0)
 
 
 @router.post("/backends/{name}/test")
 async def test_backend(name: str, db: AsyncSession = Depends(get_db),
                        user: User = Depends(require_admin)):
-    row = (await db.execute(
-        select(StorageBackendConfig).where(StorageBackendConfig.name == name)
-    )).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(404, f"Backend {name!r} not found")
+    row = await _backend_or_404(db, name)
     try:
         if row.kind == "s3":
-            import time
-
             backend = get_storage_backend(name)
             client = backend._s3()
             t0 = time.time()
@@ -225,7 +175,6 @@ async def test_backend(name: str, db: AsyncSession = Depends(get_db),
             return {"ok": True, "kind": "s3", "latency_ms": latency_ms,
                     "detail": f"bucket {row.bucket!r} reachable"}
         # local
-        import os
         path = row.root_path or ""
         if not os.path.isdir(path):
             return {"ok": False, "kind": "local", "detail": f"directory not found: {path}"}
@@ -235,31 +184,28 @@ async def test_backend(name: str, db: AsyncSession = Depends(get_db),
         os.unlink(probe)
         return {"ok": True, "kind": "local", "latency_ms": 0,
                 "detail": f"directory writable: {path}"}
-    except Exception as exc:
-        return {"ok": False, "kind": row.kind, "detail": str(exc)[:300]}
+    except Exception as exc:  # backend clients expose provider-specific and path details
+        log.warning("storage_backend_probe_failed kind=%s error_type=%s",
+                    row.kind, type(exc).__name__)
+        return {
+            "ok": False,
+            "kind": row.kind,
+            "detail": f"Connection test failed (error_type={type(exc).__name__}).",
+        }
 
 
 @router.delete("/backends/{name}", status_code=204)
 async def delete_backend(name: str, db: AsyncSession = Depends(get_db),
                          user: User = Depends(require_admin)):
-    row = (await db.execute(
-        select(StorageBackendConfig).where(StorageBackendConfig.name == name)
-    )).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(404, f"Backend {name!r} not found")
-    in_use = (
-        await db.execute(
-            select(func.count(Instance.id)).where(Instance.storage_backend == name)
-        )
-    ).scalar_one()
+    row = await _backend_or_404(db, name)
+    in_use = await storage_admin_service.instances_on(db, name)
     if in_use:
         raise HTTPException(
             409,
             f"{in_use} instance(s) still reference backend {name!r}; "
             "move those studies to another backend first",
         )
-    await db.delete(row)
-    await db.flush()
+    await storage_admin_service.delete_backend(db, row)
     reset_storage_backend()
     return None
 
@@ -281,7 +227,7 @@ async def move_study(study_uid: str, body: StudyMove,
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(400, f"Move failed: {exc}") from exc
+        raise HTTPException(400, "Move failed") from None
     reset_storage_backend()
     return {"study_instance_uid": study_uid,
             "target_backend": body.target_backend, **result}

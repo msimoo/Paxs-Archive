@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.db.models import Patient, Series, Study
+from app.services.query_service import apply_study_tenant_scope
 
 log = logging.getLogger("paxs.priors")
 
@@ -54,6 +55,7 @@ async def find_prior_studies(
         .options(joinedload(Study.patient), joinedload(Study.series_list))
         .where(Study.study_instance_uid == study_instance_uid)
     )
+    stmt_curr = apply_study_tenant_scope(stmt_curr, tenant_id, include_all)
     curr_study = (await session.execute(stmt_curr)).scalars().first()
 
     target_patient_id = patient_id
@@ -90,8 +92,6 @@ async def find_prior_studies(
     )
     # C04: constrain the priors query to what the caller may see — "prior
     # studies for this patient" must not reach into another institution.
-    from app.services.query_service import apply_study_tenant_scope
-
     stmt_priors = apply_study_tenant_scope(stmt_priors, tenant_id, include_all)
     priors = (await session.execute(stmt_priors)).scalars().unique().all()
 

@@ -34,7 +34,7 @@ from app.db.models import (
     Study,
     TriageFlag,
 )
-from app.services import query_service, tenant_service
+from app.services import query_service, reading_claim_service, tenant_service
 
 log = logging.getLogger("paxs.worklist_tasks")
 
@@ -42,15 +42,6 @@ log = logging.getLogger("paxs.worklist_tasks")
 # count). STAT is a separate overlay, not a lifecycle state.
 READER_STATES = ("UNREAD", "DICTATED", "READ")
 STAT_SOURCES = ("FLAG", "CRITICAL", "TRIAGE")
-
-
-def _scope_condition(study_tenant_id, include_all):
-    """Tenant scope applied to a Study-bearing statement."""
-    if include_all:
-        return None
-    if study_tenant_id is None:
-        return Study.tenant_id.is_(None)
-    return Study.tenant_id == study_tenant_id
 
 
 def _report_subquery():
@@ -97,7 +88,7 @@ async def reader_counts(session: AsyncSession, user, include_all: bool | None = 
     tenant_id, scoped_all = tenant_service.scope_from_user(user)
     if include_all is None:
         include_all = scoped_all
-    cond = _scope_condition(tenant_id, include_all)
+    cond = query_service.tenant_predicate(Study.tenant_id, tenant_id, include_all)
 
     has_instances = _has_instances_subquery()
     stat_ids = _stat_study_ids_subquery()
@@ -159,7 +150,7 @@ async def list_reader_tasks(session: AsyncSession, state: str, user,
         raise ValueError(f"state must be one of {READER_STATES + ('STAT',)}")
 
     tenant_id, include_all = tenant_service.scope_from_user(user)
-    cond = _scope_condition(tenant_id, include_all)
+    cond = query_service.tenant_predicate(Study.tenant_id, tenant_id, include_all)
 
     finalized = select(RadiologyReport.study_id).where(
         RadiologyReport.status == "FINALIZED")
@@ -239,8 +230,10 @@ async def list_reader_tasks(session: AsyncSession, state: str, user,
         first_by_study.setdefault(sid, series_uid)
 
     items = []
+    username = getattr(user, "username", None)
     for s in studies:
         rep = report_by_study.get(s.id)
+        claim = reading_claim_service.state_of(s, username)
         a = agg.get(s.id, {})
         first_series_uid = first_by_study.get(s.id)
         thumb = None
@@ -266,6 +259,10 @@ async def list_reader_tasks(session: AsyncSession, state: str, user,
             "assigned_radiologist": s.assigned_radiologist,
             "read_at": s.read_at.isoformat() if s.read_at else None,
             "read_by": s.read_by,
+            # Reading claim: only a live claim is reported (a stale one is free).
+            "claimed_by": claim.claimed_by if claim.active else None,
+            "claimed_at": claim.claimed_at.isoformat() if claim.active and claim.claimed_at else None,
+            "claimed_by_me": claim.mine,
             "report_id": rep.id if rep else None,
             "report_status": rep.status if rep else None,
             "oru_status": rep.oru_status if rep else None,
@@ -290,10 +287,24 @@ def _task_state(s: Study, rep) -> str:
 # Actions
 # --------------------------------------------------------------------------- #
 
-async def set_stat(session: AsyncSession, study_uid: str, on: bool) -> Study:
-    study = (
-        await session.execute(select(Study).where(Study.study_instance_uid == study_uid))
-    ).scalar_one_or_none()
+async def _study_for_action(
+    session: AsyncSession, study_uid: str, tenant_id: int | None, include_all: bool,
+) -> Study | None:
+    """Resolve an action target through the caller's study tenant boundary."""
+    statement = query_service.apply_study_tenant_scope(
+        select(Study).where(Study.study_instance_uid == study_uid),
+        tenant_id,
+        include_all,
+    )
+    return (await session.execute(statement)).scalar_one_or_none()
+
+
+async def set_stat(
+    session: AsyncSession, study_uid: str, on: bool, *,
+    tenant_id: int | None = None, include_all: bool = False,
+) -> Study:
+    """Set a study's STAT flag only inside the supplied tenant scope."""
+    study = await _study_for_action(session, study_uid, tenant_id, include_all)
     if study is None:
         raise ValueError("Study not found")
     study.stat_flag = bool(on)
@@ -301,10 +312,11 @@ async def set_stat(session: AsyncSession, study_uid: str, on: bool) -> Study:
 
 
 async def assign_radiologist(session: AsyncSession, study_uid: str,
-                             radiologist: str | None) -> Study:
-    study = (
-        await session.execute(select(Study).where(Study.study_instance_uid == study_uid))
-    ).scalar_one_or_none()
+                             radiologist: str | None, *,
+                             tenant_id: int | None = None,
+                             include_all: bool = False) -> Study:
+    """Assign a reader only to a study inside the supplied tenant scope."""
+    study = await _study_for_action(session, study_uid, tenant_id, include_all)
     if study is None:
         raise ValueError("Study not found")
     study.assigned_radiologist = (radiologist or "").strip() or None
@@ -312,12 +324,12 @@ async def assign_radiologist(session: AsyncSession, study_uid: str,
 
 
 async def mark_read(session: AsyncSession, study_uid: str,
-                    performed_by: str) -> Study:
+                    performed_by: str, *, tenant_id: int | None = None,
+                    include_all: bool = False) -> Study:
+    """Mark a scoped study read by the authenticated actor."""
     from datetime import datetime, timezone
 
-    study = (
-        await session.execute(select(Study).where(Study.study_instance_uid == study_uid))
-    ).scalar_one_or_none()
+    study = await _study_for_action(session, study_uid, tenant_id, include_all)
     if study is None:
         raise ValueError("Study not found")
     study.read_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -325,10 +337,12 @@ async def mark_read(session: AsyncSession, study_uid: str,
     return study
 
 
-async def mark_unread(session: AsyncSession, study_uid: str) -> Study:
-    study = (
-        await session.execute(select(Study).where(Study.study_instance_uid == study_uid))
-    ).scalar_one_or_none()
+async def mark_unread(
+    session: AsyncSession, study_uid: str, *,
+    tenant_id: int | None = None, include_all: bool = False,
+) -> Study:
+    """Reopen a read state only for a study in the supplied tenant scope."""
+    study = await _study_for_action(session, study_uid, tenant_id, include_all)
     if study is None:
         raise ValueError("Study not found")
     study.read_at = None

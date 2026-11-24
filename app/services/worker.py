@@ -11,14 +11,18 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timezone
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+
+from typing import Any
 
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.db.models import CompressionJob, Instance, Series, Session, Study, TriageFlag
 from app.db.session import SyncSessionLocal
-from app.services import storage_service, thumbnail_service
+from app.services import content_version, storage_service, thumbnail_service
 from app.services import triage_service
 from app.services.compression_service import (
     NATIVE_METHOD, SOURCE_METHOD, THUMBNAIL_METHOD, compression_window_open,
@@ -31,86 +35,173 @@ class CompressionWorker(threading.Thread):
     def __init__(self, poll_seconds: float | None = None) -> None:
         super().__init__(name="paxs-compression-worker", daemon=True)
         self.poll_seconds = poll_seconds or settings.WORKER_POLL_SECONDS
-        self._stop = threading.Event()
+        self.owner_id = uuid.uuid4().hex
+        self._stop_event = threading.Event()
+        self._active_jobs_lock = threading.Lock()
+        self._active_job_ids: set[int] = set()
         self._tick = 0
-        self._routing_tick = 0
-        self._replication_tick = 0
         self._session_tick = 0
+        self._quota_tick = 0
+        self._reconcile_tick = 0
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self) -> None:
         log.info("Compression worker started (poll %.1fs)", self.poll_seconds)
-        while not self._stop.is_set():
-            try:
-                self._process_batch()
-            except Exception:
-                log.exception("Worker batch error")
-            self._stop.wait(self.poll_seconds)
+        from app.services import replication_service, transfer_service
+
+        tasks = (
+            ("transfer", transfer_service.process_one_pending_job, lambda: 1),
+            ("replication", replication_service.sweep,
+             lambda: settings.DR_REPLICATION_SWEEP_EVERY_TICKS if settings.DR_REPLICATION_ENABLED else 0),
+            ("routing", self._sweep_routing,
+             lambda: settings.ROUTING_SWEEP_EVERY_TICKS if settings.ROUTING_RUN_IN_WORKER else 0),
+        )
+        workers = [threading.Thread(target=self._poll, args=task,
+                                    name=f"paxs-{task[0]}-worker", daemon=True)
+                   for task in tasks]
+        heartbeat_thread = threading.Thread(
+            target=self._shared_heartbeat_loop,
+            name="paxs-job-lease-heartbeat",
+            daemon=True,
+        )
+        workers.append(heartbeat_thread)
+        for worker in workers:
+            worker.start()
+        try:
+            self._poll("compression", self._process_batch, lambda: 1)
+        finally:
+            self.stop()
+            for worker in workers:
+                worker.join(timeout=1)
         log.info("Compression worker stopped")
 
-    # ------------------------------------------------------------------ #
-    def _claim_jobs(self, session, limit: int | None = None) -> list[CompressionJob]:
-        """Atomically claim up to `limit` PENDING compression jobs.
+    def _poll(self, name, operation, every_ticks) -> None:
+        tick = 0
+        while not self._stop_event.is_set():
+            interval = every_ticks()
+            tick = tick + 1 if interval > 0 else 0
+            if interval > 0 and tick >= interval:
+                tick = 0
+                try:
+                    operation()
+                except Exception as exc:  # A failed batch must not stop polling.
+                    log.error("worker_batch_failed worker=%s error_type=%s", name, type(exc).__name__)
+            self._stop_event.wait(self.poll_seconds)
 
-        Claiming is a single guarded UPDATE (status='PENDING' -> 'RUNNING')
-        restricted to the first `limit` pending ids. With several standalone
-        worker processes sharing one MySQL, each row is claimed by exactly one
-        worker: concurrent UPDATEs serialize on the row lock, and the loser's
-        statement matches 0 rows. rowcount tells us how many we won, and we
-        re-select exactly those (still RUNNING) rows to process.
-        """
-        from sqlalchemy import update as sa_update
+    # ------------------------------------------------------------------ #
+    def _claim_jobs(self, session: Any, limit: int | None = None) -> list[CompressionJob]:
+        """Atomically claim pending or lease-expired jobs via FOR UPDATE SKIP LOCKED."""
+        from sqlalchemy import or_, update as sa_update
 
         limit = limit or settings.WORKER_BATCH_SIZE
-        eligible = CompressionJob.status == "PENDING"
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        eligible = or_(
+            CompressionJob.status == "PENDING",
+            (CompressionJob.status == "RUNNING") & (CompressionJob.lease_until <= now),
+        )
         if not compression_window_open(
             settings.COMPRESSION_TIMING, settings.COMPRESSION_START_TIME,
             settings.COMPRESSION_END_TIME, datetime.now().strftime("%H:%M"),
         ):
             eligible &= CompressionJob.method == THUMBNAIL_METHOD
-        ids = (
-            session.execute(
-                select(CompressionJob.id)
-                .where(eligible)
-                .order_by(CompressionJob.id)
-                .limit(limit)
-            )
-            .scalars()
-            .all()
-        )
+        ids = session.execute(
+            select(CompressionJob.id)
+            .where(eligible, CompressionJob.attempt < settings.WORKER_JOB_MAX_ATTEMPTS)
+            .order_by(CompressionJob.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).scalars().all()
         if not ids:
+            session.rollback()
             return []
         res = session.execute(
             sa_update(CompressionJob)
-            .where(CompressionJob.id.in_(ids), eligible)
-            .values(status="RUNNING")
+            .where(
+                CompressionJob.id.in_(ids), eligible,
+                CompressionJob.attempt < settings.WORKER_JOB_MAX_ATTEMPTS,
+            )
+            .values(
+                status="RUNNING",
+                owner_id=self.owner_id,
+                lease_until=now + timedelta(seconds=settings.WORKER_JOB_LEASE_SECONDS),
+                attempt=CompressionJob.attempt + 1,
+            )
         )
-        session.commit()  # make the claim visible to other workers immediately
+        session.commit()
         if res.rowcount == 0:
             return []
-        return (
-            session.execute(
-                select(CompressionJob)
-                .where(CompressionJob.id.in_(ids), CompressionJob.status == "RUNNING")
-                .order_by(CompressionJob.id)
+        return session.execute(
+            select(CompressionJob)
+            .where(
+                CompressionJob.id.in_(ids),
+                CompressionJob.status == "RUNNING",
+                CompressionJob.owner_id == self.owner_id,
             )
-            .scalars()
-            .all()
-        )
+            .order_by(CompressionJob.id)
+        ).scalars().all()
 
     # ------------------------------------------------------------------ #
-    def _process_batch(self) -> None:
-        with SyncSessionLocal() as session:
-            for _ in range(settings.WORKER_BATCH_SIZE):
-                if self._stop.is_set():
-                    break
-                jobs = self._claim_jobs(session, limit=1)
-                if not jobs:
-                    break
-                self._process_job(session, jobs[0])
+    def _run_claimed_job_id(self, job_id: int) -> None:
+        """Process one already-claimed job in its own sync DB session."""
+        with self._active_jobs_lock:
+            self._active_job_ids.add(job_id)
+        try:
+            with SyncSessionLocal() as session:
+                job = session.get(CompressionJob, job_id)
+                if job is None or job.owner_id != self.owner_id:
+                    return
+                self._process_job(session, job)
                 session.commit()
+        finally:
+            with self._active_jobs_lock:
+                self._active_job_ids.discard(job_id)
+
+    def _run_compression_jobs(self) -> None:
+        batch_size = max(1, int(settings.WORKER_BATCH_SIZE))
+        concurrency = max(1, int(getattr(settings, "WORKER_COMPRESSION_CONCURRENCY", 1)))
+        if concurrency == 1:
+            for _ in range(batch_size):
+                if self._stop_event.is_set():
+                    return
+                with SyncSessionLocal() as session:
+                    jobs = self._claim_jobs(session, limit=1)
+                    if not jobs:
+                        break
+                    job = jobs[0]
+                    with self._active_jobs_lock:
+                        self._active_job_ids.add(job.id)
+                    try:
+                        self._process_job(session, job)
+                        session.commit()
+                    finally:
+                        with self._active_jobs_lock:
+                            self._active_job_ids.discard(job.id)
+            return
+        processed = 0
+        with ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="paxs-compress"
+        ) as pool:
+            while processed < batch_size and not self._stop_event.is_set():
+                wave = min(concurrency, batch_size - processed)
+                with SyncSessionLocal() as session:
+                    job_ids = [j.id for j in self._claim_jobs(session, limit=wave)]
+                if not job_ids:
+                    break
+                processed += len(job_ids)
+                for fut in [pool.submit(self._run_claimed_job_id, jid) for jid in job_ids]:
+                    try:
+                        fut.result()
+                    except Exception as exc:  # noqa: BLE001 - isolate per-job failure
+                        log.warning(
+                            "compression_worker_task_failed error_type=%s",
+                            type(exc).__name__,
+                        )
+
+    def _process_batch(self) -> None:
+        self._run_compression_jobs()
+        with SyncSessionLocal() as session:
             if settings.TRIAGE_RUN_IN_WORKER:
                 self._process_triage(session)
                 session.commit()
@@ -120,33 +211,33 @@ class CompressionWorker(threading.Thread):
                 if self._tick >= settings.LIFECYCLE_SWEEP_EVERY_TICKS:
                     self._tick = 0
                     self._sweep_lifecycle()
-            # Smart Router send queue — every N ticks, on its own session.
-            if settings.ROUTING_RUN_IN_WORKER:
-                self._routing_tick += 1
-                if self._routing_tick >= settings.ROUTING_SWEEP_EVERY_TICKS:
-                    self._routing_tick = 0
-                    self._sweep_routing()
-            # DR replication — every N ticks (roadmap #49).
-            if settings.DR_REPLICATION_ENABLED:
-                self._replication_tick += 1
-                if self._replication_tick >= settings.DR_REPLICATION_SWEEP_EVERY_TICKS:
-                    self._replication_tick = 0
-                    try:
-                        from app.services import replication_service
-
-                        replication_service.sweep()
-                    except Exception:
-                        log.exception("DR replication sweep failed")
             # Session housekeeping — prune expired/revoked rows every N ticks.
             self._session_tick += 1
             if self._session_tick >= settings.SESSION_SWEEP_EVERY_TICKS:
                 self._session_tick = 0
                 self._sweep_sessions()
+                self._sweep_scheduled_backup()
+                self._sweep_retention()
+            # Quota reconciliation (C-17) — recompute tenant counters every N
+            # ticks so a drifted `used_bytes` self-heals without an operator.
+            if settings.QUOTA_RECONCILE_RUN_IN_WORKER:
+                self._quota_tick += 1
+                if self._quota_tick >= settings.QUOTA_RECONCILE_SWEEP_EVERY_TICKS:
+                    self._quota_tick = 0
+                    self._sweep_quota_counters()
+            # Index/object reconciliation (H-07) — one bounded batch every N ticks.
+            if settings.STORAGE_RECONCILE_SWEEP_EVERY_TICKS > 0:
+                self._reconcile_tick += 1
+                if self._reconcile_tick >= settings.STORAGE_RECONCILE_SWEEP_EVERY_TICKS:
+                    self._reconcile_tick = 0
+                    self._sweep_missing_objects()
 
     def _process_job(self, session, job: CompressionJob) -> None:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        job.status = "RUNNING"
-        session.flush()
+        if not self._heartbeat_job(session, job.id, now):
+            session.rollback()
+            return
+        session.commit()
 
         instance = session.get(Instance, job.instance_id)
         bk = getattr(instance, "storage_backend", None) if instance is not None else None
@@ -154,28 +245,45 @@ class CompressionWorker(threading.Thread):
             job.status = "FAILED"
             job.error_message = "Instance object missing"
             job.finished_at = now
+            job.owner_id = None
+            job.lease_until = None
             return
 
+        session.commit()
         try:
             if job.method == THUMBNAIL_METHOD:
                 if settings.THUMBNAIL_ENABLED and not thumbnail_service.generate_thumbnail(
                     instance.file_path, storage_service.thumbnail_key(instance.sop_instance_uid), backend_name=bk,
                 ):
                     raise RuntimeError("Thumbnail generation failed")
+                if not self._heartbeat_job(session, job.id):
+                    session.rollback()
+                    return
                 job.status = "DONE"
                 job.finished_at = now
+                job.owner_id = None
+                job.lease_until = None
                 return
             result = storage_service.compress(instance.file_path, job.method, backend_name=bk)
+            # Never publish DB metadata if this worker no longer owns the lease.
+            if not self._heartbeat_job(session, job.id):
+                session.rollback()
+                log.warning("compression_job_lease_lost job_id=%s", job.id)
+                return
             instance.transfer_syntax_uid = result["transfer_syntax_uid"]
             instance.file_size_bytes = result["compressed_bytes"]
             if job.method not in {NATIVE_METHOD, SOURCE_METHOD}:
                 instance.compressed_at = now
+            # C-04: the stored codestream changed (native frames differ).
+            content_version.bump(instance)
 
             job.original_size = result["original_bytes"]
             job.compressed_size = result["compressed_bytes"]
             job.ratio_pct = result["saved_percent"]
             job.status = "DONE"
             job.finished_at = now
+            job.owner_id = None
+            job.lease_until = None
 
             # Audit + thumbnail
             from app.services.audit_service import add_audit
@@ -187,6 +295,10 @@ class CompressionWorker(threading.Thread):
                 performed_by="worker",
                 study_instance_uid=None,
                 file_path=instance.file_path,
+                # Same backend the compression wrote to: hashing against the
+                # default store misses an instance kept on another backend and
+                # would fail a job that actually succeeded.
+                backend_name=bk,
             )
             if settings.THUMBNAIL_ENABLED and not settings.THUMBNAIL_ON_RECEIPT:
                 thumbnail_service.generate_thumbnail(
@@ -196,11 +308,96 @@ class CompressionWorker(threading.Thread):
                 )
             log.debug("Compressed %s (%s, %.1f%%)", instance.sop_instance_uid,
                       result["method"], result["saved_percent"])
-        except Exception as exc:
-            log.warning("Compression job %s failed: %s", job.id, exc)
+        except Exception as exc:  # noqa: BLE001 - boundary guard: compression is an isolated background job
+            if not self._heartbeat_job(session, job.id):
+                session.rollback()
+                log.warning("compression_job_lease_lost job_id=%s", job.id)
+                return
+            error_message = f"Compression failed ({type(exc).__name__})"
+            log.warning(
+                "compression_job_failed job_id=%s error_type=%s",
+                job.id, type(exc).__name__,
+            )
             job.status = "FAILED"
-            job.error_message = str(exc)[:1000]
-            job.finished_at = now
+            job.error_message = error_message
+            if job.attempt < settings.WORKER_JOB_MAX_ATTEMPTS:
+                job.status = "PENDING"
+                job.finished_at = None
+            else:
+                job.finished_at = now
+            job.owner_id = None
+            job.lease_until = None
+
+    def _heartbeat_job(self, session, job_id: int, now: datetime | None = None) -> bool:
+        """Extend this worker's live lease with an ownership-guarded update."""
+        from sqlalchemy import update
+
+        current = now or datetime.now(timezone.utc).replace(tzinfo=None)
+        result = session.execute(
+            update(CompressionJob)
+            .where(
+                CompressionJob.id == job_id,
+                CompressionJob.status == "RUNNING",
+                CompressionJob.owner_id == self.owner_id,
+                CompressionJob.lease_until > current,
+            )
+            .values(lease_until=current + timedelta(seconds=settings.WORKER_JOB_LEASE_SECONDS))
+        )
+        return result.rowcount == 1
+
+    def _heartbeat_jobs_batch(
+        self, session: Any, job_ids: list[int], now: datetime | None = None
+    ) -> int:
+        """Renew leases for all active jobs owned by this worker in one UPDATE."""
+        if not job_ids:
+            return 0
+        from sqlalchemy import update
+
+        current = now or datetime.now(timezone.utc).replace(tzinfo=None)
+        result = session.execute(
+            update(CompressionJob)
+            .where(
+                CompressionJob.id.in_(job_ids),
+                CompressionJob.status == "RUNNING",
+                CompressionJob.owner_id == self.owner_id,
+                CompressionJob.lease_until > current,
+            )
+            .values(lease_until=current + timedelta(seconds=settings.WORKER_JOB_LEASE_SECONDS))
+        )
+        return int(result.rowcount or 0)
+
+    def _shared_heartbeat_loop(self) -> None:
+        """Single shared heartbeat thread renewing all active compression leases."""
+        while not self._stop_event.wait(settings.WORKER_JOB_HEARTBEAT_SECONDS):
+            with self._active_jobs_lock:
+                job_ids = list(self._active_job_ids)
+            if not job_ids:
+                continue
+            try:
+                with SyncSessionLocal() as session:
+                    self._heartbeat_jobs_batch(session, job_ids)
+                    session.commit()
+            except Exception as exc:  # A failed heartbeat lets the lease expire for recovery.
+                log.warning(
+                    "compression_job_heartbeat_failed count=%d error_type=%s",
+                    len(job_ids), type(exc).__name__,
+                )
+
+    def _heartbeat_loop(self, job_id: int, stop: threading.Event) -> None:
+        """Renew an active compression lease without sharing its DB session."""
+        while not stop.wait(settings.WORKER_JOB_HEARTBEAT_SECONDS):
+            try:
+                with SyncSessionLocal() as session:
+                    renewed = self._heartbeat_job(session, job_id)
+                    session.commit()
+                if not renewed:
+                    return
+            except Exception as exc:  # A failed heartbeat lets the lease expire for recovery.
+                log.warning(
+                    "compression_job_heartbeat_failed job_id=%s error_type=%s",
+                    job_id, type(exc).__name__,
+                )
+                return
 
     # ------------------------------------------------------------------ #
     def _sweep_sessions(self) -> None:
@@ -224,8 +421,8 @@ class CompressionWorker(threading.Thread):
                 session.commit()
                 if result.rowcount:
                     log.info("Session sweep: pruned %d row(s)", result.rowcount)
-        except Exception:
-            log.exception("Session sweep failed")
+        except Exception as exc:  # noqa: BLE001 - boundary guard: a failed sweep must not stop the worker loop
+            log.error("session_sweep_failed error_type=%s", type(exc).__name__)
 
     # ------------------------------------------------------------------ #
     def _sweep_routing(self) -> None:
@@ -240,8 +437,8 @@ class CompressionWorker(threading.Thread):
             counts = routing_service.process_queue_batch()
             if any(counts.values()):
                 log.info("Routing sweep: %s", counts)
-        except Exception:
-            log.exception("Routing sweep failed")
+        except Exception as exc:  # noqa: BLE001 - boundary guard: a failed sweep must not stop the worker loop
+            log.error("routing_sweep_failed error_type=%s", type(exc).__name__)
 
     # ------------------------------------------------------------------ #
     def _sweep_lifecycle(self) -> None:
@@ -253,11 +450,63 @@ class CompressionWorker(threading.Thread):
         try:
             from app.services import lifecycle_service
 
-            counts = lifecycle_service.evaluate_and_run("lifecycle-worker")
+            counts = lifecycle_service.evaluate_and_run(performed_by="lifecycle-worker")
             if any(counts.values()):
                 log.info("Lifecycle sweep: %s", counts)
-        except Exception:
-            log.exception("Lifecycle sweep failed")
+        except Exception as exc:  # noqa: BLE001 - boundary guard: a failed sweep must not stop the worker loop
+            log.error("lifecycle_sweep_failed error_type=%s", type(exc).__name__)
+
+    # ------------------------------------------------------------------ #
+    def _sweep_quota_counters(self) -> None:
+        """Recompute every tenant's storage counters from the indexed bytes.
+
+        The scheduled half of the C-17 fix: the write and delete paths keep
+        ``storage_quotas.used_bytes`` current incrementally, and this sweep is
+        what repairs it if any of them ever fails to. Idempotent — it derives the
+        figure from the instance rows, never from the counter it is correcting —
+        so a run that finds nothing drifted does nothing and logs nothing.
+
+        Runs on its own sync session (the service opens one internally); a
+        failure is logged and never kills the worker loop.
+        """
+        try:
+            from app.services import quota_service
+
+            report = quota_service.scheduled_reconcile_tenants()
+            if report["reconciled"]:
+                log.info(
+                    "Quota reconciliation: %d row(s) corrected across %d tenant(s)",
+                    report["reconciled"], report["tenants"],
+                )
+        except Exception as exc:  # noqa: BLE001 - boundary guard: a failed sweep must not stop the worker loop
+            log.error("quota_reconciliation_failed error_type=%s", type(exc).__name__)
+
+    # ------------------------------------------------------------------ #
+    def _sweep_scheduled_backup(self) -> None:
+        try:
+            from app.services import db_admin
+
+            db_admin.run_scheduled_backup_if_due()
+        except Exception as exc:  # noqa: BLE001 - best-effort scheduled maintenance
+            log.error("scheduled_backup_failed error_type=%s", type(exc).__name__)
+
+    def _sweep_retention(self) -> None:
+        try:
+            from app.services import retention_service
+
+            retention_service.run_retention_sweep()
+        except Exception as exc:  # noqa: BLE001 - best-effort table hygiene
+            log.error("retention_sweep_failed error_type=%s", type(exc).__name__)
+
+    # ------------------------------------------------------------------ #
+    def _sweep_missing_objects(self) -> None:
+        """Flag index rows whose stored object is gone (H-07); never deletes."""
+        try:
+            from app.services import storage_reconcile_service
+
+            storage_reconcile_service.sweep_missing_objects()
+        except Exception as exc:  # noqa: BLE001 - boundary guard: a failed sweep must not stop the worker loop
+            log.error("storage_reconcile_failed error_type=%s", type(exc).__name__)
 
     # ------------------------------------------------------------------ #
     def _process_triage(self, session) -> None:
@@ -279,17 +528,20 @@ class CompressionWorker(threading.Thread):
                 if not lock.acquire(blocking=False):
                     return  # Another worker is claiming series right now
             except Exception as exc:
-                log.debug("Redis lock acquire skipped: %s", exc)
+                log.debug("triage_redis_lock_acquire_skipped error_type=%s",
+                          type(exc).__name__)
                 lock = None
 
         try:
-            # Claim up to 5 pending series atomically (guards multi-worker races).
+            # Claim up to 5 pending series atomically (SKIP LOCKED prevents
+            # multi-worker races even when Redis is unavailable).
             pending_ids = (
                 session.execute(
                     select(Series.id)
                     .where(Series.triage_status == "PENDING")
                     .order_by(Series.id)
                     .limit(5)
+                    .with_for_update(skip_locked=True)
                 )
                 .scalars()
                 .all()
@@ -306,8 +558,11 @@ class CompressionWorker(threading.Thread):
             if lock:
                 try:
                     lock.release()
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 - boundary guard: the triage lock may have expired
+                    # Expected when the lock TTL elapsed during a long analysis;
+                    # the batch above already completed.
+                    log.debug("triage_lock_release_failed error_type=%s",
+                              type(exc).__name__)
 
         pending = (
             session.execute(
@@ -356,13 +611,14 @@ class CompressionWorker(threading.Thread):
                         summary=f.summary,
                         detector=f.detector,
                     ))
-                    log.info("TRIAGE %s %s on %s (%.0f%%)",
-                             f.severity, f.finding, study_uid, f.confidence * 100)
                 series.triage_status = "DONE"
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - boundary guard: restore claimed series after a detector batch failure
             # Re-claim claimed series so they are retried next tick instead
             # of being stuck RUNNING forever.
-            log.exception("Triage batch failed — re-queuing claimed series")
+            log.error(
+                "triage_batch_failed error_type=%s; re-queuing claimed series",
+                type(exc).__name__,
+            )
             session.execute(
                 sa_update(Series)
                 .where(Series.id.in_(pending_ids))
@@ -387,25 +643,45 @@ def start_worker() -> CompressionWorker:
 
 
 def _recover_stuck_jobs() -> None:
-    """Jobs left RUNNING by a crashed worker get retried on restart."""
+    """Requeue only expired compression leases; active workers keep ownership."""
     from sqlalchemy import update
 
     try:
         with SyncSessionLocal() as session:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             session.execute(
                 update(CompressionJob)
-                .where(CompressionJob.status == "RUNNING")
-                .values(status="PENDING")
+                .where(
+                    CompressionJob.status == "RUNNING",
+                    CompressionJob.lease_until <= now,
+                    CompressionJob.attempt < settings.WORKER_JOB_MAX_ATTEMPTS,
+                )
+                .values(
+                    status="PENDING",
+                    owner_id=None,
+                    lease_until=None,
+                )
+                .execution_options(synchronize_session=False)
             )
-            # Series claimed by a crashed triage batch get re-queued too.
             session.execute(
-                update(Series)
-                .where(Series.triage_status == "RUNNING")
-                .values(triage_status="PENDING")
+                update(CompressionJob)
+                .where(
+                    CompressionJob.status == "RUNNING",
+                    CompressionJob.lease_until <= now,
+                    CompressionJob.attempt >= settings.WORKER_JOB_MAX_ATTEMPTS,
+                )
+                .values(
+                    status="FAILED",
+                    owner_id=None,
+                    lease_until=None,
+                    finished_at=now,
+                    error_message="Maximum worker attempts exceeded",
+                )
+                .execution_options(synchronize_session=False)
             )
             session.commit()
-    except Exception:
-        log.exception("Failed to recover stuck compression jobs")
+    except Exception as exc:  # noqa: BLE001 - boundary guard: startup recovery must not log dataset details
+        log.error("stuck_job_recovery_failed error_type=%s", type(exc).__name__)
 
 
 def stop_worker() -> None:
@@ -440,8 +716,11 @@ def run_standalone(poll_seconds: float | None = None, once: bool = False) -> Non
         from app.db.models import Base
 
         Base.metadata.create_all(sync_engine)
-    except Exception:
-        log.exception("Schema init failed — continuing (migrations may manage it)")
+    except Exception as exc:  # noqa: BLE001 - boundary guard: migrations may manage schema; keep startup behavior
+        log.error(
+            "worker_schema_init_failed error_type=%s; continuing",
+            type(exc).__name__,
+        )
 
     _recover_stuck_jobs()
     from app.services.routing_service import recover_stuck_queue_items
@@ -450,7 +729,10 @@ def run_standalone(poll_seconds: float | None = None, once: bool = False) -> Non
 
     worker = CompressionWorker(poll_seconds=poll_seconds)
     if once:
+        from app.services import transfer_service
+
         worker._process_batch()
+        transfer_service.process_one_pending_job()
         log.info("Standalone worker finished one batch")
         return
 
@@ -479,8 +761,10 @@ def _check_codecs_cli() -> int:
     # UTF-8 (errors=replace) so the matrix always prints.
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    except (OSError, ValueError, AttributeError) as exc:  # a console we cannot reconfigure still prints
+        # Not every stream supports reconfigure() (a captured stdout, a pipe
+        # wrapper). Debug: the codec matrix is still emitted below.
+        log.debug("stdout_reconfigure_failed error_type=%s", type(exc).__name__)
 
     from app.services.compression_service import (
         COMPRESSION_METHODS,
@@ -534,3 +818,4 @@ if __name__ == "__main__":
     if args.check_codecs:
         raise SystemExit(_check_codecs_cli())
     run_standalone(poll_seconds=args.poll, once=args.once)
+

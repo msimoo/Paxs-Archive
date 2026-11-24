@@ -1,14 +1,14 @@
 {
   "version": "2.2.1",
-  "name": "PaxsServer Viewer",
-  "description": "PaxsServer Viewer",
+  "name": "PAXs Viewer",
+  "description": "PAXs Viewer",
   "icons": {
-    "60": "/assets/logo.png",
-    "128": "/assets/logo.png",
-    "512": "/assets/logo.png"
+    "60": "/assets/firefox_app_60x60.png",
+    "128": "/assets/firefox_app_128x128.png",
+    "512": "/assets/firefox_app_512x512.png"
   },
   "developer": {
-    "name": "PaxsServer Viewer",
-    "url": "https://github.com/msimoo/paxs-archive"
+    "name": "OHIF Contributors",
+    "url": "https://github.com/ohif/viewers"
   }
 }

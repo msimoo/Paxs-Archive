@@ -11,10 +11,15 @@ Design
 * ``ReplicationRecord`` rows (``replication_records``) track per-study state:
   PENDING -> REPLICATED, or FAILED with ``last_error`` and a bounded ``attempts``
   counter (``DR_REPLICATION_MAX_ATTEMPTS``).
-* Objects are copied **backend-to-backend** through the storage facade (read
-  bytes on the study's backend, write to the target under
+* Objects are copied **backend-to-backend** through the storage facade
+  (stream the object off the study's backend, write it to the target under
   ``{DR_REPLICATION_PREFIX}{StudyInstanceUID}/...``), so any primary backend
   (local folder, MinIO, AWS) replicates to any off-site S3 target.
+* **Streaming (C-8):** a study can hold multi-GB instances, so the copy never
+  loads an object into RAM. Each object is spooled to a local temp file in
+  bounded chunks while its SHA-256 is computed incrementally, then uploaded with
+  the target's native multipart uploader (``upload_fileobj``). A sweep therefore
+  holds one chunk — plus at most one spooled object — rather than a whole study.
 * The background worker sweeps every ``DR_REPLICATION_SWEEP_EVERY_TICKS``:
   studies with no record get enqueued, and PENDING/FAILED records are retried
   until success or the attempt cap. The Admin → Replication panel can also
@@ -27,16 +32,23 @@ or point a new node's backend at the bucket).
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import update as sa_update
 
 from app.core.config import settings
 from app.db.models import Instance, ReplicationRecord, Series, Study
-from app.db.session import SyncSessionLocal
+from app.db.session import SyncSessionLocal, try_worker_lock
 from app.services import storage_service
 from app.services.storage import get_storage_backend
+from app.services.storage.backend import iter_file_chunks
 
 log = logging.getLogger("paxs.replication")
 
@@ -45,6 +57,46 @@ _STUDY_ENQUEUE_BATCH = 500  # max new studies considered per sweep
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _copy_object_streaming(src_backend, key: str, dst_backend, remote: str) -> tuple[int, str]:
+    """Copy one object source→target without buffering it (C-8).
+
+    The object is read off ``src_backend`` in bounded chunks, spooled to a local
+    temp file while a SHA-256 is computed **incrementally over those chunks**,
+    then handed to ``dst_backend.upload_fileobj`` (managed multipart on S3). Peak
+    memory is one chunk; the only full-size copy is the spool, which is removed
+    as soon as the upload returns.
+
+    Returns ``(bytes_copied, sha256_hex)``. Raises :class:`StorageError` (or the
+    backend's error) on failure — the caller records the study as FAILED.
+    """
+    fd, spool = tempfile.mkstemp(suffix=".repl")
+    os.close(fd)
+    digest = hashlib.sha256()
+    total = 0
+    src_fh = None
+    try:
+        src_fh = src_backend.read_stream(key)
+        with open(spool, "wb") as out:
+            for chunk in iter_file_chunks(src_fh):
+                digest.update(chunk)
+                total += len(chunk)
+                out.write(chunk)
+        with open(spool, "rb") as spooled:
+            dst_backend.upload_fileobj(remote, spooled)
+        return total, digest.hexdigest()
+    finally:
+        if src_fh is not None:
+            try:
+                src_fh.close()
+            except Exception as exc:  # Best-effort close must not mask the copy result.
+                log.debug(
+                    "replication_source_stream_close_failed error_type=%s",
+                    type(exc).__name__,
+                )
+        with contextlib.suppress(OSError):
+            os.unlink(spool)
 
 
 # --------------------------------------------------------------------------- #
@@ -79,164 +131,191 @@ def _target_name() -> str:
 # --------------------------------------------------------------------------- #
 # Enqueue / replicate
 # --------------------------------------------------------------------------- #
-def enqueue_study(session, study_uid: str, target: str | None = None) -> ReplicationRecord:
-    """Idempotently mark a study for replication (PENDING)."""
-    target = target or _target_name()
-    row = session.execute(
-        select(ReplicationRecord).where(
-            ReplicationRecord.study_instance_uid == study_uid
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        row = ReplicationRecord(
-            study_instance_uid=study_uid, target=target, status="PENDING"
-        )
-        session.add(row)
-    elif row.status == "FAILED":
-        row.status = "PENDING"
-        row.last_error = None
-    return row
+_REPLICATION_LOCK = 1
+
+
+class ReplicationBusyError(RuntimeError):
+    """An automatic or manual replication operation owns the worker lock."""
+
+
+async def mark_study_dirty(session, study_uid: str) -> None:
+    statement = insert(ReplicationRecord).values(
+        study_instance_uid=study_uid, target=_target_name(), status="PENDING"
+    )
+    await session.execute(statement.on_conflict_do_update(
+        index_elements=[ReplicationRecord.study_instance_uid],
+        set_={
+            "generation": ReplicationRecord.generation + 1,
+            "status": "PENDING",
+            "attempts": 0,
+            "first_attempted_at": None,
+            "last_error": None,
+            "updated_at": func.now(),
+        },
+    ))
 
 
 def replicate_study(study_uid: str) -> dict:
-    """Copy one study's objects to the replica target; updates its record.
+    """Copy a study on demand, sharing the automatic sweep's ownership lock."""
+    with try_worker_lock(_REPLICATION_LOCK) as acquired:
+        if not acquired:
+            raise ReplicationBusyError("Replication is already running")
+        backend = target_backend()
+        with SyncSessionLocal() as session:
+            study_id = session.scalar(select(Study.id).where(Study.study_instance_uid == study_uid))
+            if study_id is None:
+                raise KeyError("Study not found")
+            _enqueue_missing(session, [study_uid], _target_name())
+            record_id = session.scalar(select(ReplicationRecord.id).where(
+                ReplicationRecord.study_instance_uid == study_uid
+            ))
+            session.commit()
+        return _replicate_record(record_id, study_uid, backend)
 
-    Runs synchronously (the worker calls it in its own session; the API wraps
-    it in a thread). Returns a summary dict; raises on configuration errors.
-    """
-    backend = target_backend()
-    target = _target_name()
-    prefix = settings.DR_REPLICATION_PREFIX.rstrip("/") + "/"
 
+def _enqueue_missing(session, study_uids: list[str], target: str) -> None:
+    if study_uids:
+        session.execute(insert(ReplicationRecord).values([
+            {"study_instance_uid": uid, "target": target, "status": "PENDING"}
+            for uid in study_uids
+        ]).on_conflict_do_nothing(index_elements=[ReplicationRecord.study_instance_uid]))
+
+
+def _replicate_record(record_id: int, study_uid: str, backend, *, automatic: bool = False) -> dict:
+    """Book one attempt, then finalize only if ingestion has not advanced the generation."""
     with SyncSessionLocal() as session:
-        study = session.execute(
-            select(Study).where(Study.study_instance_uid == study_uid)
-        ).scalar_one_or_none()
-        if study is None:
-            raise KeyError(f"study not found: {study_uid}")
-        record = enqueue_study(session, study_uid, target)
-        # A fresh row's ORM default (0) is only applied at flush, so guard None.
-        record.attempts = (record.attempts or 0) + 1
-        if record.first_attempted_at is None:
-            record.first_attempted_at = utcnow()
-        record.status = "PENDING"
-        session.flush()
-
-        instances = session.execute(
-            select(Instance)
-            .join(Series, Instance.series_id == Series.id)
-            .where(Series.study_id == study.id)
-            .order_by(Instance.id)
-        ).scalars().all()
-        if not instances:
-            record.status = "REPLICATED"
-            record.object_count = 0
-            record.bytes_replicated = 0
-            record.replicated_at = utcnow()
-            session.commit()
-            return {"study": study_uid, "objects": 0, "bytes": 0}
-
-        copied = 0
-        total_bytes = 0
-        try:
-            for inst in instances:
-                key = inst.file_path
-                if not key:
-                    continue
-                remote = f"{prefix}{study_uid}/{inst.sop_instance_uid}.dcm"
-                data = storage_service.read_bytes(
-                    key, backend_name=inst.storage_backend
-                )
-                backend.save_bytes(remote, data)
-                total_bytes += len(data)
-                copied += 1
-                # Thumbnail — strictly best-effort: a transient miss (the
-                # thumbnail may not be generated yet, or is being rewritten)
-                # must never fail the whole study.
-                try:
-                    thumb = storage_service.thumbnail_key(inst.sop_instance_uid)
-                    if storage_service.exists(thumb, backend_name=inst.storage_backend):
-                        backend.save_bytes(
-                            f"{prefix}.thumbnails/{inst.sop_instance_uid}.png",
-                            storage_service.read_bytes(thumb, backend_name=inst.storage_backend),
-                        )
-                except Exception as exc:
-                    log.warning("replication: thumbnail for %s skipped: %s",
-                                inst.sop_instance_uid, exc)
-        except Exception as exc:
-            record.status = "FAILED"
-            record.last_error = str(exc)[:1000]
-            session.commit()
-            log.warning("replication of %s failed (%d/%d objects): %s",
-                        study_uid, copied, len(instances), exc)
-            return {"study": study_uid, "objects": copied, "bytes": total_bytes,
-                    "ok": False, "error": str(exc)}
-
-        record.status = "REPLICATED"
-        record.object_count = copied
-        record.bytes_replicated = total_bytes
-        record.last_error = None
-        record.replicated_at = utcnow()
+        claim = sa_update(ReplicationRecord).where(ReplicationRecord.id == record_id)
+        if automatic:
+            claim = claim.where(_due_records())
+        generation = session.scalar(claim.values(
+            attempts=ReplicationRecord.attempts + 1,
+            status="PENDING",
+            target=_target_name(),
+            first_attempted_at=func.coalesce(ReplicationRecord.first_attempted_at, utcnow()),
+        ).returning(ReplicationRecord.generation))
         session.commit()
-        log.info("replicated %s (%d objects, %d bytes) -> %s",
-                 study_uid, copied, total_bytes, target)
-        return {"study": study_uid, "objects": copied, "bytes": total_bytes, "ok": True}
+    if generation is None:
+        return {"skipped": True}
 
-
-# --------------------------------------------------------------------------- #
-# Sweep (worker + on-demand)
-# --------------------------------------------------------------------------- #
-def sweep() -> dict:
-    """Replicate due studies: enqueue new ones, retry PENDING/FAILED.
-
-    Returns a summary; never raises (failures are recorded per study)."""
-    if not settings.DR_REPLICATION_ENABLED:
-        return {"enabled": False, "replicated": 0, "failed": 0, "pending": 0}
     try:
-        target_backend()  # validate target up front
-    except Exception as exc:
-        log.warning("DR replication sweep skipped: %s", exc)
-        return {"enabled": True, "replicated": 0, "failed": 0,
-                "pending": 0, "error": str(exc)}
+        copied, total_bytes = _copy_study_objects(study_uid, backend)
+    except Exception as exc:  # Copy errors may contain storage paths or identifiers.
+        _finish_record(record_id, generation, status="FAILED",
+                       last_error=f"Replication failed ({type(exc).__name__})")
+        log.warning("replication_failed error_type=%s", type(exc).__name__)
+        return {"study": study_uid, "ok": False, "error": "Replication failed"}
 
+    completed = _finish_record(
+        record_id, generation, status="REPLICATED", attempts=0,
+        first_attempted_at=None, object_count=copied, bytes_replicated=total_bytes,
+        last_error=None, replicated_at=utcnow(),
+    )
+    return {"study": study_uid, "objects": copied, "bytes": total_bytes,
+            "ok": True, "needs_resweep": not completed}
+
+
+def _finish_record(record_id: int, generation: int, **values) -> bool:
     with SyncSessionLocal() as session:
-        # (1) enqueue studies that have no record yet (recent first).
-        existing = set(session.execute(
-            select(ReplicationRecord.study_instance_uid)
-        ).scalars().all())
-        new_uids = session.execute(
-            select(Study.study_instance_uid)
-            .order_by(Study.id.desc())
-            .limit(_STUDY_ENQUEUE_BATCH)
-        ).scalars().all()
-        for uid in new_uids:
-            if uid not in existing:
-                enqueue_study(session, uid, _target_name())
+        result = session.execute(sa_update(ReplicationRecord).where(
+            ReplicationRecord.id == record_id,
+            ReplicationRecord.generation == generation,
+        ).values(**values))
         session.commit()
+        return result.rowcount == 1
 
-        # (2) replicate due records.
-        due = session.execute(
-            select(ReplicationRecord)
-            .where(ReplicationRecord.status.in_(("PENDING", "FAILED")))
-            .where(ReplicationRecord.attempts < settings.DR_REPLICATION_MAX_ATTEMPTS)
-            .order_by(ReplicationRecord.id)
-        ).scalars().all()
-        due_uids = [r.study_instance_uid for r in due]
-    session.close()
 
-    done = failed = 0
-    for uid in due_uids:
+def _copy_study_objects(study_uid: str, backend) -> tuple[int, int]:
+    prefix = settings.DR_REPLICATION_PREFIX.rstrip("/") + "/"
+    with SyncSessionLocal() as session:
+        study_id = session.scalar(select(Study.id).where(Study.study_instance_uid == study_uid))
+        if study_id is None:
+            raise KeyError("Study not found")
+        instances = session.execute(
+            select(Instance.file_path, Instance.storage_backend, Instance.sop_instance_uid)
+            .join(Series, Instance.series_id == Series.id)
+            .where(Series.study_id == study_id)
+            .order_by(Instance.id)
+        ).all()
+
+    copied = total_bytes = 0
+    for inst in instances:
+        key = inst.file_path
+        if not key:
+            raise ValueError("Instance storage key is missing")
+        remote = f"{prefix}{study_uid}/{inst.sop_instance_uid}.dcm"
+        # C-8: stream the object off its backend and upload it to the
+        # target in bounded chunks — a multi-GB instance is never held
+        # in RAM, and the digest is computed incrementally over the
+        # streamed chunks rather than by re-reading the object.
+        src_backend = storage_service.resolve_backend(inst.storage_backend)
+        size, digest = _copy_object_streaming(src_backend, key, backend, remote)
+        log.debug("replicated object %s (%d bytes, sha256 %s)",
+                  inst.sop_instance_uid, size, digest)
+        total_bytes += size
+        copied += 1
+        # Thumbnail — strictly best-effort: a transient miss (the
+        # thumbnail may not be generated yet, or is being rewritten)
+        # must never fail the whole study.
         try:
-            result = replicate_study(uid)
-            if result.get("ok", True) is False:
-                failed += 1
-            else:
-                done += 1
+            thumb = storage_service.thumbnail_key(inst.sop_instance_uid)
+            if storage_service.exists(thumb, backend_name=inst.storage_backend):
+                _copy_object_streaming(
+                    src_backend, thumb, backend,
+                    f"{prefix}.thumbnails/{inst.sop_instance_uid}.png",
+                )
+        except (OSError, ValueError, KeyError) as exc:  # a thumbnail miss must not fail the study
+            log.warning("replication_thumbnail_skipped error_type=%s",
+                        type(exc).__name__)
+    return copied, total_bytes
+
+
+def _due_records():
+    return (
+        ReplicationRecord.status.in_(("PENDING", "FAILED"))
+        & (ReplicationRecord.attempts < settings.DR_REPLICATION_MAX_ATTEMPTS)
+    )
+
+
+def sweep() -> dict:
+    """Discover a bounded batch and process it under exclusive replica ownership."""
+    counts = {"enabled": settings.DR_REPLICATION_ENABLED, "replicated": 0,
+              "failed": 0, "pending": 0, "skipped": 0}
+    if not settings.DR_REPLICATION_ENABLED:
+        return counts
+    with try_worker_lock(_REPLICATION_LOCK) as acquired:
+        if not acquired:
+            return {**counts, "busy": True}
+        try:
+            backend = target_backend()
         except Exception as exc:
-            failed += 1
-            log.warning("replication sweep item %s failed: %s", uid, exc)
-    return {"enabled": True, "replicated": done, "failed": failed,
-            "pending": len(due_uids) - done - failed}
+            log.warning("DR replication sweep skipped error_type=%s", type(exc).__name__)
+            return {**counts, "error": "Replication target unavailable"}
+
+        with SyncSessionLocal() as session:
+            has_record = select(ReplicationRecord.id).where(
+                ReplicationRecord.study_instance_uid == Study.study_instance_uid
+            ).exists()
+            new_uids = session.scalars(select(Study.study_instance_uid)
+                .where(~has_record).order_by(Study.id).limit(_STUDY_ENQUEUE_BATCH)).all()
+            _enqueue_missing(session, list(new_uids), _target_name())
+            due = session.execute(select(ReplicationRecord.id, ReplicationRecord.study_instance_uid)
+                .where(_due_records()).order_by(ReplicationRecord.updated_at, ReplicationRecord.id)
+                .limit(_STUDY_ENQUEUE_BATCH)).all()
+            session.commit()
+
+        for record_id, uid in due:
+            result = _replicate_record(record_id, uid, backend, automatic=True)
+            if result.get("skipped") or result.get("needs_resweep"):
+                counts["skipped"] += 1
+            elif result["ok"]:
+                counts["replicated"] += 1
+            else:
+                counts["failed"] += 1
+        with SyncSessionLocal() as session:
+            counts["pending"] = session.scalar(
+                select(func.count()).select_from(ReplicationRecord).where(_due_records())
+            )
+    return counts
 
 
 def status() -> dict:

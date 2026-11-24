@@ -26,11 +26,21 @@ import ssl
 import subprocess
 from pathlib import Path
 
-from app.core.config import settings
+from app.core.config import is_production_environment, settings
 
 log = logging.getLogger("paxs.tls")
 
 _TLS_MIN_VERSION = ssl.TLSVersion.TLSv1_2
+
+
+class TlsConfigurationError(RuntimeError):
+    """TLS is enabled but the peer cannot be authenticated.
+
+    Raised instead of silently building an unverified (``CERT_NONE``) context.
+    An SCU that cannot verify the server is not using TLS for anything an
+    attacker cares about — the handshake completes against a MITM. Callers let
+    it propagate: refusing the transfer is the correct, fail-closed outcome.
+    """
 
 
 def ensure_certificate(cert_path: str | Path, key_path: str | Path,
@@ -80,8 +90,11 @@ def ensure_certificate(cert_path: str | Path, key_path: str | Path,
             log.warning("Generated self-signed DICOM TLS certificate -> %s (dev use; "
                         "point DICOM_TLS_CA at your hospital CA for production)", cert)
             return str(cert), str(key)
-    except FileNotFoundError:
-        pass
+    except FileNotFoundError as exc:  # documented fallback to the cryptography module
+        # `openssl` not on PATH is the expected branch on Windows installs; the
+        # pure-Python generator below is the supported alternative.
+        log.debug("tls_openssl_missing error_type=%s; using cryptography fallback",
+                  type(exc).__name__)
 
     # Fallback to Python cryptography module if openssl binary is missing from PATH
     try:
@@ -89,7 +102,9 @@ def ensure_certificate(cert_path: str | Path, key_path: str | Path,
         from cryptography import x509
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509 import DNSName, IPAddress, SubjectAlternativeName
         from cryptography.x509.oid import NameOID
+        import ipaddress
 
         private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         subject = issuer = x509.Name([
@@ -102,6 +117,10 @@ def ensure_certificate(cert_path: str | Path, key_path: str | Path,
             .issuer_name(issuer)
             .public_key(private_key.public_key())
             .serial_number(x509.random_serial_number())
+            .add_extension(
+                SubjectAlternativeName([DNSName("localhost"), IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                critical=False,
+            )
             .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
             .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650))
         )
@@ -141,25 +160,63 @@ def server_context() -> ssl.SSLContext:
 def client_context(trust_cert: str | Path | None = None) -> ssl.SSLContext:
     """The SCU's TLS context for connecting to a TLS peer.
 
-    Verification: if DICOM_TLS_CA is set the server certificate is validated
-    against the CA; otherwise the caller may pass `trust_cert` (the server's
-    own self-signed certificate) to pin exactly that peer. With neither, the
-    connection is encrypted but the server identity is not verified — logged
-    as a warning (self-signed dev default).
+    **B-16 — the peer is always authenticated.** An encrypted channel whose
+    server identity is never checked protects nothing an attacker cares about:
+    a MITM completes the handshake with its own certificate and reads every
+    study. So this context never returns ``CERT_NONE`` in production.
+
+    Trust is resolved in this order:
+
+    1. ``DICOM_TLS_CA`` — the hospital CA bundle. Full verification, including
+       hostname (the peer address becomes the TLS ``server_hostname``).
+    2. ``trust_cert`` — a pinned peer certificate (the node's ``trust_cert`` or
+       a self-signed server's own cert). The chain is verified against exactly
+       that certificate; hostname checking is relaxed because a self-signed DICOM
+       cert usually carries no SAN for the address the SCU dials.
+    3. Neither → **production refuses** with :class:`TlsConfigurationError`
+       (fail closed, N-8). A development run keeps the old opportunistic
+       behaviour so a local self-signed setup still works, but logs a warning
+       on every association.
+
+    Raises :class:`TlsConfigurationError` rather than returning an unverified
+    context, so a misconfiguration surfaces at the call site instead of silently
+    downgrading every outbound transfer.
     """
     ca = settings.DICOM_TLS_CA
-    if ca and Path(ca).exists():
+    if ca:
+        if not Path(ca).exists():
+            # A configured-but-missing CA is a broken trust anchor, not a
+            # licence to skip verification.
+            raise TlsConfigurationError(
+                f"DICOM_TLS_CA is set to {ca!r} but the file does not exist"
+            )
         ctx = ssl.create_default_context(cafile=ca)
         ctx.minimum_version = _TLS_MIN_VERSION
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.check_hostname = True
         return ctx
-    if trust_cert is not None and Path(trust_cert).exists():
+    if trust_cert is not None:
+        if not Path(trust_cert).exists():
+            raise TlsConfigurationError(
+                f"pinned peer certificate {str(trust_cert)!r} does not exist"
+            )
         ctx = ssl.create_default_context(cafile=str(trust_cert))
         ctx.minimum_version = _TLS_MIN_VERSION
-        # Self-signed certs have no matching SAN for the loopback hostname.
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        # Self-signed DICOM certs have no SAN for the dialled address; the
+        # pin itself is the identity check, and it is exact.
         ctx.check_hostname = False
         return ctx
+
+    if is_production_environment(settings):
+        raise TlsConfigurationError(
+            "DICOM TLS is enabled but no trust anchor is configured: set "
+            "DICOM_TLS_CA, or pin the peer certificate on the node "
+            "(trust_cert). Refusing to connect without verifying the peer."
+        )
+
     log.warning("DICOM TLS: no CA/cert to verify the peer — encrypting without "
-                "server authentication (set DICOM_TLS_CA for production)")
+                "server authentication (development only; set DICOM_TLS_CA)")
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = _TLS_MIN_VERSION
     ctx.check_hostname = False
@@ -167,7 +224,9 @@ def client_context(trust_cert: str | Path | None = None) -> ssl.SSLContext:
     return ctx
 
 
-def scu_tls_args(peer_host: str) -> tuple[ssl.SSLContext, str] | None:
+def scu_tls_args(peer_host: str,
+                 trust_cert: str | Path | None = None,
+                 ) -> tuple[ssl.SSLContext, str] | None:
     """(context, server_hostname) for `AE.associate(..., tls_args=...)` when
     DICOM TLS is enabled, else None (plaintext).
 
@@ -175,10 +234,14 @@ def scu_tls_args(peer_host: str) -> tuple[ssl.SSLContext, str] | None:
     TLS server_hostname, so hostname verification (when a CA is configured)
     checks the certificate against the real peer, never against the local
     bind address.
+
+    ``trust_cert`` is the node's pinned peer certificate, used when no CA bundle
+    is configured (B-16). Raises :class:`TlsConfigurationError` when TLS is on
+    but the peer cannot be authenticated.
     """
     if not settings.DICOM_TLS_ENABLED:
         return None
-    return client_context(), str(peer_host)
+    return client_context(trust_cert), str(peer_host)
 
 
 def ensure_cert_paths_exist() -> None:

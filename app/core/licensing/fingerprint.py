@@ -7,6 +7,16 @@ Builds a stable, tamper-resistant hardware fingerprint from multiple sources:
 - Operating System Serial Number / machine-id
 
 Resistant to MAC spoofing, virtual machine clones, and minor hardware upgrades.
+
+**Probe contract.** Every collector below is a *best-effort* probe: a host may
+legitimately expose none of these sources (container, hardened kernel, missing
+WMIC), so a failed probe is not an error and must never fail licensing. Each
+collector therefore returns a documented sentinel — an empty list, or a
+``None`` per component — and the fingerprint degrades to the components that
+did resolve (finally to ``FALLBACK:<node>|<machine>``). The failures are still
+recorded at ``debug`` with the exception *type* only, so "probe refused" stays
+distinguishable from "probe returned nothing" without putting a serial number,
+hostname, or command line into the log (AGENTS.md N-2).
 """
 
 from __future__ import annotations
@@ -36,8 +46,8 @@ def _get_mac_addresses() -> list[str]:
             )
             if mac and mac != "00:00:00:00:00:00":
                 macs.append(mac)
-    except Exception:
-        pass
+    except (OSError, ValueError) as exc:  # probe: getnode may raise on a hardened host
+        log.debug("fingerprint_uuid_getnode_failed error_type=%s", type(exc).__name__)
 
     # Linux /sys/class/net/*
     if platform.system() == "Linux":
@@ -53,8 +63,8 @@ def _get_mac_addresses() -> list[str]:
                             addr = f.read().strip().upper()
                             if addr and addr != "00:00:00:00:00:00" and addr not in macs:
                                 macs.append(addr)
-            except Exception as exc:
-                log.debug("Error reading Linux network interfaces: %s", exc)
+            except (OSError, UnicodeDecodeError) as exc:  # probe: an unreadable iface is skipped
+                log.debug("fingerprint_net_iface_read_failed error_type=%s", type(exc).__name__)
 
     return sorted(list(set(macs)))
 
@@ -93,8 +103,9 @@ def _get_windows_identifiers() -> tuple[str | None, str | None, str | None]:
                     mb_serial = lines[1]
             if len(lines) >= 3 and lines[2]:
                 os_serial = lines[2]
-    except Exception as exc:
-        log.debug("PowerShell CIM query failed, falling back to WMIC: %s", exc)
+    except (OSError, subprocess.SubprocessError, ValueError, UnicodeDecodeError) as exc:  # probe: the WMIC queries below are the fallback
+        log.debug("fingerprint_cim_query_failed error_type=%s; falling back to WMIC",
+                  type(exc).__name__)
 
     # Fallback to WMIC if any is missing
     if not cpu_id:
@@ -108,8 +119,8 @@ def _get_windows_identifiers() -> tuple[str | None, str | None, str | None]:
             for line in out.splitlines():
                 if line.startswith("ProcessorId="):
                     cpu_id = line.split("=", 1)[1].strip() or None
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError, ValueError, UnicodeDecodeError) as exc:  # probe: wmic is absent on modern Windows
+            log.debug("fingerprint_wmic_cpu_failed error_type=%s", type(exc).__name__)
 
     if not mb_serial:
         try:
@@ -124,8 +135,8 @@ def _get_windows_identifiers() -> tuple[str | None, str | None, str | None]:
                     cand = line.split("=", 1)[1].strip()
                     if cand and cand.lower() not in ("to be filled by o.e.m.", "none", "default string", "0"):
                         mb_serial = cand
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError, ValueError, UnicodeDecodeError) as exc:  # probe: wmic is absent on modern Windows
+            log.debug("fingerprint_wmic_baseboard_failed error_type=%s", type(exc).__name__)
 
     if not os_serial:
         try:
@@ -138,8 +149,8 @@ def _get_windows_identifiers() -> tuple[str | None, str | None, str | None]:
             for line in out.splitlines():
                 if line.startswith("SerialNumber="):
                     os_serial = line.split("=", 1)[1].strip() or None
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError, ValueError, UnicodeDecodeError) as exc:  # probe: wmic is absent on modern Windows
+            log.debug("fingerprint_wmic_os_failed error_type=%s", type(exc).__name__)
 
     return cpu_id, mb_serial, os_serial
 
@@ -159,8 +170,9 @@ def _get_linux_identifiers() -> tuple[str | None, str | None, str | None]:
                     if content:
                         machine_id = content
                         break
-            except Exception:
-                pass
+            except (OSError, UnicodeDecodeError) as exc:  # probe: an unreadable machine-id is optional
+                log.debug("fingerprint_machine_id_read_failed error_type=%s",
+                          type(exc).__name__)
 
     # 2. DMI System UUID
     dmi_path = "/sys/class/dmi/id/product_uuid"
@@ -168,8 +180,8 @@ def _get_linux_identifiers() -> tuple[str | None, str | None, str | None]:
         try:
             with open(dmi_path, "r", encoding="utf-8") as f:
                 dmi_uuid = f.read().strip() or None
-        except Exception:
-            pass
+        except (OSError, UnicodeDecodeError) as exc:  # probe: product_uuid is root-only
+            log.debug("fingerprint_dmi_uuid_read_failed error_type=%s", type(exc).__name__)
 
     # 3. DMI Product Serial
     serial_path = "/sys/class/dmi/id/product_serial"
@@ -179,8 +191,8 @@ def _get_linux_identifiers() -> tuple[str | None, str | None, str | None]:
                 cand = f.read().strip()
                 if cand and cand.lower() not in ("to be filled by o.e.m.", "none", "default string", "0"):
                     serial = cand
-        except Exception:
-            pass
+        except (OSError, UnicodeDecodeError) as exc:  # probe: product_serial is root-only
+            log.debug("fingerprint_dmi_serial_read_failed error_type=%s", type(exc).__name__)
 
     return machine_id, dmi_uuid, serial
 

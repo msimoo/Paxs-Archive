@@ -6,10 +6,20 @@
   <meta name="description" content="PAXS Archive — DICOM Study List. Browse, search, and manage medical imaging studies in your PACS archive." />
   <link rel="icon" href="/static/logo/logo.ico" />
   <title>PAXS Archive — Study List</title>
-  <!-- Hand-maintained UI enhancements (report modal, user chip). Part of the template so a frontend build cannot drop it. -->
-  <script defer src="/viewer/paxs-study-list-enhance.js?v=38"></script>
-  <script type="module" crossorigin src="/studies-ui/assets/index-YSNIbqBY.js"></script>
-  <link rel="stylesheet" crossorigin href="/studies-ui/assets/index-it_fQ0mj.css">
+  <script>
+    /* Apply the persisted theme before first paint (dark reading-room is the
+       default). Same key and same attribute as the dashboard, so the two UIs
+       never disagree about which room the user is in. */
+    (function () {
+      try { var t = localStorage.getItem("paxs_theme"); document.documentElement.dataset.theme = (t === "light" ? "light" : "dark"); }
+      catch (e) { document.documentElement.dataset.theme = "dark"; }
+    })();
+  </script>
+  <!-- Hand-maintained UI enhancements (rich report editor, voice player, user chip). Part of the template so a frontend build cannot drop it. -->
+  <link rel="stylesheet" href="/static/paxs-rich-editor.css?v=1" />
+  <script defer src="/viewer/paxs-thumb-engine.js?v=39"></script><script defer src="/static/paxs-report-addenda.js?v=1"></script><script defer src="/static/paxs-rich-editor.js?v=1"></script><script defer src="/viewer/paxs-study-list-enhance.js?v=51"></script>
+  <script type="module" crossorigin src="/studies-ui/assets/index-BM9XQgfI.js"></script>
+  <link rel="stylesheet" crossorigin href="/studies-ui/assets/index-Ck4H7c7W.css">
 </head>
 <body>
   <div id="root"></div>

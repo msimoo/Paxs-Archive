@@ -7,7 +7,7 @@ for the instance's transfer syntax, or the syntax implies a pixel layout the
 handler cannot express (16-bit colour, multi-sample JPEG 2000, near-lossless
 JPEG-LS, …). The previous logs said only "pixel_array failed" — which left the
 operator to open the file and find out which syntax it was. During the viewer
-audit that cost real time (see V1-4 in PAXS_VIEWER_DIAGNOSTIC_AUDIT.md).
+audit that cost real time (see V1-4 in plans/legacy/archive-notes/PAXS_VIEWER_DIAGNOSTIC_AUDIT.md).
 
 Every decode-failure log now carries the transfer syntax *with its human name*
 plus the pixel layout, so the codec is identifiable from the log line alone:
@@ -22,6 +22,45 @@ policy for the viewer paths).
 """
 
 from __future__ import annotations
+
+import logging
+import re
+
+log = logging.getLogger("paxs.dicom.diagnostics")
+
+
+# Reject malformed diagnostic identifiers: even UID/pixel-layout fields are
+# untrusted at the ingestion boundary and can contain patient text or paths.
+_UID_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))+")
+_MODALITIES = {"CT", "MR", "CR", "DX", "US", "XA", "RF", "NM", "PT", "OT", "SC",
+               "MG", "IO", "PX", "RTIMAGE", "RTDOSE", "RTSTRUCT", "RTPLAN", "SEG", "PR", "SR"}
+_PHOTOMETRICS = {"MONOCHROME1", "MONOCHROME2", "RGB", "PALETTE COLOR", "YBR_FULL",
+                "YBR_FULL_422", "YBR_PARTIAL_422", "YBR_PARTIAL_420", "YBR_ICT", "YBR_RCT"}
+
+
+def safe_uid(value) -> str:
+    """Return a valid DICOM UID or a fixed label; never echo malformed input."""
+    if value is None:
+        return "unset"
+    text = str(value).strip()
+    if not text:
+        return "unset"
+    return text if len(text) <= 64 and _UID_PATTERN.fullmatch(text) else "invalid_uid"
+
+
+def _safe_diagnostic_value(value, name: str):
+    """Return an allowlisted diagnostic value, not arbitrary DICOM field text."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if name.endswith("UID"):
+        return safe_uid(value)
+    if name == "Modality":
+        return text if text in _MODALITIES else "invalid_modality"
+    if name == "PhotometricInterpretation":
+        return text if text in _PHOTOMETRICS else "invalid_photometric"
+    return text if text.isascii() and text.isdigit() and len(text) <= 10 else "invalid_numeric"
+
 
 # Fallback labels for the syntaxes this archive produces or is most likely to
 # receive, used only when pydicom does not recognise the UID (pydicom's
@@ -64,12 +103,12 @@ def transfer_syntax_label(uid) -> str:
     value = str(uid).strip()
     if not value:
         return "unset"
-    name = ""
-    try:
-        name = str(getattr(uid, "name", "") or "").strip()
-    except Exception:  # pragma: no cover — a UID that cannot report its name
-        name = ""
-    if name in _UNKNOWN:
+    value = _safe_diagnostic_value(value, "TransferSyntaxUID")
+    # Resolve names from the local dictionary, never a user-provided .name.
+    from pydicom.uid import UID
+
+    name = UID(value).name if value != "invalid_uid" else ""
+    if name in _UNKNOWN or name == value:
         name = _COMMON_LABELS.get(value, "")
     return f"{value} ({name})" if name else value
 
@@ -81,10 +120,14 @@ def _attr(ds, name: str):
             continue
         try:
             value = getattr(source, name, None)
-        except Exception:  # pragma: no cover
+        except Exception as exc:  # noqa: BLE001 - boundary guard: diagnostics must never mask the original failure
+            # A property that raises is itself diagnostic evidence; record the
+            # type only — this path exists precisely because the payload is
+            # untrusted (N-2).
+            log.debug("diagnostic_attr_unreadable error_type=%s", type(exc).__name__)
             value = None
         if value is not None and str(value) != "":
-            return value
+            return _safe_diagnostic_value(value, name)
     return None
 
 
@@ -100,6 +143,9 @@ def decode_context(ds, *, frame: int | None = None,
        silently mishandles (16-bit colour, multi-sample, near-lossless);
     3. **identity** — series / SOP instance UID and the frame index.
     """
+    from app.core.observability import record_dicom_decode_failure
+
+    record_dicom_decode_failure()
     file_meta = getattr(ds, "file_meta", None)
     ts = getattr(file_meta, "TransferSyntaxUID", None) if file_meta is not None else None
 
@@ -131,14 +177,15 @@ def decode_context(ds, *, frame: int | None = None,
         parts.append(" ".join(str(p) for p in layout))
 
     ident = []
-    series = series_uid or _attr(ds, "SeriesInstanceUID")
+    series = (_safe_diagnostic_value(series_uid, "SeriesInstanceUID")
+              if series_uid is not None else _attr(ds, "SeriesInstanceUID"))
     if series:
         ident.append(f"series={series}")
     sop = _attr(ds, "SOPInstanceUID")
     if sop:
         ident.append(f"sop={sop}")
     if frame is not None:
-        ident.append(f"frame={frame}")
+        ident.append(f"frame={_safe_diagnostic_value(frame, 'frame')}")
     if ident:
         parts.append(" ".join(str(p) for p in ident))
 

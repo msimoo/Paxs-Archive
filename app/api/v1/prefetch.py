@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import get_current_user, require_admin, tenant_scope
 from app.db.models import PrefetchJob, PrefetchRule, User
 from app.db.session import get_db
 from app.services import prefetch_service
@@ -106,7 +106,7 @@ def _job_to_dict(j: PrefetchJob) -> dict[str, Any]:
 async def create_prefetch_rule(
     req: CreatePrefetchRuleRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Create a new automated prefetching rule."""
     try:
@@ -114,15 +114,15 @@ async def create_prefetch_rule(
         await db.commit()
         refreshed = await prefetch_service.get_rule(db, rule.id)
         return JSONResponse(_rule_to_dict(refreshed or rule), status_code=201)
-    except Exception as exc:
-        log.exception("Failed to create prefetch rule %s", req.name)
-        raise HTTPException(400, f"Failed to create rule: {exc}") from exc
+    except Exception as exc:  # unexpected persistence errors may contain PHI or paths
+        log.error("prefetch_rule_create_failed error_type=%s", type(exc).__name__)
+        raise HTTPException(400, "Failed to create rule") from None
 
 
 @router.get("/rules", response_class=JSONResponse)
 async def list_prefetch_rules(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """List all active prefetch rules."""
     rules = await prefetch_service.list_rules(db)
@@ -133,7 +133,7 @@ async def list_prefetch_rules(
 async def get_prefetch_rule(
     rule_id: int,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Get details of a specific prefetch rule."""
     rule = await prefetch_service.get_rule(db, rule_id)
@@ -147,7 +147,7 @@ async def update_prefetch_rule(
     rule_id: int,
     req: UpdatePrefetchRuleRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Update a prefetch rule."""
     rule = await prefetch_service.get_rule(db, rule_id)
@@ -167,7 +167,7 @@ async def update_prefetch_rule(
 async def delete_prefetch_rule(
     rule_id: int,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Delete a prefetch rule."""
     deleted = await prefetch_service.delete_rule(db, rule_id)
@@ -181,15 +181,18 @@ async def delete_prefetch_rule(
 async def trigger_prefetch(
     req: TriggerPrefetchRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
+    user: User = Depends(require_admin),
+) -> JSONResponse:
     """Trigger manual prefetch evaluation for a patient."""
+    tenant_id, include_all = tenant_scope(user)
     jobs = await prefetch_service.evaluate_and_trigger_prefetch(
         db,
         patient_id=req.patient_id,
         worklist_step_id=req.worklist_step_id,
         modality=req.modality,
         body_part=req.body_part_examined,
+        tenant_id=tenant_id,
+        include_all=include_all,
     )
     await db.commit()
     return JSONResponse(
@@ -205,7 +208,13 @@ async def list_prefetch_jobs(
     patient_id: str | None = Query(None, description="Filter by Patient ID"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-):
+) -> JSONResponse:
     """List prefetch job execution logs."""
-    jobs = await prefetch_service.list_jobs(db, patient_id=patient_id)
+    tenant_id, include_all = tenant_scope(user)
+    jobs = await prefetch_service.list_jobs(
+        db,
+        patient_id=patient_id,
+        tenant_id=tenant_id,
+        include_all=include_all,
+    )
     return JSONResponse([_job_to_dict(j) for j in jobs])

@@ -6,6 +6,7 @@ contact info) and managing report templates for Jinja2 pre-filling.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import uuid
@@ -57,7 +58,7 @@ def _save_validated_logo(content: bytes) -> str:
             fmt = (probe.format or "").upper()
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001 - any decode failure is a bad upload
+    except Exception as exc:
         raise HTTPException(
             422, "Logo must be a valid PNG, JPEG or WebP image"
         ) from exc
@@ -99,17 +100,22 @@ async def get_org_settings(db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user_any)):
     """Fetch current organization settings."""
     org = await report_service.get_or_create_org_settings(db)
+    logo_path = await asyncio.to_thread(
+        report_service.resolve_org_logo_path, org.logo_path
+    )
     updated_at_str = None
     try:
         if org.updated_at:
             updated_at_str = org.updated_at.isoformat()
-    except Exception:
-        pass
+    except (ValueError, TypeError) as exc:  # a bad timestamp must not fail the page
+        # The field is optional in the response; the type keeps a genuine
+        # schema drift visible instead of returning "" forever.
+        log.debug("org_settings_updated_at_unreadable error_type=%s", type(exc).__name__)
     return {
         "id": org.id,
         "org_name_ar": org.org_name_ar or "",
         "org_name_en": org.org_name_en or "",
-        "logo_path": org.logo_path or "",
+        "logo_path": logo_path,
         "header_html_text": org.header_html_text or "",
         "footer_html_text": org.footer_html_text or "",
         "phone": org.phone or "",

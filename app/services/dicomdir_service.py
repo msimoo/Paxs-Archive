@@ -7,13 +7,14 @@ and packages portable zip/folder exports according to DICOM Media Exchange stand
 
 from __future__ import annotations
 
+import contextlib
 import io
 import logging
-import os
+import shutil
 import zipfile
+from pathlib import Path
 from typing import Any
 
-import pydicom
 from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
 from pydicom.sequence import Sequence
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
@@ -21,7 +22,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.db.models import Instance, Series, Study
+from app.core.concurrency import run_blocking
+from app.db.models import Series, Study
 from app.services import audit_service, storage_service
 
 log = logging.getLogger("paxs.dicomdir")
@@ -97,13 +99,70 @@ def create_dicomdir_dataset(studies_structure: list[dict[str, Any]]) -> FileData
     return ds
 
 
-async def export_dicomdir_package(
-    session: AsyncSession,
-    study_instance_uids: list[str],
-    performed_by: str = "system",
-) -> tuple[bytes, str]:
-    """Generate a DICOMDIR export ZIP archive containing DICOMDIR index file + IMAGES/ directory."""
-    # 1. Fetch studies
+def _build_studies_structure(
+    studies: list[Study],
+) -> tuple[list[dict[str, Any]], list[tuple[str, list[str], str | None]]]:
+    studies_structure: list[dict[str, Any]] = []
+    candidates: list[tuple[str, list[str], str | None]] = []
+    img_counter = 1
+    for st in studies:
+        st_data: dict[str, Any] = {
+            "patient_id": st.patient.patient_id if st.patient else "UNKNOWN",
+            "patient_name": st.patient.patient_name if st.patient else "UNKNOWN",
+            "study_instance_uid": st.study_instance_uid,
+            "study_date": st.study_date,
+            "study_time": st.study_time,
+            "accession_number": st.accession_number,
+            "study_description": st.study_description,
+            "series_list": [],
+        }
+        for ser in st.series_list:
+            ser_data: dict[str, Any] = {
+                "series_instance_uid": ser.series_instance_uid,
+                "modality": ser.modality,
+                "series_number": ser.series_number,
+                "series_description": ser.series_description,
+                "instances": [],
+            }
+            for inst in ser.instances:
+                rel_parts = ["IMAGES", f"IMG{img_counter:05d}"]
+                img_counter += 1
+                ser_data["instances"].append({
+                    "sop_instance_uid": inst.sop_instance_uid,
+                    "sop_class_uid": inst.sop_class_uid,
+                    "relative_file_id": rel_parts,
+                })
+                candidates.append((inst.file_path, rel_parts, inst.storage_backend))
+            st_data["series_list"].append(ser_data)
+        studies_structure.append(st_data)
+    return studies_structure, candidates
+
+
+def _write_dicomdir_zip(
+    target: io.BytesIO | Path,
+    studies_structure: list[dict[str, Any]],
+    candidates: list[tuple[str, list[str], str | None]],
+) -> int:
+    """Build DICOMDIR and stream stored DICOM objects into ``target`` (off-loop safe)."""
+    dicomdir_ds = create_dicomdir_dataset(studies_structure)
+    written = 0
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
+        dcmdir_buf = io.BytesIO()
+        dicomdir_ds.save_as(dcmdir_buf, enforce_file_format=True)
+        zf.writestr("DICOMDIR", dcmdir_buf.getvalue())
+        for abs_path, rel_parts, backend in candidates:
+            if not storage_service.exists(abs_path, backend_name=backend):
+                continue
+            rel_path_str = "/".join(rel_parts)
+            with contextlib.closing(
+                storage_service.read_stream(abs_path, backend_name=backend)
+            ) as src, zf.open(rel_path_str, "w") as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+            written += 1
+    return written
+
+
+async def _load_studies(session: AsyncSession, study_instance_uids: list[str]) -> list[Study]:
     stmt = (
         select(Study)
         .options(
@@ -115,70 +174,27 @@ async def export_dicomdir_package(
     studies = list((await session.execute(stmt)).scalars().unique().all())
     if not studies:
         raise ValueError("No matching studies found for DICOMDIR export")
+    return studies
 
-    # 2. Build structure dictionary
-    studies_structure = []
-    file_map: list[tuple[str, list[str]]] = []  # (actual_file_path, relative_file_parts)
-    img_counter = 1
 
-    for st in studies:
-        st_data = {
-            "patient_id": st.patient.patient_id if st.patient else "UNKNOWN",
-            "patient_name": st.patient.patient_name if st.patient else "UNKNOWN",
-            "study_instance_uid": st.study_instance_uid,
-            "study_date": st.study_date,
-            "study_time": st.study_time,
-            "accession_number": st.accession_number,
-            "study_description": st.study_description,
-            "series_list": [],
-        }
+def _export_filename(studies: list[Study]) -> str:
+    patient_id = studies[0].patient.patient_id if studies[0].patient else "MEDIA"
+    safe_pid = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(patient_id))[:48] or "MEDIA"
+    return f"DICOM_EXPORT_{safe_pid}.zip"
 
-        for ser in st.series_list:
-            ser_data = {
-                "series_instance_uid": ser.series_instance_uid,
-                "modality": ser.modality,
-                "series_number": ser.series_number,
-                "series_description": ser.series_description,
-                "instances": [],
-            }
 
-            for inst in ser.instances:
-                filename = f"IMG{img_counter:05d}"
-                rel_parts = ["IMAGES", filename]
-                img_counter += 1
-
-                ser_data["instances"].append(
-                    {
-                        "sop_instance_uid": inst.sop_instance_uid,
-                        "sop_class_uid": inst.sop_class_uid,
-                        "relative_file_id": rel_parts,
-                    }
-                )
-
-                if storage_service.exists(inst.file_path, backend_name=inst.storage_backend):
-                    file_map.append((inst.file_path, rel_parts, inst.storage_backend))
-
-            st_data["series_list"].append(ser_data)
-        studies_structure.append(st_data)
-
-    # 3. Create DICOMDIR Dataset
-    dicomdir_ds = create_dicomdir_dataset(studies_structure)
-
-    # 4. Build ZIP file in memory
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Write DICOMDIR at root
-        dcmdir_bytes = io.BytesIO()
-        dicomdir_ds.save_as(dcmdir_bytes, enforce_file_format=True)
-        zf.writestr("DICOMDIR", dcmdir_bytes.getvalue())
-
-        # Write image files under IMAGES/
-        for abs_path, rel_parts, backend in file_map:
-            rel_path_str = "/".join(rel_parts)
-            raw_dcm = storage_service.read_bytes(abs_path, backend_name=backend)
-            zf.writestr(rel_path_str, raw_dcm)
-
-    # 5. Audit Log
+async def export_dicomdir_to_file(
+    session: AsyncSession,
+    study_instance_uids: list[str],
+    workspace: Path,
+    performed_by: str = "system",
+) -> tuple[Path, str, int]:
+    """Generate a DICOMDIR export ZIP on disk off the event loop and return ``(path, filename, size)``."""
+    studies = await _load_studies(session, study_instance_uids)
+    studies_structure, candidates = _build_studies_structure(studies)
+    export_filename = _export_filename(studies)
+    destination = workspace / export_filename
+    written = await run_blocking(_write_dicomdir_zip, destination, studies_structure, candidates)
     for st in studies:
         audit_service.add_audit(
             session,
@@ -187,8 +203,30 @@ async def export_dicomdir_package(
             action="EXPORT_DICOMDIR_CREATED",
             performed_by=performed_by,
         )
+    zip_size = destination.stat().st_size
+    log.info("Generated DICOMDIR ZIP export on disk (%d bytes, %d files)", zip_size, written)
+    return destination, export_filename, zip_size
 
+
+async def export_dicomdir_package(
+    session: AsyncSession,
+    study_instance_uids: list[str],
+    performed_by: str = "system",
+) -> tuple[bytes, str]:
+    """Generate a DICOMDIR export ZIP archive as bytes (off the event loop)."""
+    studies = await _load_studies(session, study_instance_uids)
+    studies_structure, candidates = _build_studies_structure(studies)
+    zip_buf = io.BytesIO()
+    written = await run_blocking(_write_dicomdir_zip, zip_buf, studies_structure, candidates)
+    for st in studies:
+        audit_service.add_audit(
+            session,
+            sop_instance_uid=None,
+            study_instance_uid=st.study_instance_uid,
+            action="EXPORT_DICOMDIR_CREATED",
+            performed_by=performed_by,
+        )
     zip_bytes = zip_buf.getvalue()
-    export_filename = f"DICOM_EXPORT_{studies[0].patient.patient_id if studies[0].patient else 'MEDIA'}.zip"
-    log.info("Generated DICOMDIR ZIP export (%d bytes, %d files)", len(zip_bytes), len(file_map))
+    export_filename = _export_filename(studies)
+    log.info("Generated DICOMDIR ZIP export (%d bytes, %d files)", len(zip_bytes), written)
     return zip_bytes, export_filename

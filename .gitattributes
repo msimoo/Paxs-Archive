@@ -1,0 +1,12 @@
+# The vendored OHIF lockfile is pinned by sha256 (viewer-src/OHIF_VERSION):
+# keep its bytes exactly, never normalise line endings.
+viewer-src/pnpm-lock.yaml -text
+
+# Shipped viewer assets are pinned byte-for-byte by app/static/viewer/paxs-build-manifest.json
+# (a production startup gate): store and check them out verbatim, never convert line endings.
+app/static/viewer/** -text
+
+# cmd.exe needs CRLF: with LF-only batch files GOTO/CALL can fail to find a
+# label ("The system cannot find the batch label specified").
+*.bat text eol=crlf
+*.cmd text eol=crlf

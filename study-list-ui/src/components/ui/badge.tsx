@@ -3,20 +3,23 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 
 const badgeVariants = cva(
-  "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:ring-offset-2 focus:ring-offset-[#0c1424] backdrop-blur-md",
+  "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ink backdrop-blur-md",
   {
     variants: {
       variant: {
         default:
-          "border-transparent bg-cyan-500/20 text-cyan-300 shadow hover:bg-cyan-500/30",
+          "border-accent/35 bg-accent/15 text-accent hover:bg-accent/25",
         secondary:
-          "border-white/10 bg-white/5 text-slate-200 hover:bg-white/10",
+          "border-hairline bg-raised-2/70 text-foreground hover:bg-raised-2",
         destructive:
-          "border-transparent bg-red-500/20 text-red-400 shadow hover:bg-red-500/30",
-        outline: "text-slate-200 border-white/20",
-        success: "border-transparent bg-emerald-500/20 text-emerald-400 shadow hover:bg-emerald-500/30",
-        warning: "border-transparent bg-amber-500/20 text-amber-400 shadow hover:bg-amber-500/30",
-        info: "border-transparent bg-blue-500/20 text-blue-400 shadow hover:bg-blue-500/30",
+          "border-danger/40 bg-danger/15 text-danger hover:bg-danger/25",
+        outline: "text-foreground border-hairline-strong",
+        success:
+          "border-ok/40 bg-ok/15 text-ok hover:bg-ok/25",
+        warning:
+          "border-warn/40 bg-warn/15 text-warn hover:bg-warn/25",
+        info:
+          "border-teal/40 bg-teal/15 text-teal hover:bg-teal/25",
       },
     },
     defaultVariants: {

@@ -2,427 +2,623 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <link rel="icon" type="image/png" href="/viewer/assets/logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PAXS Archive — Organization Settings & Licensing Engine</title>
+    <!-- Theme before first paint: same key and attribute as the dashboard and
+         /studies-ui, so the three surfaces never disagree about the theme. -->
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('paxs_theme');
+                document.documentElement.dataset.theme = (t === 'light' ? 'light' : 'dark');
+            } catch (e) {
+                document.documentElement.dataset.theme = 'dark';
+            }
+        })();
+    </script>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap">
+    <link rel="stylesheet" href="/static/paxs-rich-editor.css?v=1">
     <style>
+        /* ============================================================
+           PAXS Archive — institutional settings console
+           ------------------------------------------------------------
+           This page is a sibling of the dashboard, so it shares the same
+           theme contract: localStorage.paxs_theme -> <html data-theme>,
+           dark by default, applied before first paint. Every colour below
+           is a token or a color-mix of one, so light clinical mode is a
+           token flip rather than a second stylesheet.
+
+           The one deliberate exception is .preview-box: it previews a
+           *printed report*, so it stays white with dark ink in both themes.
+           ============================================================ */
         :root {
-            --bg-dark: #020617;
-            --panel-bg: #0f172a;
-            --card-bg: #1e293b;
-            --border-color: rgba(51, 65, 85, 0.6);
+            --bg-dark: #050a15;
+            --panel-bg: #0b1322;
+            --card-bg: #101c30;
+            --card-raised: #16233c;
+            --border-color: rgba(148, 163, 184, 0.14);
+            --border-strong: rgba(148, 163, 184, 0.28);
             --accent-blue: #3b82f6;
             --accent-sky: #38bdf8;
             --accent-emerald: #34d399;
             --accent-amber: #fbbf24;
             --accent-rose: #f43f5e;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
+            --text-main: #e8eef7;
+            --text-muted: #8fa1ba;
+            --text-faint: #5f7089;
+            --backdrop: rgba(3, 7, 14, 0.72);
+            --shadow-lg: 0 18px 40px rgba(0, 0, 0, 0.45);
+            --shadow-sm: 0 8px 22px rgba(0, 0, 0, 0.28);
             --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-            --font-mono: 'JetBrains Mono', monospace;
+            --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+            --radius: 14px;
+            --radius-sm: 9px;
+            --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+        }
+
+        :root[data-theme="light"] {
+            --bg-dark: #eef2f7;
+            --panel-bg: #ffffff;
+            --card-bg: #ffffff;
+            --card-raised: #e7edf6;
+            --border-color: rgba(15, 23, 42, 0.09);
+            --border-strong: rgba(15, 23, 42, 0.18);
+            --accent-blue: #1d4ed8;
+            --accent-sky: #0369a1;
+            --accent-emerald: #059669;
+            --accent-amber: #b45309;
+            --accent-rose: #dc2626;
+            --text-main: #0f172a;
+            --text-muted: #475569;
+            --text-faint: #64748b;
+            --backdrop: rgba(15, 23, 42, 0.35);
+            --shadow-lg: 0 18px 40px rgba(15, 23, 42, 0.12);
+            --shadow-sm: 0 8px 22px rgba(15, 23, 42, 0.08);
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
+
         body {
             background-color: var(--bg-dark);
             color: var(--text-main);
             font-family: var(--font-sans);
-            padding: 24px;
             min-height: 100vh;
+            padding: 0 0 48px;
+            -webkit-font-smoothing: antialiased;
+            transition: background-color .25s var(--ease), color .25s var(--ease);
         }
 
-        .header-bar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 16px 24px;
-            background: var(--panel-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            margin-bottom: 24px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+        /* A quiet instrument grid behind the page, masked to the top. */
+        .page-backdrop {
+            position: fixed; inset: 0; z-index: 0; pointer-events: none;
+            background-image:
+                radial-gradient(90% 55% at 50% -10%, color-mix(in srgb, var(--accent-sky) 9%, transparent), transparent 70%),
+                linear-gradient(color-mix(in srgb, var(--text-faint) 7%, transparent) 1px, transparent 1px),
+                linear-gradient(90deg, color-mix(in srgb, var(--text-faint) 7%, transparent) 1px, transparent 1px);
+            background-size: 100% 100%, 56px 56px, 56px 56px;
+            mask-image: linear-gradient(180deg, #000 0%, transparent 62%);
         }
 
+        .wrap {
+            position: relative; z-index: 1;
+            max-width: 1320px; margin: 0 auto; padding: 0 24px;
+        }
+
+        /* ---------- top bar ---------- */
+        .topbar {
+            position: sticky; top: 0; z-index: 40;
+            display: flex; align-items: center; justify-content: space-between; gap: 16px;
+            margin: 0 -24px 22px; padding: 12px 24px;
+            background: color-mix(in srgb, var(--bg-dark) 82%, transparent);
+            border-bottom: 1px solid var(--border-color);
+            backdrop-filter: blur(14px) saturate(1.2);
+            -webkit-backdrop-filter: blur(14px) saturate(1.2);
+        }
         .brand-title {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            font-size: 18px;
-            font-weight: 700;
-            color: #ffffff;
+            display: flex; align-items: center; gap: 11px;
+            font-size: 14px; font-weight: 700; letter-spacing: -0.01em;
+            color: var(--text-main); min-width: 0;
         }
-
-        .brand-title span {
-            background: linear-gradient(90deg, #38bdf8, #34d399);
-            -webkit-background-clip: text;
-            background-clip: text;
-            color: transparent;
+        .brand-mark {
+            flex: 0 0 30px; height: 30px; display: grid; place-items: center;
+            border-radius: 9px;
+            background: color-mix(in srgb, var(--accent-sky) 12%, transparent);
+            border: 1px solid color-mix(in srgb, var(--accent-sky) 30%, transparent);
         }
-
-        .nav-links {
-            display: flex;
-            gap: 12px;
+        .brand-mark svg { width: 17px; height: 17px; }
+        .brand-text { min-width: 0; }
+        .brand-text b { display: block; font-size: 13.5px; }
+        .brand-text span {
+            display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .1em;
+            text-transform: uppercase; color: var(--text-faint); margin-top: 1px;
         }
+        .topbar-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+        .nav-links { display: flex; gap: 8px; }
 
+        /* ---------- buttons ---------- */
         .btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 16px;
-            font-family: var(--font-sans);
-            font-size: 13px;
-            font-weight: 600;
-            border-radius: 8px;
+            display: inline-flex; align-items: center; gap: 7px;
+            padding: 8px 14px;
+            font-family: var(--font-sans); font-size: 12.5px; font-weight: 600;
+            border-radius: var(--radius-sm);
             border: 1px solid var(--border-color);
-            background: rgba(30, 41, 59, 0.8);
-            color: #ffffff;
-            cursor: pointer;
-            text-decoration: none;
-            transition: all 0.2s ease;
+            background: color-mix(in srgb, var(--card-bg) 80%, transparent);
+            color: var(--text-main);
+            cursor: pointer; text-decoration: none; white-space: nowrap;
+            transition: border-color .18s var(--ease), background .18s var(--ease), transform .18s var(--ease);
         }
-
         .btn:hover {
-            border-color: var(--accent-sky);
-            background: rgba(56, 189, 248, 0.15);
+            border-color: color-mix(in srgb, var(--accent-sky) 55%, var(--border-color));
+            background: color-mix(in srgb, var(--accent-sky) 12%, var(--card-bg));
             transform: translateY(-1px);
         }
-
+        .btn:active { transform: translateY(0); }
+        .btn:focus-visible {
+            outline: 2px solid color-mix(in srgb, var(--accent-sky) 60%, transparent);
+            outline-offset: 2px;
+        }
         .btn-primary {
-            background: linear-gradient(135deg, #0284c7, #0d9488);
-            border: none;
-            color: #ffffff;
-            font-weight: 700;
-            box-shadow: 0 4px 14px rgba(2, 132, 199, 0.4);
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-emerald));
+            border-color: transparent;
+            color: #ffffff; font-weight: 700;
+            box-shadow: 0 4px 16px color-mix(in srgb, var(--accent-blue) 35%, transparent);
         }
-
         .btn-primary:hover {
-            background: linear-gradient(135deg, #0369a1, #0f766e);
-            box-shadow: 0 6px 18px rgba(2, 132, 199, 0.6);
+            background: linear-gradient(135deg, color-mix(in srgb, var(--accent-blue) 80%, #000), color-mix(in srgb, var(--accent-emerald) 80%, #000));
+            box-shadow: 0 6px 20px color-mix(in srgb, var(--accent-blue) 45%, transparent);
         }
-
-        .tabs {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 24px;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 8px;
+        :root[data-theme="light"] .btn-primary:hover {
+            background: linear-gradient(135deg, color-mix(in srgb, var(--accent-blue) 88%, #fff), color-mix(in srgb, var(--accent-emerald) 88%, #fff));
         }
+        .icon-btn {
+            display: grid; place-items: center; width: 34px; height: 34px;
+            border-radius: var(--radius-sm); border: 1px solid var(--border-color);
+            background: color-mix(in srgb, var(--card-bg) 80%, transparent);
+            color: var(--text-muted); cursor: pointer;
+            transition: color .18s var(--ease), border-color .18s var(--ease), background .18s var(--ease);
+        }
+        .icon-btn:hover { color: var(--text-main); border-color: var(--border-strong); }
+        .icon-btn svg { width: 16px; height: 16px; }
 
+        /* ---------- hero ---------- */
+        .settings-hero {
+            position: relative;
+            display: flex; align-items: stretch; justify-content: space-between; gap: 24px;
+            margin-bottom: 20px; padding: 20px 24px;
+            border-radius: 18px;
+            border: 1px solid var(--border-strong);
+            background:
+                radial-gradient(120% 150% at 100% 0%, color-mix(in srgb, var(--accent-sky) 9%, transparent) 0%, transparent 58%),
+                var(--panel-bg);
+            overflow: hidden;
+        }
+        .settings-hero::before {
+            content: ""; position: absolute; inset: 0 0 auto; height: 1px;
+            background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent-sky) 60%, transparent), transparent);
+            opacity: .85; pointer-events: none;
+        }
+        .hero-copy { position: relative; z-index: 1; min-width: 0; max-width: 680px; }
+        .eyebrow {
+            display: inline-flex; align-items: center; gap: 7px;
+            font-size: 10px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+            color: var(--accent-sky);
+        }
+        .eyebrow i {
+            width: 5px; height: 5px; border-radius: 50%; background: currentColor;
+            box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+            animation: pulse 2.4s ease-in-out infinite;
+        }
+        .hero-copy h1 { margin: 8px 0 7px; font-size: 25px; letter-spacing: -0.02em; font-weight: 800; }
+        .hero-copy p { font-size: 13px; line-height: 1.6; color: var(--text-muted); max-width: 600px; }
+        .hero-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
+        .hero-chip {
+            display: inline-flex; align-items: baseline; gap: 6px;
+            padding: 4px 10px; border-radius: 999px;
+            font-size: 11px; color: var(--text-muted);
+            background: color-mix(in srgb, var(--card-bg) 75%, transparent);
+            border: 1px solid var(--border-color);
+        }
+        .hero-chip b { color: var(--text-main); font: 800 12px var(--font-mono); font-variant-numeric: tabular-nums; }
+        .hero-visual {
+            position: relative; flex: 0 0 300px; min-height: 128px;
+            border-radius: 12px; overflow: hidden;
+            background: radial-gradient(80% 100% at 50% 50%, color-mix(in srgb, var(--accent-sky) 7%, transparent), transparent 70%);
+        }
+        .hero-canvas { display: block; width: 100%; height: 100%; }
+        .hero-caption {
+            position: absolute; right: 10px; bottom: 8px;
+            font-size: 9px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase;
+            color: var(--text-faint);
+        }
+        @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
+
+        /* ---------- shell: rail + stage ---------- */
+        .settings-body { display: grid; grid-template-columns: 262px minmax(0, 1fr); gap: 22px; align-items: start; }
+
+        .settings-rail {
+            position: sticky; top: 74px;
+            display: flex; flex-direction: column; gap: 4px;
+            padding: 10px; border-radius: var(--radius);
+            background: color-mix(in srgb, var(--panel-bg) 92%, transparent);
+            border: 1px solid var(--border-color);
+        }
+        .rail-label {
+            padding: 4px 9px 8px;
+            font-size: 9px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase;
+            color: var(--text-faint);
+        }
         .tab-btn {
-            padding: 10px 20px;
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--text-muted);
-            background: transparent;
-            border: none;
-            border-radius: 8px;
+            position: relative;
+            display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px;
+            align-items: center; width: 100%;
+            padding: 9px 10px; text-align: left;
+            border: 0; border-radius: 10px; background: transparent;
+            color: var(--text-muted); font-family: inherit;
             cursor: pointer;
-            transition: all 0.2s ease;
+            transition: background .18s var(--ease), color .18s var(--ease);
         }
-
-        .tab-btn.active {
-            color: #ffffff;
-            background: rgba(56, 189, 248, 0.15);
-            border: 1px solid rgba(56, 189, 248, 0.4);
+        .tab-btn:hover { background: color-mix(in srgb, var(--card-raised) 75%, transparent); color: var(--text-main); }
+        .tab-btn:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent-sky) 60%, transparent); outline-offset: 1px; }
+        .tab-btn.active { background: color-mix(in srgb, var(--accent-sky) 13%, var(--card-raised)); color: var(--text-main); }
+        .tab-btn.active::before {
+            content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px;
+            border-radius: 0 3px 3px 0; background: var(--accent-sky);
         }
+        .tab-ic {
+            width: 30px; height: 30px; display: grid; place-items: center;
+            border-radius: 9px; flex: none;
+            background: color-mix(in srgb, var(--card-raised) 80%, transparent);
+            border: 1px solid var(--border-color);
+            color: var(--text-faint);
+            transition: color .18s var(--ease), border-color .18s var(--ease);
+        }
+        .tab-ic svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+        .tab-btn.active .tab-ic {
+            color: var(--accent-sky);
+            border-color: color-mix(in srgb, var(--accent-sky) 32%, var(--border-color));
+            background: color-mix(in srgb, var(--accent-sky) 12%, transparent);
+        }
+        .tab-text { min-width: 0; }
+        .tab-text b { display: block; font-size: 12.5px; font-weight: 650; }
+        .tab-text span {
+            display: block; font-size: 10.5px; color: var(--text-faint); margin-top: 2px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .tab-btn.active .tab-text span { color: color-mix(in srgb, var(--accent-sky) 55%, var(--text-muted)); }
 
+        .settings-stage { min-width: 0; }
         .tab-content { display: none; }
-        .tab-content.active { display: block; }
-
-        .grid-layout {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 24px;
+        .tab-content.active { display: block; animation: stageIn .3s var(--ease); }
+        @keyframes stageIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: none; }
         }
+
+        /* ---------- cards ---------- */
+        .grid-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
 
         .panel-card {
             background: var(--panel-bg);
             border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 24px;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
-            margin-bottom: 20px;
-        }
-
-        .panel-header {
-            font-size: 15px;
-            font-weight: 700;
-            color: var(--accent-sky);
+            border-radius: var(--radius);
+            padding: 20px 22px;
+            box-shadow: var(--shadow-sm);
             margin-bottom: 18px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
+        }
+        .panel-header {
+            display: flex; align-items: center; justify-content: space-between; gap: 12px;
+            margin: -2px 0 16px; padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 12px; font-weight: 700;
+            letter-spacing: .09em; text-transform: uppercase;
+            color: var(--text-main);
+        }
+        .panel-header > span:first-child { display: inline-flex; align-items: center; gap: 9px; }
+        .panel-header > span:first-child::before {
+            content: ""; width: 3px; height: 14px; border-radius: 2px;
+            background: var(--accent-sky); opacity: .85;
         }
 
-        .form-group {
-            margin-bottom: 16px;
-        }
-
+        /* ---------- forms ---------- */
+        .form-group { margin-bottom: 14px; }
         .form-group label {
-            display: block;
-            font-size: 12.5px;
-            font-weight: 600;
-            color: var(--text-muted);
-            margin-bottom: 6px;
+            display: block; margin-bottom: 6px;
+            font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+            color: var(--text-faint);
         }
-
         .form-control {
-            width: 100%;
-            padding: 10px 14px;
-            font-family: var(--font-sans);
-            font-size: 13.5px;
-            background: rgba(30, 41, 59, 0.7);
+            width: 100%; padding: 9px 12px;
+            font-family: var(--font-sans); font-size: 13px;
+            background: color-mix(in srgb, var(--card-bg) 70%, transparent);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
-            color: #ffffff;
-            transition: all 0.2s ease;
+            border-radius: var(--radius-sm);
+            color: var(--text-main);
+            transition: border-color .18s var(--ease), box-shadow .18s var(--ease), background .18s var(--ease);
         }
-
+        .form-control::placeholder { color: var(--text-faint); }
+        .form-control:hover { border-color: var(--border-strong); }
         .form-control:focus {
             outline: none;
-            border-color: var(--accent-sky);
-            box-shadow: 0 0 10px rgba(56, 189, 248, 0.3);
+            border-color: color-mix(in srgb, var(--accent-sky) 60%, var(--border-color));
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-sky) 14%, transparent);
+            background: var(--card-bg);
         }
-
         textarea.form-control {
-            font-family: var(--font-mono);
-            font-size: 12px;
-            min-height: 100px;
-            resize: vertical;
+            font-family: var(--font-mono); font-size: 12px; line-height: 1.6;
+            min-height: 100px; resize: vertical;
         }
-
-        .preview-box {
-            background: #ffffff;
-            color: #0f172a;
-            border-radius: 8px;
-            padding: 20px;
-            min-height: 120px;
-            border: 1px solid #cbd5e1;
-            margin-top: 8px;
-        }
+        input[type="file"].form-control { padding: 7px 10px; font-size: 12px; cursor: pointer; }
 
         .logo-preview-img {
-            max-height: 60px;
-            margin-top: 10px;
-            border-radius: 6px;
+            max-height: 56px; margin-top: 10px; padding: 6px;
+            border-radius: var(--radius-sm);
+            background: color-mix(in srgb, var(--card-raised) 60%, transparent);
             border: 1px solid var(--border-color);
         }
 
-        .table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 12px;
+        /* The print preview is paper: white in both themes, on purpose. */
+        .preview-box {
+            background: #ffffff; color: #0f172a;
+            border-radius: var(--radius-sm);
+            padding: 18px; min-height: 96px;
+            border: 1px solid #cbd5e1; margin-top: 8px;
+            font-size: 12px; overflow: auto;
         }
 
-        .table th, .table td {
-            padding: 12px 16px;
-            text-align: left;
-            border-bottom: 1px solid var(--border-color);
-            font-size: 13px;
-        }
-
-        .table th {
-            color: var(--accent-sky);
-            font-weight: 700;
-            background: rgba(30, 41, 59, 0.5);
-        }
-
+        /* ---------- badges ---------- */
         .badge {
-            display: inline-block;
-            padding: 3px 9px;
-            border-radius: 6px;
-            font-size: 11px;
-            font-family: var(--font-mono);
-            font-weight: 700;
+            display: inline-block; padding: 3px 9px; border-radius: 999px;
+            font-size: 10.5px; font-family: var(--font-mono); font-weight: 700;
+            letter-spacing: .04em;
         }
-        .badge-blue { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
-        .badge-green { background: rgba(52, 211, 153, 0.2); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.4); }
-        .badge-amber { background: rgba(251, 191, 36, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.4); }
-        .badge-rose { background: rgba(244, 63, 94, 0.2); color: #f43f5e; border: 1px solid rgba(244, 63, 94, 0.4); }
+        .badge-blue { background: color-mix(in srgb, var(--accent-sky) 16%, transparent); color: var(--accent-sky); border: 1px solid color-mix(in srgb, var(--accent-sky) 34%, transparent); }
+        .badge-green { background: color-mix(in srgb, var(--accent-emerald) 16%, transparent); color: var(--accent-emerald); border: 1px solid color-mix(in srgb, var(--accent-emerald) 34%, transparent); }
+        .badge-amber { background: color-mix(in srgb, var(--accent-amber) 16%, transparent); color: var(--accent-amber); border: 1px solid color-mix(in srgb, var(--accent-amber) 34%, transparent); }
+        .badge-rose { background: color-mix(in srgb, var(--accent-rose) 16%, transparent); color: var(--accent-rose); border: 1px solid color-mix(in srgb, var(--accent-rose) 34%, transparent); }
 
-        /* Licensing Specific Styles */
+        /* ---------- table ---------- */
+        .table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 6px; }
+        .table th, .table td {
+            padding: 11px 14px; text-align: left;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 12.5px; vertical-align: middle;
+        }
+        .table th {
+            font-size: 9.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+            color: var(--text-faint);
+            background: color-mix(in srgb, var(--card-raised) 55%, transparent);
+        }
+        .table th:first-child { border-top-left-radius: var(--radius-sm); }
+        .table th:last-child { border-top-right-radius: var(--radius-sm); }
+        .table tbody tr { transition: background .16s var(--ease); }
+        .table tbody tr:hover { background: color-mix(in srgb, var(--card-raised) 40%, transparent); }
+        .table tbody tr:last-child td { border-bottom: 0; }
+
+        /* ---------- license ---------- */
         .license-banner {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 20px 24px;
-            background: linear-gradient(135deg, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.8));
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            margin-bottom: 24px;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+            display: flex; align-items: center; justify-content: space-between; gap: 18px;
+            padding: 18px 22px; margin-bottom: 20px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border-strong);
+            background:
+                radial-gradient(100% 140% at 0% 0%, color-mix(in srgb, var(--accent-emerald) 10%, transparent), transparent 62%),
+                linear-gradient(135deg, color-mix(in srgb, var(--panel-bg) 96%, transparent), color-mix(in srgb, var(--card-bg) 88%, transparent));
+            box-shadow: var(--shadow-sm);
         }
-
-        .lic-edition-box {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }
-
+        .lic-edition-box { display: flex; align-items: center; gap: 15px; min-width: 0; }
         .lic-edition-icon {
-            width: 48px;
-            height: 48px;
-            border-radius: 12px;
-            background: linear-gradient(135deg, #0284c7, #0d9488);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 24px;
-            box-shadow: 0 0 20px rgba(13, 148, 136, 0.3);
+            width: 46px; height: 46px; flex: none; display: grid; place-items: center;
+            border-radius: 12px; font-size: 21px;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-emerald));
+            box-shadow: 0 0 22px color-mix(in srgb, var(--accent-emerald) 30%, transparent);
         }
-
-        .lic-edition-title {
-            font-size: 20px;
-            font-weight: 800;
-            color: #ffffff;
-            letter-spacing: -0.5px;
-        }
-
-        .lic-meta-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-top: 16px;
-        }
-
+        .lic-edition-title { font-size: 18px; font-weight: 800; letter-spacing: -0.02em; color: var(--text-main); }
+        .lic-meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 14px; }
         .lic-meta-card {
-            background: rgba(15, 23, 42, 0.6);
+            padding: 11px 13px; border-radius: var(--radius-sm);
+            background: color-mix(in srgb, var(--card-bg) 60%, transparent);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 12px 16px;
+            transition: border-color .18s var(--ease), transform .18s var(--ease);
         }
-
+        .lic-meta-card:hover { border-color: var(--border-strong); transform: translateY(-1px); }
         .lic-meta-label {
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: var(--text-muted);
-            margin-bottom: 4px;
+            font-size: 9.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+            color: var(--text-faint); margin-bottom: 5px;
         }
-
-        .lic-meta-val {
-            font-size: 14px;
-            font-weight: 700;
-            color: #ffffff;
-        }
-
+        .lic-meta-val { font-size: 13.5px; font-weight: 700; color: var(--text-main); overflow-wrap: anywhere; }
         .fingerprint-box {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            background: #020617;
-            border: 1px solid rgba(56, 189, 248, 0.3);
-            border-radius: 8px;
-            padding: 12px 16px;
-            margin: 12px 0;
-            font-family: var(--font-mono);
-            font-size: 13px;
-            color: #38bdf8;
-            word-break: break-all;
+            display: flex; align-items: center; justify-content: space-between; gap: 12px;
+            padding: 12px 15px; margin: 10px 0;
+            border-radius: var(--radius-sm);
+            background: color-mix(in srgb, var(--bg-dark) 70%, transparent);
+            border: 1px solid color-mix(in srgb, var(--accent-sky) 28%, var(--border-color));
+            font-family: var(--font-mono); font-size: 12.5px;
+            color: var(--accent-sky); word-break: break-all;
+            letter-spacing: .04em;
         }
-
-        .feature-chips {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-top: 10px;
-        }
-
+        .feature-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
         .feature-chip {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 12px;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: 600;
-            background: rgba(15, 23, 42, 0.8);
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 5px 11px; border-radius: 999px;
+            font-size: 11.5px; font-weight: 600;
+            background: color-mix(in srgb, var(--card-bg) 70%, transparent);
             border: 1px solid var(--border-color);
-            color: #cbd5e1;
+            color: var(--text-muted);
         }
-
         .feature-chip.active {
-            background: rgba(52, 211, 153, 0.12);
-            border-color: rgba(52, 211, 153, 0.35);
-            color: #34d399;
+            background: color-mix(in srgb, var(--accent-emerald) 12%, transparent);
+            border-color: color-mix(in srgb, var(--accent-emerald) 32%, transparent);
+            color: var(--accent-emerald);
         }
+        .note-box {
+            padding: 13px 15px; border-radius: var(--radius-sm);
+            background: color-mix(in srgb, var(--card-bg) 45%, transparent);
+            border: 1px solid var(--border-color);
+        }
+        .note-box ul { padding-left: 18px; color: var(--text-muted); font-size: 12.5px; line-height: 1.7; }
 
+        /* ---------- drop zone ---------- */
         .drop-zone {
-            border: 2px dashed rgba(56, 189, 248, 0.35);
-            border-radius: 12px;
-            padding: 28px 20px;
-            text-align: center;
-            background: rgba(2, 6, 23, 0.5);
-            cursor: pointer;
-            transition: all 0.2s ease;
-            margin-bottom: 16px;
+            display: block; padding: 26px 20px; margin-bottom: 16px;
+            text-align: center; cursor: pointer;
+            border: 2px dashed color-mix(in srgb, var(--accent-sky) 34%, var(--border-color));
+            border-radius: var(--radius);
+            background: color-mix(in srgb, var(--bg-dark) 55%, transparent);
+            transition: border-color .18s var(--ease), background .18s var(--ease), transform .18s var(--ease);
         }
-
         .drop-zone:hover, .drop-zone.dragover {
             border-color: var(--accent-sky);
-            background: rgba(56, 189, 248, 0.08);
+            background: color-mix(in srgb, var(--accent-sky) 9%, transparent);
+            transform: translateY(-1px);
+        }
+        .drop-zone .dz-icon {
+            width: 42px; height: 42px; margin: 0 auto 10px; display: grid; place-items: center;
+            border-radius: 12px; color: var(--accent-sky);
+            background: color-mix(in srgb, var(--accent-sky) 12%, transparent);
+            border: 1px solid color-mix(in srgb, var(--accent-sky) 28%, transparent);
+        }
+        .drop-zone .dz-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+        .drop-zone b { display: block; font-size: 13px; color: var(--text-main); margin-bottom: 3px; }
+        .drop-zone span { font-size: 11.5px; color: var(--text-muted); }
+
+        .online-box {
+            padding: 14px; margin-bottom: 16px;
+            border-radius: var(--radius-sm);
+            background: color-mix(in srgb, var(--accent-sky) 6%, transparent);
+            border: 1px solid color-mix(in srgb, var(--accent-sky) 22%, var(--border-color));
+        }
+        .online-box .online-title {
+            display: flex; align-items: center; gap: 7px;
+            font-size: 12px; font-weight: 700; color: var(--accent-sky); margin-bottom: 10px;
         }
 
+        /* ---------- modal + toast ---------- */
         .modal {
-            display: none;
-            position: fixed;
-            inset: 0;
-            background: rgba(2, 6, 23, 0.85);
-            backdrop-filter: blur(8px);
-            z-index: 10000;
-            align-items: center;
-            justify-content: center;
+            display: none; position: fixed; inset: 0; z-index: 10000;
+            background: var(--backdrop);
+            backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+            align-items: center; justify-content: center; padding: 20px;
         }
         .modal.active { display: flex; }
-
         .modal-content {
+            width: 620px; max-width: 100%; max-height: 88vh; overflow: auto;
+            padding: 24px;
+            border-radius: var(--radius);
             background: var(--panel-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 28px;
-            width: 600px;
-            max-width: 90vw;
-            box-shadow: 0 25px 60px rgba(0,0,0,0.8);
+            border: 1px solid var(--border-strong);
+            box-shadow: var(--shadow-lg);
+            animation: stageIn .24s var(--ease);
+        }
+        .toast {
+            position: fixed; bottom: 24px; right: 24px; z-index: 20000;
+            padding: 12px 20px; border-radius: var(--radius-sm);
+            background: var(--accent-emerald); color: #04251a;
+            font-size: 13px; font-weight: 700;
+            box-shadow: var(--shadow-lg);
+            display: none;
         }
 
-        .toast {
-            position: fixed;
-            bottom: 24px;
-            right: 24px;
-            background: #10b981;
-            color: white;
-            padding: 12px 24px;
-            border-radius: 8px;
-            font-weight: 700;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-            display: none;
-            z-index: 20000;
+        /* ---------- responsive ---------- */
+        @media (max-width: 1080px) {
+            .settings-body { grid-template-columns: 1fr; }
+            .settings-rail {
+                position: static; flex-direction: row; overflow-x: auto;
+                padding: 8px; gap: 4px;
+            }
+            .rail-label { display: none; }
+            .tab-btn { width: auto; grid-template-columns: auto auto; }
+            .tab-text span { display: none; }
+            .tab-btn.active::before { left: 8px; right: 8px; top: auto; bottom: 0; width: auto; height: 2px; border-radius: 2px 2px 0 0; }
+            .hero-visual { display: none; }
+        }
+        @media (max-width: 860px) {
+            .grid-layout { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 640px) {
+            .wrap { padding: 0 16px; }
+            .topbar { margin: 0 -16px 18px; padding: 10px 16px; }
+            .brand-text span { display: none; }
+            .nav-links .btn span { display: none; }
+            .settings-hero { padding: 16px; }
+            .hero-copy h1 { font-size: 20px; }
+            .panel-card { padding: 16px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            * { animation: none !important; transition: none !important; }
         }
     </style>
 </head>
 <body>
+    <div class="page-backdrop" aria-hidden="true"></div>
 
-    <div class="header-bar">
-        <div class="brand-title">
-            <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
-                <rect x="4" y="6" width="24" height="20" rx="4" stroke="#22d3ee" stroke-width="2"/>
-                <path d="M4 12h24M4 18h24M10 6v20M22 6v20" stroke="#2dd4bf" stroke-width="1.5"/>
-            </svg>
-            <span>PAXS Archive · Diagnostic Settings & Institutional Licensing</span>
-        </div>
-        <div class="nav-links">
-            <a href="/studies-ui" class="btn">📋 Study List</a>
-            <a href="/viewer" class="btn">🩻 DICOM Viewer</a>
-            <a href="/" class="btn">📊 Dashboard</a>
-        </div>
-    </div>
+    <div class="wrap">
+        <header class="topbar">
+            <div class="brand-title">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 32 32" fill="none">
+                        <rect x="4" y="6" width="24" height="20" rx="4" stroke="currentColor" stroke-width="2"/>
+                        <path d="M4 12h24M4 18h24M10 6v20M22 6v20" stroke="currentColor" stroke-width="1.5" opacity=".6"/>
+                    </svg>
+                </span>
+                <div class="brand-text">
+                    <b>PAXS Archive</b>
+                    <span>Settings &amp; licensing</span>
+                </div>
+            </div>
+            <div class="topbar-actions">
+                <div class="nav-links">
+                    <a href="/studies-ui" class="btn" title="Open the study list"><span>Study list</span></a>
+                    <a href="/viewer" class="btn" title="Open the DICOM viewer"><span>Viewer</span></a>
+                    <a href="/" class="btn" title="Back to the dashboard"><span>Dashboard</span></a>
+                </div>
+                <button class="icon-btn" id="theme-toggle" type="button" aria-label="Toggle color theme" title="Switch color theme">
+                    <svg id="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
 
-    <div class="tabs">
-        <button class="tab-btn active" onclick="switchTab('org-tab')">🏢 Institution Branding & Headers</button>
-        <button class="tab-btn" onclick="switchTab('templates-tab')">📜 Report Templates Manager</button>
-        <button class="tab-btn" onclick="switchTab('license-tab')">🛡️ Server License & System Activation</button>
-    </div>
+        <section class="settings-hero">
+            <div class="hero-copy">
+                <span class="eyebrow"><i aria-hidden="true"></i>Institutional console</span>
+                <h1>Settings &amp; licensing</h1>
+                <p>Brand the archive for your institution, keep the diagnostic report library current, and manage the license this server is bound to — all in one place.</p>
+                <div class="hero-chips">
+                    <span class="hero-chip" id="chip-edition"><b>—</b> edition</span>
+                    <span class="hero-chip" id="chip-license"><b>—</b> license</span>
+                    <span class="hero-chip" id="chip-templates"><b>—</b> templates</span>
+                </div>
+            </div>
+            <div class="hero-visual" aria-hidden="true">
+                <canvas id="settings-seal" class="hero-canvas"></canvas>
+                <span class="hero-caption">institutional seal</span>
+            </div>
+        </section>
+
+        <div class="settings-body">
+            <nav class="settings-rail" role="tablist" aria-label="Settings sections">
+                <span class="rail-label">Sections</span>
+                <button class="tab-btn active" role="tab" aria-selected="true" data-tab="org-tab" onclick="switchTab('org-tab')">
+                    <span class="tab-ic" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 20V9.5L12 4l8 5.5V20"/><path d="M9.5 20v-5h5v5"/></svg></span>
+                    <span class="tab-text"><b>Institution branding</b><span>Name, logo, report header &amp; footer</span></span>
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="templates-tab" onclick="switchTab('templates-tab')">
+                    <span class="tab-ic" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3.5h7l4.5 4.5v12.5H7z"/><path d="M14 3.5V8h4.5"/><path d="M10 12.5h5M10 16h5"/></svg></span>
+                    <span class="tab-text"><b>Report templates</b><span>Standard findings &amp; impressions</span></span>
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="license-tab" onclick="switchTab('license-tab')">
+                    <span class="tab-ic" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5.6c0 4-3 7.4-7 9.4-4-2-7-5.4-7-9.4V6z"/><path d="M9.2 12l2 2 3.6-4"/></svg></span>
+                    <span class="tab-text"><b>License &amp; activation</b><span>Edition, fingerprint, activation</span></span>
+                </button>
+                <button class="tab-btn" role="tab" aria-selected="false" data-tab="archive-tools-tab" onclick="switchTab('archive-tools-tab')">
+                    <span class="tab-ic" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="2.5"/></svg></span>
+                    <span class="tab-text"><b>Archive tools</b><span>Tag editor, split/merge, backups &amp; MWL</span></span>
+                </button>
+            </nav>
+
+            <div class="settings-stage">
 
     <!-- Tab 1: Organization Settings -->
     <div id="org-tab" class="tab-content active">
@@ -441,7 +637,7 @@
                     <div class="form-group">
                         <label>Institution Logo Image</label>
                         <input type="file" id="logo_file" class="form-control" accept="image/*" onchange="previewLogo(this)">
-                        <img id="logo_preview" class="logo-preview-img" src="/viewer/assets/Paxs-logo.png" alt="Logo Preview">
+                        <img id="logo_preview" class="logo-preview-img" src="/viewer/assets/logomain.png" alt="Logo Preview" onerror="handleLogoPreviewError(this)">
                     </div>
                     <div class="form-group">
                         <label>Phone Number</label>
@@ -599,15 +795,17 @@
 
                     <!-- File Dropzone -->
                     <div class="drop-zone" id="lic-drop-zone" onclick="document.getElementById('lic_file_input').click()">
-                        <div style="font-size: 28px; margin-bottom: 8px;">📄</div>
-                        <div style="font-weight: 700; color: #ffffff; margin-bottom: 4px;">Click to Browse or Drag & Drop .lic File</div>
-                        <div style="font-size: 12px; color: var(--text-muted);">Encrypted & RSA-2048 Signed PAXS Certificate</div>
+                        <div class="dz-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+                        </div>
+                        <b>Click to browse, or drop a .lic file</b>
+                        <span>Encrypted &amp; RSA-2048 signed PAXS certificate</span>
                         <input type="file" id="lic_file_input" accept=".lic,application/octet-stream" style="display: none;" onchange="uploadLicenseFile(this)">
                     </div>
 
                     <!-- Online Product Key Activation -->
-                    <div style="background: rgba(2, 6, 23, 0.4); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 8px; padding: 14px; margin-bottom: 16px;">
-                        <div style="font-weight: 700; color: var(--accent-sky); font-size: 13px; margin-bottom: 8px;">🌐 Online Activation (Product Key)</div>
+                    <div class="online-box">
+                        <div class="online-title">🌐 Online activation (product key)</div>
                         <div class="form-group" style="margin-bottom: 8px;">
                             <label>Activation Key</label>
                             <input type="text" id="lic_online_key" class="form-control" placeholder="PAXS-XXXX-XXXX-XXXX-XXXX" style="font-family: var(--font-mono); text-transform: uppercase;">
@@ -618,7 +816,7 @@
                         </div>
                         <div class="form-group" style="margin-bottom: 12px;">
                             <label>Vendor Portal URL</label>
-                            <input type="text" id="lic_online_portal" class="form-control" placeholder="http://localhost:8080 or https://elsamanii.rf.gd">
+                            <input type="text" id="lic_online_portal" class="form-control" placeholder="http://localhost:8080 or https://elsamani.gt.tc">
                         </div>
                         <div style="display: flex; gap: 8px; justify-content: flex-end;">
                             <button type="button" class="btn" onclick="validateOnlineHeartbeat()">🔄 Check Heartbeat</button>
@@ -637,9 +835,9 @@
                     </div>
                 </div>
 
-                <div class="panel-card" style="background: rgba(15, 23, 42, 0.4);">
-                    <div class="panel-header" style="font-size: 13px;">Licensing & Support Notes</div>
-                    <ul style="color: var(--text-muted); font-size: 12.5px; line-height: 1.6; padding-left: 18px;">
+                <div class="panel-card note-box">
+                    <div class="panel-header">Licensing &amp; Support Notes</div>
+                    <ul>
                         <li>Online activation automatically claims a license from your vendor portal and binds it to this machine.</li>
                         <li>Licenses are cryptographically signed with RSA-2048 and encrypted via AES-256-GCM.</li>
                         <li>A 7-day automatic grace period is granted if an annual subscription lapses or the portal is unreachable.</li>
@@ -649,30 +847,174 @@
         </div>
     </div>
 
+    <!-- Tab 4: Archive Tools (Tag Editor, Split/Merge, Scheduled Backups, HL7/MWL) -->
+    <div id="archive-tools-tab" class="tab-content">
+        <div class="grid-layout" style="margin-bottom: 18px;">
+            <div class="panel-card">
+                <div class="panel-header">DICOM Tag Editor (DB + Stored DICOM Files)</div>
+                <div class="form-group" style="display:flex;gap:8px;align-items:end;">
+                    <div style="flex:1;">
+                        <label>Study Instance UID</label>
+                        <input type="text" id="at_study_uid" class="form-control" placeholder="1.2.840.113619...">
+                    </div>
+                    <button type="button" class="btn btn-primary" onclick="window.PaxsArchiveTools.loadStudyTags()">Load Study</button>
+                </div>
+                <div class="grid-layout" style="gap:10px;">
+                    <div class="form-group"><label>Patient ID</label><input type="text" id="at_patient_id" class="form-control"></div>
+                    <div class="form-group"><label>Patient Name</label><input type="text" id="at_patient_name" class="form-control"></div>
+                    <div class="form-group"><label>Birth Date (YYYYMMDD)</label><input type="text" id="at_patient_dob" class="form-control" placeholder="19850420"></div>
+                    <div class="form-group"><label>Sex (M/F/O)</label><input type="text" id="at_patient_sex" class="form-control" placeholder="M"></div>
+                    <div class="form-group"><label>Accession Number</label><input type="text" id="at_accession" class="form-control"></div>
+                    <div class="form-group"><label>Study Date (YYYYMMDD)</label><input type="text" id="at_study_date" class="form-control"></div>
+                    <div class="form-group"><label>Study Description</label><input type="text" id="at_study_desc" class="form-control"></div>
+                    <div class="form-group"><label>Referring Physician</label><input type="text" id="at_ref_phys" class="form-control"></div>
+                </div>
+                <div style="text-align:right;margin-top:10px;">
+                    <button type="button" class="btn btn-primary" onclick="window.PaxsArchiveTools.saveStudyTags()">Save Tag Edits</button>
+                </div>
+            </div>
+
+            <div class="panel-card">
+                <div class="panel-header">Study Split &amp; Merge</div>
+                <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">Select series from the loaded study above to split into a new study:</p>
+                <div id="at_split_series_list" style="max-height:130px;overflow:auto;margin-bottom:10px;"></div>
+                <div class="grid-layout" style="gap:8px;">
+                    <div class="form-group"><label>Target Patient ID (optional)</label><input type="text" id="at_split_pid" class="form-control"></div>
+                    <div class="form-group"><label>Target Patient Name (optional)</label><input type="text" id="at_split_pname" class="form-control"></div>
+                </div>
+                <div class="form-group"><label>New Study Description (optional)</label><input type="text" id="at_split_desc" class="form-control"></div>
+                <div style="text-align:right;margin-bottom:16px;">
+                    <button type="button" class="btn" onclick="window.PaxsArchiveTools.runStudySplit()">Split Selected Series</button>
+                </div>
+                <hr style="border:none;border-top:1px solid var(--border);margin:14px 0;">
+                <div class="form-group">
+                    <label>Merge Source Study UIDs (comma or newline separated)</label>
+                    <textarea id="at_merge_sources" class="form-control" style="min-height:60px;"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Target Study UID</label>
+                    <input type="text" id="at_merge_target" class="form-control">
+                </div>
+                <div style="text-align:right;">
+                    <button type="button" class="btn btn-primary" onclick="window.PaxsArchiveTools.runStudyMerge()">Merge Studies</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-card" style="margin-bottom: 18px;">
+            <div class="panel-header">
+                <span>Scheduled Database Backups &amp; Integrity Verification</span>
+                <button type="button" class="btn btn-primary" onclick="window.PaxsArchiveTools.runBackupNow()">Run Backup Now</button>
+            </div>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin-bottom:12px;">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                    <input type="checkbox" id="bk_enabled"> <span>Enable daily automatic backup</span>
+                </label>
+                <div><label style="display:block;font-size:12px;">Daily Time (HH:MM)</label><input type="text" id="bk_time" class="form-control" value="02:00" style="width:110px;"></div>
+                <div><label style="display:block;font-size:12px;">Keep Last N Backups</label><input type="number" id="bk_retention" class="form-control" value="7" min="1" max="90" style="width:100px;"></div>
+                <button type="button" class="btn" onclick="window.PaxsArchiveTools.saveBackupSchedule()">Save Schedule</button>
+            </div>
+            <div id="bk_last_run" style="font-size:12px;color:var(--text-muted);margin-bottom:10px;"></div>
+            <div style="overflow:auto;">
+                <table class="data-table" style="width:100%;">
+                    <thead><tr><th>Backup File</th><th>Size</th><th>Modified</th><th>Actions</th></tr></thead>
+                    <tbody id="bk_table_body"><tr><td colspan="4" style="color:var(--text-muted);">Loading backups...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="panel-header">
+                <span>HL7 / RIS &amp; Modality Worklist (MWL)</span>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <select id="mwl_filter_status" class="form-control" style="width:auto;" onchange="window.PaxsArchiveTools.loadWorklistPanel()">
+                        <option value="">All Statuses</option>
+                        <option value="SCHEDULED">SCHEDULED</option>
+                        <option value="IN PROGRESS">IN PROGRESS</option>
+                        <option value="COMPLETED">COMPLETED</option>
+                        <option value="CANCELED">CANCELED</option>
+                    </select>
+                    <button type="button" class="btn" onclick="window.PaxsArchiveTools.loadWorklistPanel()">Refresh</button>
+                </div>
+            </div>
+            <div id="hl7_status_summary" style="font-size:12px;color:var(--text-muted);margin-bottom:12px;"></div>
+            <div class="grid-layout" style="gap:8px;margin-bottom:12px;">
+                <input type="text" id="mwl_pid" class="form-control" placeholder="Patient ID (required)">
+                <input type="text" id="mwl_pname" class="form-control" placeholder="Patient Name (e.g. DOE^JANE)">
+                <input type="text" id="mwl_mod" class="form-control" placeholder="Modality (CT, MR, US)" value="CT">
+                <input type="text" id="mwl_aet" class="form-control" placeholder="Station AET (optional)">
+                <input type="text" id="mwl_acc" class="form-control" placeholder="Accession Number">
+                <input type="text" id="mwl_desc" class="form-control" placeholder="Procedure Description">
+            </div>
+            <div style="text-align:right;margin-bottom:14px;">
+                <button type="button" class="btn btn-primary" onclick="window.PaxsArchiveTools.createWorklistStep()">Schedule Exam Order</button>
+            </div>
+            <div style="overflow:auto;">
+                <table class="data-table" style="width:100%;">
+                    <thead><tr><th>SPS ID</th><th>Patient</th><th>Modality / AET</th><th>Procedure</th><th>Status</th><th>Actions</th></tr></thead>
+                    <tbody id="mwl_table_body"><tr><td colspan="6" style="color:var(--text-muted);">Loading worklist...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+            </div><!-- /.settings-stage -->
+        </div><!-- /.settings-body -->
+    </div><!-- /.wrap -->
+
     <!-- Template Modal -->
     <div id="tmpl-modal" class="modal">
-        <div class="modal-content">
+        <div class="modal-content" style="width: min(880px, 95vw); max-height: 92vh;">
             <div class="panel-header">
                 <span id="modal-title-text">Create Report Template</span>
-                <button type="button" class="btn" onclick="closeTemplateModal()">✕</button>
+                <button type="button" class="btn" onclick="closeTemplateModal()" aria-label="Close template modal">✕</button>
             </div>
             <form id="tmpl-form" onsubmit="saveTemplate(event)">
                 <input type="hidden" id="tmpl_id">
+                <div class="grid-layout" style="gap: 14px; margin-bottom: 4px;">
+                    <div class="form-group">
+                        <label for="tmpl_title">Template Title</label>
+                        <input type="text" id="tmpl_title" class="form-control" required placeholder="Normal Brain CT">
+                    </div>
+                    <div class="form-group">
+                        <label for="tmpl_modality">Modality (CT, MR, XR, US, DX, MG)</label>
+                        <input type="text" id="tmpl_modality" class="form-control" list="tmpl_modality_list" placeholder="CT">
+                        <datalist id="tmpl_modality_list">
+                            <option value="CT"></option>
+                            <option value="MR"></option>
+                            <option value="XR"></option>
+                            <option value="CR"></option>
+                            <option value="DX"></option>
+                            <option value="US"></option>
+                            <option value="MG"></option>
+                            <option value="NM"></option>
+                            <option value="PT"></option>
+                            <option value="XA"></option>
+                        </datalist>
+                    </div>
+                </div>
+
+                <div class="paxs-placeholder-bar" aria-label="Insert dynamic DICOM placeholders">
+                    <span class="paxs-placeholder-label">Insert placeholder:</span>
+                    <button type="button" class="paxs-placeholder-chip" onclick="insertTemplatePlaceholder('{{patient_name}}')">{{patient_name}}</button>
+                    <button type="button" class="paxs-placeholder-chip" onclick="insertTemplatePlaceholder('{{patient_id}}')">{{patient_id}}</button>
+                    <button type="button" class="paxs-placeholder-chip" onclick="insertTemplatePlaceholder('{{patient_age}}')">{{patient_age}}</button>
+                    <button type="button" class="paxs-placeholder-chip" onclick="insertTemplatePlaceholder('{{patient_sex}}')">{{patient_sex}}</button>
+                    <button type="button" class="paxs-placeholder-chip" onclick="insertTemplatePlaceholder('{{study_description}}')">{{study_description}}</button>
+                    <button type="button" class="paxs-placeholder-chip" onclick="insertTemplatePlaceholder('{{study_date}}')">{{study_date}}</button>
+                    <button type="button" class="paxs-placeholder-chip" onclick="insertTemplatePlaceholder('{{accession_number}}')">{{accession_number}}</button>
+                    <button type="button" class="paxs-placeholder-chip" onclick="insertTemplatePlaceholder('{{modality}}')">{{modality}}</button>
+                </div>
+
                 <div class="form-group">
-                    <label>Template Title</label>
-                    <input type="text" id="tmpl_title" class="form-control" required placeholder="Normal Brain CT">
+                    <label>Findings Rich Template</label>
+                    <div id="tmpl_findings_editor"></div>
+                    <textarea id="tmpl_findings" class="form-control" style="display:none;" placeholder="CT Brain without IV contrast demonstrates normal brain parenchyma..."></textarea>
                 </div>
                 <div class="form-group">
-                    <label>Modality (CT, MRI, XR, US, DX)</label>
-                    <input type="text" id="tmpl_modality" class="form-control" placeholder="CT">
-                </div>
-                <div class="form-group">
-                    <label>Findings Text / Jinja2 Template</label>
-                    <textarea id="tmpl_findings" class="form-control" placeholder="CT Brain without IV contrast demonstrates normal brain parenchyma..."></textarea>
-                </div>
-                <div class="form-group">
-                    <label>Default Impression Text</label>
-                    <textarea id="tmpl_impression" class="form-control" placeholder="Unremarkable non-contrast CT brain."></textarea>
+                    <label>Default Impression Rich Template</label>
+                    <div id="tmpl_impression_editor"></div>
+                    <textarea id="tmpl_impression" class="form-control" style="display:none;" placeholder="Unremarkable non-contrast CT brain."></textarea>
                 </div>
                 <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
                     <input type="checkbox" id="tmpl_is_default">
@@ -687,6 +1029,8 @@
     </div>
 
     <div id="toast" class="toast">Settings Saved Successfully!</div>
+
+    <script src="/static/paxs-rich-editor.js?v=1"></script>
 
     <script>
         function switchTab(tabId) {
@@ -714,6 +1058,17 @@
             document.getElementById('lic_b64_input')?.focus();
         }
 
+        function handleLogoPreviewError(img) {
+            const fallback = '/viewer/assets/logomain.png';
+            if (img.dataset.logoFallback === '1' || img.getAttribute('src') === fallback) {
+                img.hidden = true;
+                return;
+            }
+            img.dataset.logoFallback = '1';
+            img.hidden = false;
+            img.src = fallback;
+        }
+
         async function loadOrgSettings() {
             try {
                 const res = await fetch('/api/v1/settings/organization');
@@ -727,7 +1082,10 @@
                     document.getElementById('header_html_text').value = data.header_html_text || '';
                     document.getElementById('footer_html_text').value = data.footer_html_text || '';
                     if (data.logo_path) {
-                        document.getElementById('logo_preview').src = data.logo_path;
+                        const logo = document.getElementById('logo_preview');
+                        logo.dataset.logoFallback = '';
+                        logo.hidden = false;
+                        logo.src = data.logo_path;
                     }
                     updateLivePreview();
                 }
@@ -765,26 +1123,91 @@
                 formData.append('logo_file', logoFile);
             }
 
+            const csrfCookie = document.cookie.split(';').map((part) => part.trim())
+                .find((part) => part.startsWith('paxs_csrf='));
+            const csrfToken = csrfCookie ? csrfCookie.slice('paxs_csrf='.length) : '';
+
             try {
                 const res = await fetch('/api/v1/settings/organization', {
                     method: 'POST',
+                    headers: { 'X-CSRF-Token': csrfToken },
                     body: formData
                 });
                 if (res.ok) {
                     const data = await res.json();
                     showToast('Organization settings updated successfully!');
                     if (data.logo_path) {
-                        document.getElementById('logo_preview').src = data.logo_path;
+                        const logo = document.getElementById('logo_preview');
+                        logo.dataset.logoFallback = '';
+                        logo.hidden = false;
+                        logo.src = data.logo_path;
                     }
                 } else {
-                    alert('Failed to save settings');
+                    const error = await res.json().catch(() => ({}));
+                    alert(error.detail || `Failed to save settings (${res.status})`);
                 }
-            } catch (err) { console.error(err); alert('Error saving settings'); }
+            } catch (err) { console.error(err); alert(`Error saving settings: ${err.message || 'network error'}`); }
+        }
+
+        let _tmplFindingsEd = null;
+        let _tmplImpressionEd = null;
+        let _activeTmplEd = null;
+
+        function getCsrfHeaders(extra = {}) {
+            const csrfCookie = document.cookie.split(';').map((part) => part.trim())
+                .find((part) => part.startsWith('paxs_csrf='));
+            const csrfToken = csrfCookie ? csrfCookie.slice('paxs_csrf='.length) : '';
+            const headers = { ...extra };
+            if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+            try {
+                const bearer = localStorage.getItem('paxs_token');
+                if (bearer) headers['Authorization'] = 'Bearer ' + bearer;
+            } catch (e) { /* noop */ }
+            return headers;
+        }
+
+        function ensureTemplateEditors() {
+            if (_tmplFindingsEd && _tmplImpressionEd) return;
+            const RTE = window.PaxsRichEditor;
+            const fHost = document.getElementById('tmpl_findings_editor');
+            const iHost = document.getElementById('tmpl_impression_editor');
+            if (!RTE || !fHost || !iHost) {
+                document.getElementById('tmpl_findings').style.display = '';
+                document.getElementById('tmpl_impression').style.display = '';
+                return;
+            }
+            _tmplFindingsEd = RTE.create(fHost, {
+                ariaLabel: 'Template findings rich editor',
+                placeholder: 'Format standard findings with headings, bold, bulleted/numbered lists, font styles, and {{placeholders}}…',
+                minHeight: 180,
+                maxHeight: 320
+            });
+            _tmplImpressionEd = RTE.create(iHost, {
+                ariaLabel: 'Template impression rich editor',
+                placeholder: 'Format default clinical impression and recommendations…',
+                minHeight: 110,
+                maxHeight: 220
+            });
+            _tmplFindingsEd.body.addEventListener('focus', () => { _activeTmplEd = _tmplFindingsEd; });
+            _tmplImpressionEd.body.addEventListener('focus', () => { _activeTmplEd = _tmplImpressionEd; });
+            _activeTmplEd = _tmplFindingsEd;
+        }
+
+        function insertTemplatePlaceholder(token) {
+            ensureTemplateEditors();
+            const target = _activeTmplEd || _tmplFindingsEd;
+            if (target) {
+                target.insertText(token);
+            } else {
+                const ta = document.getElementById('tmpl_findings');
+                ta.value += token;
+                ta.focus();
+            }
         }
 
         async function loadTemplates() {
             try {
-                const res = await fetch('/api/v1/templates');
+                const res = await fetch('/api/v1/templates', { credentials: 'same-origin' });
                 if (res.ok) {
                     const data = await res.json();
                     const tbody = document.getElementById('templates-table-body');
@@ -792,24 +1215,36 @@
                         tbody.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted);">No templates created yet. Click "+ Add New Template".</td></tr>';
                         return;
                     }
-                    tbody.innerHTML = data.map(t => `
+                    const esc = window.PaxsRichEditor ? window.PaxsRichEditor.escapeHtml : (s => String(s || ''));
+                    tbody.innerHTML = data.map(t => {
+                        const preview = window.PaxsRichEditor
+                            ? window.PaxsRichEditor.toPlainText(t.body_findings_template || '').slice(0, 90)
+                            : String(t.body_findings_template || '').slice(0, 90);
+                        return `
                         <tr>
-                            <td><b>${t.title}</b></td>
-                            <td><span class="badge badge-blue">${t.modality || 'ALL'}</span></td>
+                            <td>
+                                <b>${esc(t.title)}</b>
+                                ${preview ? `<div style="font-size:11.5px;color:var(--text-faint);margin-top:2px;max-width:440px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(preview)}</div>` : ''}
+                            </td>
+                            <td><span class="badge badge-blue">${esc(t.modality || 'ALL')}</span></td>
                             <td>${t.is_default ? '<span class="badge badge-green">Default</span>' : '-'}</td>
                             <td>
                                 <button class="btn" style="padding: 4px 10px; font-size: 11px;" onclick="editTemplate(${t.id})">✏️ Edit</button>
                                 <button class="btn" style="padding: 4px 10px; font-size: 11px; color: var(--accent-rose);" onclick="deleteTemplate(${t.id})">🗑 Delete</button>
                             </td>
-                        </tr>
-                    `).join('');
+                        </tr>`;
+                    }).join('');
                 }
             } catch (e) { console.error(e); }
         }
 
         function openTemplateModal() {
+            ensureTemplateEditors();
             document.getElementById('tmpl_id').value = '';
             document.getElementById('tmpl-form').reset();
+            if (_tmplFindingsEd) _tmplFindingsEd.setValue('');
+            if (_tmplImpressionEd) _tmplImpressionEd.setValue('');
+            _activeTmplEd = _tmplFindingsEd;
             document.getElementById('modal-title-text').textContent = 'Create Report Template';
             document.getElementById('tmpl-modal').classList.add('active');
         }
@@ -820,7 +1255,8 @@
 
         async function editTemplate(id) {
             try {
-                const res = await fetch(`/api/v1/templates/${id}`);
+                ensureTemplateEditors();
+                const res = await fetch(`/api/v1/templates/${id}`, { credentials: 'same-origin' });
                 if (res.ok) {
                     const t = await res.json();
                     document.getElementById('tmpl_id').value = t.id;
@@ -828,6 +1264,9 @@
                     document.getElementById('tmpl_modality').value = t.modality || '';
                     document.getElementById('tmpl_findings').value = t.body_findings_template || '';
                     document.getElementById('tmpl_impression').value = t.default_impression_template || '';
+                    if (_tmplFindingsEd) _tmplFindingsEd.setValue(t.body_findings_template || '');
+                    if (_tmplImpressionEd) _tmplImpressionEd.setValue(t.default_impression_template || '');
+                    _activeTmplEd = _tmplFindingsEd;
                     document.getElementById('tmpl_is_default').checked = t.is_default;
                     document.getElementById('modal-title-text').textContent = 'Edit Report Template';
                     document.getElementById('tmpl-modal').classList.add('active');
@@ -838,11 +1277,17 @@
         async function saveTemplate(e) {
             e.preventDefault();
             const id = document.getElementById('tmpl_id').value;
+            const findingsVal = _tmplFindingsEd
+                ? _tmplFindingsEd.getHtml()
+                : document.getElementById('tmpl_findings').value;
+            const impressionVal = _tmplImpressionEd
+                ? _tmplImpressionEd.getHtml()
+                : document.getElementById('tmpl_impression').value;
             const payload = {
                 title: document.getElementById('tmpl_title').value,
                 modality: document.getElementById('tmpl_modality').value,
-                body_findings_template: document.getElementById('tmpl_findings').value,
-                default_impression_template: document.getElementById('tmpl_impression').value,
+                body_findings_template: findingsVal,
+                default_impression_template: impressionVal,
                 is_default: document.getElementById('tmpl_is_default').checked
             };
             const url = id ? `/api/v1/templates/${id}` : '/api/v1/templates';
@@ -851,26 +1296,43 @@
             try {
                 const res = await fetch(url, {
                     method: method,
-                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    headers: getCsrfHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify(payload)
                 });
                 if (res.ok) {
                     closeTemplateModal();
                     showToast(id ? 'Template updated!' : 'Template created!');
                     loadTemplates();
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    showToast(err.detail || `Failed to save template (${res.status})`, true);
                 }
-            } catch (e) { console.error(e); }
+            } catch (e) {
+                console.error(e);
+                showToast('Network error saving template', true);
+            }
         }
 
         async function deleteTemplate(id) {
             if (!confirm('Are you sure you want to delete this template?')) return;
             try {
-                const res = await fetch(`/api/v1/templates/${id}`, { method: 'DELETE' });
+                const res = await fetch(`/api/v1/templates/${id}`, {
+                    method: 'DELETE',
+                    credentials: 'same-origin',
+                    headers: getCsrfHeaders()
+                });
                 if (res.ok) {
                     showToast('Template deleted');
                     loadTemplates();
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    showToast(err.detail || `Failed to delete template (${res.status})`, true);
                 }
-            } catch (e) { console.error(e); }
+            } catch (e) {
+                console.error(e);
+                showToast('Network error deleting template', true);
+            }
         }
 
         /* ------------------ Licensing Management ------------------ */
@@ -1091,6 +1553,195 @@
             loadOrgSettings();
             loadTemplates();
         });
+    </script>
+
+    <!-- Page shell: theme, hero chips, and the three.js seal. Kept separate
+         from the functional script above so the business logic stays exactly
+         as it was. -->
+    <script src="/static/paxs-accent.js"></script>
+    <script src="/static/settings/archive-tools.js"></script>
+    <script>
+        (function () {
+            'use strict';
+
+            /* ---------------- theme ---------------- */
+            var THEME_KEY = 'paxs_theme';
+            var SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg>';
+            var MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>';
+
+            function applyTheme(theme, persist) {
+                var next = theme === 'light' ? 'light' : 'dark';
+                document.documentElement.dataset.theme = next;
+                if (persist) {
+                    try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* storage unavailable */ }
+                }
+                var btn = document.getElementById('theme-toggle');
+                if (btn) {
+                    var toLight = next === 'dark';
+                    btn.innerHTML = toLight ? SUN : MOON;
+                    btn.title = toLight ? 'Switch to light clinical mode' : 'Switch to dark reading-room mode';
+                    btn.setAttribute('aria-label', btn.title);
+                }
+            }
+
+            applyTheme(document.documentElement.dataset.theme || 'dark', false);
+            var toggle = document.getElementById('theme-toggle');
+            if (toggle) {
+                toggle.addEventListener('click', function () {
+                    var next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+                    applyTheme(next, true);
+                });
+            }
+
+            /* ---------------- tab semantics ----------------
+               switchTab() is the original function; it looks the button up by
+               its onclick attribute. Wrapping it keeps that logic untouched
+               while giving the rail proper aria-selected state. */
+            var originalSwitch = window.switchTab;
+            window.switchTab = function (tabId) {
+                if (typeof originalSwitch === 'function') originalSwitch(tabId);
+                var buttons = document.querySelectorAll('.settings-rail .tab-btn');
+                for (var i = 0; i < buttons.length; i++) {
+                    var on = buttons[i].getAttribute('data-tab') === tabId;
+                    buttons[i].classList.toggle('active', on);
+                    buttons[i].setAttribute('aria-selected', on ? 'true' : 'false');
+                }
+            };
+
+            /* ---------------- hero chips ----------------
+               Read from the DOM the existing loaders already filled, so the
+               chips cannot disagree with the panels. */
+            function setChip(id, value) {
+                var el = document.querySelector('#' + id + ' b');
+                if (el) el.textContent = value;
+            }
+
+            function paintChips() {
+                var edition = document.getElementById('lic-edition-title');
+                if (edition && edition.textContent.trim()) {
+                    setChip('chip-edition', edition.textContent.replace(/\s*EDITION\s*$/i, '').trim());
+                }
+                var status = document.getElementById('lic-status-badge');
+                if (status && status.textContent.trim()) {
+                    setChip('chip-license', status.textContent.trim().toLowerCase());
+                }
+                var body = document.getElementById('templates-table-body');
+                if (body) {
+                    var rows = body.querySelectorAll('tr');
+                    var count = 0;
+                    for (var i = 0; i < rows.length; i++) {
+                        if (!rows[i].querySelector('td[colspan]')) count++;
+                    }
+                    setChip('chip-templates', String(count));
+                }
+            }
+
+            ['loadTemplates', 'loadLicenseInfo'].forEach(function (name) {
+                var original = window[name];
+                if (typeof original !== 'function') return;
+                window[name] = async function () {
+                    var out = await original.apply(this, arguments);
+                    paintChips();
+                    return out;
+                };
+            });
+
+            document.addEventListener('DOMContentLoaded', function () {
+                /* The chips are part of the hero, so the license has to be
+                   read on arrival rather than on first tab switch. */
+                if (typeof window.loadLicenseInfo === 'function') window.loadLicenseInfo();
+                paintChips();
+            });
+
+            /* ---------------- three.js seal ----------------
+               Concentric rings, radial ticks and a dot course: the shape of a
+               credential seal. The engine (paxs-accent.js) owns the WebGL
+               guard, lazy load, resize, visibility pause and disposal. */
+            function buildSeal(THREE, size) {
+                var scene = new THREE.Scene();
+                var camera = new THREE.PerspectiveCamera(38, size.width / size.height, 0.1, 100);
+                camera.position.set(0, 0, 7.6);
+
+                var accent = window.PaxsAccent ? window.PaxsAccent.color() : 0x38bdf8;
+                var geos = [];
+                var mats = [];
+                var group = new THREE.Group();
+
+                function ring(radius, opacity) {
+                    var pts = [];
+                    for (var i = 0; i <= 96; i++) {
+                        var a = (i / 96) * Math.PI * 2;
+                        pts.push(new THREE.Vector3(Math.cos(a) * radius, Math.sin(a) * radius, 0));
+                    }
+                    var g = new THREE.BufferGeometry().setFromPoints(pts);
+                    var m = new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: opacity });
+                    geos.push(g); mats.push(m);
+                    group.add(new THREE.Line(g, m));
+                }
+
+                ring(2.42, 0.26);
+                ring(1.98, 0.52);
+                ring(1.34, 0.2);
+
+                /* 36 ticks just outside the outer ring. */
+                var tickPts = [];
+                for (var t = 0; t < 36; t++) {
+                    var angle = (t / 36) * Math.PI * 2;
+                    var inner = t % 3 === 0 ? 2.5 : 2.54;
+                    tickPts.push(new THREE.Vector3(Math.cos(angle) * inner, Math.sin(angle) * inner, 0));
+                    tickPts.push(new THREE.Vector3(Math.cos(angle) * 2.68, Math.sin(angle) * 2.68, 0));
+                }
+                var tickGeo = new THREE.BufferGeometry().setFromPoints(tickPts);
+                var tickMat = new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: 0.34 });
+                geos.push(tickGeo); mats.push(tickMat);
+                group.add(new THREE.LineSegments(tickGeo, tickMat));
+
+                /* A course of dots between the rings. */
+                var dotPos = new Float32Array(12 * 3);
+                for (var d = 0; d < 12; d++) {
+                    var da = (d / 12) * Math.PI * 2;
+                    dotPos[d * 3] = Math.cos(da) * 1.66;
+                    dotPos[d * 3 + 1] = Math.sin(da) * 1.66;
+                    dotPos[d * 3 + 2] = 0;
+                }
+                var dotGeo = new THREE.BufferGeometry();
+                dotGeo.setAttribute('position', new THREE.BufferAttribute(dotPos, 3));
+                var dotMat = new THREE.PointsMaterial({
+                    color: accent, size: 0.09, sizeAttenuation: true,
+                    transparent: true, opacity: 0.85, depthWrite: false
+                });
+                geos.push(dotGeo); mats.push(dotMat);
+                group.add(new THREE.Points(dotGeo, dotMat));
+
+                scene.add(group);
+
+                return {
+                    scene: scene,
+                    camera: camera,
+                    update: function (elapsed) {
+                        group.rotation.y = elapsed * 0.34;
+                        group.rotation.x = Math.sin(elapsed * 0.32) * 0.2;
+                        group.rotation.z = Math.sin(elapsed * 0.21) * 0.06;
+                    },
+                    recolor: function (hex) {
+                        for (var i = 0; i < mats.length; i++) mats[i].color.setHex(hex);
+                    },
+                    dispose: function () {
+                        for (var i = 0; i < geos.length; i++) geos[i].dispose();
+                        for (var j = 0; j < mats.length; j++) mats[j].dispose();
+                    }
+                };
+            }
+
+            function mountSeal() {
+                var host = document.getElementById('settings-seal');
+                if (!host || !window.PaxsAccent) return;
+                window.PaxsAccent.mount(host, buildSeal);
+            }
+
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mountSeal);
+            else mountSeal();
+        })();
     </script>
 </body>
 </html>

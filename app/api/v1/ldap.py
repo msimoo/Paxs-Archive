@@ -1,4 +1,4 @@
-"""LDAP / Active Directory authentication API (``plan_9_2026.md`` C02).
+"""LDAP / Active Directory authentication API (``plans/legacy/archive-notes/plan_9_2026.md`` C02).
 
   POST /api/v1/ldap/login — authenticate a directory user
 
@@ -22,6 +22,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.ratelimit import rate_limit
+from app.api.v1.auth import (
+    _auth_response,
+    _create_session,
+    _now,
+    csrf_token_for,
+    set_csrf_cookie,
+    set_session_cookie,
+    write_audit,
+)
 from app.core.config import settings
 from app.core.security import create_access_token
 from app.db.session import get_db
@@ -53,8 +62,12 @@ async def _audit(db: AsyncSession, user_id: int | None, action: str,
     try:
         await write_audit(db, user_id, action, request, details)
         await db.commit()
-    except Exception as exc:  # noqa: BLE001 - auditing must not mask the response
-        log.warning("LDAP audit write failed (%s): %s", action, exc)
+    except Exception as exc:  # noqa: BLE001 - boundary guard: auditing must not mask the response
+        log.warning(
+            "ldap_audit_write_failed action=%s error_type=%s",
+            action,
+            type(exc).__name__,
+        )
 
 
 @router.post(
@@ -81,28 +94,41 @@ async def ldap_login(
 
     try:
         user = await ldap_service.sync_ldap_user_to_db(db, identity)
+    except ldap_service.LDAPIdentityConflictError as exc:
+        log.error("SECURITY ALERT: LDAP account provisioning blocked by identity or tenant conflict")
+        await _audit(
+            db, None, "ldap_identity_collision", request,
+            {"via": "ldap", "reason": "identity_or_tenant_conflict"},
+        )
+        raise HTTPException(409, _INVALID_CREDENTIALS) from exc
     except ldap_service.LDAPConfigurationError as exc:
-        log.error("LDAP provisioning refused: %s", exc)
-        await _audit(db, None, "login_failed", request, {"via": "ldap", "reason": "unmapped_role"})
+        log.error("ldap_provisioning_refused error_type=%s", type(exc).__name__)
+        await _audit(db, None, "login_failed", request, {"via": "ldap", "reason": "provisioning_refused"})
         raise HTTPException(401, _INVALID_CREDENTIALS) from exc
 
     if not user.is_active:
         await _audit(db, user.id, "login_failed", request, {"via": "ldap", "reason": "disabled"})
         raise HTTPException(401, _INVALID_CREDENTIALS)
 
-    await db.commit()
-    await _audit(db, user.id, "login_success", request, {"via": "ldap"})
+    user.failed_attempts = 0
+    user.locked_until = None
+    user.last_login = _now()
+    user.last_login_ip = request.client.host if request.client else None
+    await write_audit(db, user.id, "login_success", request, {"via": "ldap"})
 
     token = create_access_token(
         user.username, user.role, settings.SECRET_KEY, settings.TOKEN_EXPIRE_MINUTES
     )
-    return JSONResponse(
-        {
-            "access_token": token,
-            "token_type": "bearer",
-            "username": user.username,
-            "role": user.role,
-            "full_name": user.full_name,
-            "auth_provider": "LDAP/ActiveDirectory",
-        }
+    _, refresh_token = await _create_session(db, user, request)
+    await db.commit()
+    response = _auth_response(
+        user,
+        token,
+        request.query_params.get("next"),
+        request.scope.get("root_path") or "",
+        csrf_token_for(refresh_token),
     )
+    response.headers["X-PAXS-Auth-Provider"] = "LDAP/ActiveDirectory"
+    set_session_cookie(response, refresh_token)
+    set_csrf_cookie(response, refresh_token)
+    return response

@@ -13,9 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user_any, require_study_access
+from app.api.v1.deps import get_current_user_any, require_study_access, tenant_scope
 from app.db.session import get_db
-from app.services import gsps_service
+from app.services import gsps_service, query_service
 
 log = logging.getLogger("paxs.api.gsps")
 
@@ -46,12 +46,13 @@ def _ps_to_dict(ps) -> dict:
 async def get_gsps(sop_uid: str, db: AsyncSession = Depends(get_db),
                    _user=Depends(get_current_user_any)):
     """Retrieve a single GSPS by its SOP Instance UID."""
-    ps = await gsps_service.get_by_uid(db, sop_uid)
+    tenant_id, include_all = tenant_scope(_user)
+    ps = await gsps_service.get_by_uid(
+        db, sop_uid, tenant_id=tenant_id, include_all=include_all
+    )
     if ps is None:
         raise HTTPException(404, "Presentation state not found")
     # C04: a presentation state belongs to a study — check its tenant.
-    if ps.study_instance_uid:
-        await require_study_access(db, ps.study_instance_uid, _user)
     return JSONResponse(_ps_to_dict(ps))
 
 
@@ -61,7 +62,10 @@ async def list_gsps_for_study(study_uid: str, db: AsyncSession = Depends(get_db)
     """List all GSPS objects belonging to a study."""
     # C04
     await require_study_access(db, study_uid, _user)
-    results = await gsps_service.list_for_study(db, study_uid)
+    tenant_id, include_all = tenant_scope(_user)
+    results = await gsps_service.list_for_study(
+        db, study_uid, tenant_id=tenant_id, include_all=include_all
+    )
     return JSONResponse([_ps_to_dict(ps) for ps in results])
 
 
@@ -73,23 +77,15 @@ async def find_presentations_for_instance(
     _user=Depends(get_current_user_any),
 ):
     """Find all GSPS objects that reference a given image instance."""
+    tenant_id, include_all = tenant_scope(_user)
     # C04: check the study when given, else resolve the instance's study.
     if study_uid:
         await require_study_access(db, study_uid, _user)
     else:
-        from sqlalchemy import select
-
-        from app.db.models import Instance, Series, Study
-
-        owning = (
-            await db.execute(
-                select(Study.study_instance_uid)
-                .join(Series, Series.study_id == Study.id)
-                .join(Instance, Instance.series_id == Series.id)
-                .where(Instance.sop_instance_uid == sop_uid)
-            )
-        ).scalar_one_or_none()
+        owning = await query_service.owning_study_uid(db, sop_uid)
         if owning:
             await require_study_access(db, owning, _user)
-    results = await gsps_service.find_for_instance(db, sop_uid, study_uid)
+    results = await gsps_service.find_for_instance(
+        db, sop_uid, study_uid, tenant_id=tenant_id, include_all=include_all
+    )
     return JSONResponse([_ps_to_dict(ps) for ps in results])

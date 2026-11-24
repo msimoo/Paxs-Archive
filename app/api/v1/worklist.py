@@ -14,13 +14,14 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import get_current_user, tenant_scope
+from app.core.config import settings
+from app.core.roles import WRITE_ROLES
 from app.db.models import Patient, ScheduledProcedureStep, User
 from app.db.session import get_db
-from app.api.v1.deps import get_current_user
-from app.core.roles import WRITE_ROLES
+from app.services import worklist_service
 
 log = logging.getLogger("paxs.api.worklist")
 
@@ -53,6 +54,24 @@ class WorklistUpdate(BaseModel):
     start_date: str | None = Field(default=None, max_length=8)
     start_time: str | None = Field(default=None, max_length=16)
     modality: str | None = Field(default=None, max_length=16)
+    accession_number: str | None = Field(default=None, max_length=64)
+    requested_procedure_id: str | None = Field(default=None, max_length=64)
+    requested_procedure_description: str | None = Field(default=None, max_length=255)
+    scheduled_performing_physician: str | None = Field(default=None, max_length=192)
+
+
+# Order fields the Workflow page may edit. Status is handled separately because
+# it also stamps/clears ``performed_at``. An empty string clears a field.
+_EDITABLE_FIELDS = (
+    "scheduled_station_aet",
+    "start_date",
+    "start_time",
+    "modality",
+    "accession_number",
+    "requested_procedure_id",
+    "requested_procedure_description",
+    "scheduled_performing_physician",
+)
 
 
 def _step_out(step: ScheduledProcedureStep, patient: Patient | None) -> dict:
@@ -72,6 +91,7 @@ def _step_out(step: ScheduledProcedureStep, patient: Patient | None) -> dict:
         "requested_procedure_description": step.requested_procedure_description,
         "scheduled_performing_physician": step.scheduled_performing_physician,
         "study_instance_uid": step.study_instance_uid,
+        "performed_at": step.performed_at.isoformat() if step.performed_at else None,
         "created_at": step.created_at.isoformat() if step.created_at else None,
         "updated_at": step.updated_at.isoformat() if step.updated_at else None,
     }
@@ -82,21 +102,42 @@ def _require_write(user: User) -> None:
         raise HTTPException(403, f"Requires one of {WRITE_ROLES} roles")
 
 
-async def _get_patient(db: AsyncSession, body) -> Patient:
-    patient = (
-        await db.execute(select(Patient).where(Patient.patient_id == body.patient_id))
-    ).scalar_one_or_none()
+async def _get_patient(db: AsyncSession, body, tenant_id: int | None,
+                       include_all: bool) -> Patient:
+    """Resolve the patient for a booking, within the caller's tenant scope.
+
+    B-9: ``scheduled_procedure_steps`` has no tenant column — it inherits one
+    through ``patient_id``. Looking a patient up globally would let a tenant
+    book against another institution's MRN and then read their demographics
+    back out of the worklist, so the lookup is scoped (in the service) and a
+    manual patient is created *inside* the caller's tenant.
+    """
+    patient = await worklist_service.get_patient_for_booking(
+        db, body.patient_id, body.patient_name, tenant_id, include_all
+    )
     if patient is None:
-        if not body.patient_name:
-            raise HTTPException(
-                404,
-                f"Patient '{body.patient_id}' not found — HL7 ADT registers patients automatically; "
-                "provide patient_name to create a manual patient.",
-            )
-        patient = Patient(patient_id=body.patient_id, patient_name=body.patient_name)
-        db.add(patient)
-        await db.flush()
+        raise HTTPException(
+            404,
+            f"Patient '{body.patient_id}' not found — HL7 ADT registers patients automatically; "
+            "provide patient_name to create a manual patient.",
+        )
     return patient
+
+
+@router.get("/hl7-status")
+async def hl7_gateway_status(_user: User = Depends(get_current_user)) -> dict:
+    """Return HL7 MLLP listener and outbound ORU EMR configuration status."""
+    return {
+        "hl7_enabled": bool(settings.HL7_ENABLED),
+        "hl7_host": settings.HL7_HOST,
+        "hl7_port": int(settings.HL7_PORT),
+        "hl7_tls_enabled": bool(settings.HL7_TLS_ENABLED),
+        "emr_enabled": bool(settings.HL7_EMR_ENABLED),
+        "emr_host": settings.HL7_EMR_HOST,
+        "emr_port": int(settings.HL7_EMR_PORT),
+        "emr_application": settings.HL7_EMR_APPLICATION,
+        "default_station_aet": settings.MWL_DEFAULT_STATION_AET,
+    }
 
 
 @router.get("")
@@ -106,26 +147,18 @@ async def list_steps(status: str | None = None,
                      search: str | None = None,
                      db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
-    stmt = (
-        select(ScheduledProcedureStep, Patient)
-        .join(Patient, ScheduledProcedureStep.patient_id == Patient.id)
+    # B-9: the worklist is patient-keyed, so the tenant predicate goes on the
+    # joined Patient (the step table itself carries no tenant column).
+    tenant_id, include_all = tenant_scope(user)
+    rows = await worklist_service.list_scheduled_steps(
+        db,
+        status=status,
+        station=station,
+        modality=modality,
+        search=search,
+        tenant_id=tenant_id,
+        include_all=include_all,
     )
-    if status:
-        stmt = stmt.where(ScheduledProcedureStep.status == status)
-    if station:
-        stmt = stmt.where(ScheduledProcedureStep.scheduled_station_aet == station)
-    if modality:
-        stmt = stmt.where(ScheduledProcedureStep.modality == modality)
-    if search:
-        like = f"%{search}%"
-        stmt = stmt.where(
-            Patient.patient_name.like(like)
-            | Patient.patient_id.like(like)
-            | ScheduledProcedureStep.accession_number.like(like)
-        )
-    stmt = stmt.order_by(ScheduledProcedureStep.start_date.desc(),
-                         ScheduledProcedureStep.id.desc())
-    rows = (await db.execute(stmt)).all()
     return [_step_out(step, patient) for step, patient in rows]
 
 
@@ -135,7 +168,8 @@ async def create_step(body: WorklistIn, db: AsyncSession = Depends(get_db),
     _require_write(user)
     if body.status not in VALID_STATUS:
         raise HTTPException(422, f"Invalid status, use one of {VALID_STATUS}")
-    patient = await _get_patient(db, body)
+    tenant_id, include_all = tenant_scope(user)
+    patient = await _get_patient(db, body, tenant_id, include_all)
     step = ScheduledProcedureStep(
         patient_id=patient.id,
         # ScheduledProcedureStepID is VR SH (max 16 chars) — keep it short.
@@ -163,10 +197,10 @@ async def update_step(step_id: int, body: WorklistUpdate,
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     _require_write(user)
-    step = (
-        await db.execute(select(ScheduledProcedureStep).where(ScheduledProcedureStep.id == step_id))
-    ).scalar_one_or_none()
+    tenant_id, include_all = tenant_scope(user)
+    step = await worklist_service.get_scheduled_step(db, step_id, tenant_id, include_all)
     if step is None:
+        # B-9: a foreign step is reported exactly like a missing one.
         raise HTTPException(404, "Worklist step not found")
     if body.status is not None:
         if body.status not in VALID_STATUS:
@@ -176,17 +210,19 @@ async def update_step(step_id: int, body: WorklistUpdate,
             step.performed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         else:
             step.performed_at = None  # reverted — clear the stale timestamp
-    if body.scheduled_station_aet is not None:
-        step.scheduled_station_aet = body.scheduled_station_aet
-    if body.start_date is not None:
-        step.start_date = body.start_date
-    if body.start_time is not None:
-        step.start_time = body.start_time
-    if body.modality is not None:
-        step.modality = body.modality
+    for field in _EDITABLE_FIELDS:
+        value = getattr(body, field)
+        if value is None:
+            continue
+        value = value.strip()
+        if field == "modality":
+            value = value.upper()
+        if field == "start_date" and value and not (len(value) == 8 and value.isdigit()):
+            raise HTTPException(422, "start_date must be YYYYMMDD")
+        setattr(step, field, value or None)
     await db.flush()
     await db.refresh(step)  # load server_default/onupdate timestamps (async)
-    patient = (await db.execute(select(Patient).where(Patient.id == step.patient_id))).scalar_one()
+    patient = await db.get(Patient, step.patient_id)
     log.info("Worklist step %s updated by %s", step.sps_id, user.username)
     return _step_out(step, patient)
 
@@ -196,9 +232,8 @@ async def delete_step(step_id: int, db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     if user.role != "ADMIN":
         raise HTTPException(403, "Only ADMIN can delete worklist steps")
-    step = (
-        await db.execute(select(ScheduledProcedureStep).where(ScheduledProcedureStep.id == step_id))
-    ).scalar_one_or_none()
+    tenant_id, include_all = tenant_scope(user)
+    step = await worklist_service.get_scheduled_step(db, step_id, tenant_id, include_all)
     if step is None:
         raise HTTPException(404, "Worklist step not found")
     await db.delete(step)

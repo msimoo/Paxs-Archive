@@ -1,7 +1,7 @@
 """Alembic migration environment.
 
 Reads the DATABASE_URL from the app settings (so .env works as usual) and
-derives the sync driver URL Alembic needs (mysql+pymysql / sqlite).
+derives the sync driver URL Alembic needs (postgresql+psycopg).
 """
 
 from __future__ import annotations
@@ -17,13 +17,12 @@ from app.db.models import Base
 
 
 def to_sync_url(url: str) -> str:
-    """Alembic needs a sync driver URL (pymysql / plain sqlite).
+    """Alembic needs a sync driver URL (psycopg v3).
     Defined here (not in app.db.session) so importing this module never
     constructs the app's engines."""
-    if url.startswith("sqlite+aiosqlite://"):
-        return "sqlite://" + url[len("sqlite+aiosqlite://"):]
-    if url.startswith("mysql+aiomysql://"):
-        return "mysql+pymysql://" + url[len("mysql+aiomysql://"):]
+    for prefix in ("postgresql+asyncpg://", "postgresql://", "postgres://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
     return url
 
 
@@ -35,7 +34,11 @@ try:
     _override = config.attributes.get("paxs_migration_url")
 except Exception:  # noqa: BLE001 - attributes is optional
     _override = None
-config.set_main_option("sqlalchemy.url", to_sync_url(_override or settings.DATABASE_URL))
+# Alembic keeps options in a ConfigParser, where "%" starts an interpolation:
+# a URL-encoded password ("@" -> "%40") would crash it, so escape "%" as "%%".
+config.set_main_option(
+    "sqlalchemy.url", to_sync_url(_override or settings.DATABASE_URL).replace("%", "%%")
+)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)

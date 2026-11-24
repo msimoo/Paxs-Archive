@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PAXS Media Exporter Studio</title>
+  <link rel="stylesheet" href="exporter.css" />
+</head>
+<body>
+  <div class="aurora" aria-hidden="true"></div>
+
+  <div class="shell">
+    <!-- Top Header -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 28 28" width="22" height="22" fill="none">
+            <circle cx="14" cy="14" r="11" stroke="currentColor" stroke-width="2" opacity="0.9"/>
+            <circle cx="14" cy="14" r="3.6" fill="currentColor"/>
+            <path d="M14 3v5M25 14h-5M14 25v-5M3 14h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div>
+          <div class="brand-title">PAXS Media Exporter <span class="studio-tag">STUDIO</span></div>
+          <div class="brand-sub">Portable CD / DVD / USB Autorun &amp; DICOM Directory Engine</div>
+        </div>
+      </div>
+
+      <div class="top-actions">
+        <div id="md-pill" class="pill pill-muted">
+          <span class="dot"></span>
+          <span id="md-pill-text">Checking MicroDicom 2026.5…</span>
+        </div>
+        <button id="btn-register-proto" class="btn btn-ghost btn-sm" title="Register paxs-exporter:// protocol for browser 1-click launch">
+          Link Browser
+        </button>
+        <button id="btn-theme" class="btn btn-ghost btn-sm" title="Switch Dark / Light theme">Theme</button>
+      </div>
+    </header>
+
+    <!-- Study Hero Banner -->
+    <section class="card study-hero" id="study-hero">
+      <div class="hero-left">
+        <div class="mod-stack" id="study-mods"><span class="mod-pill">DICOM</span></div>
+        <div class="hero-meta">
+          <div class="hero-name" id="study-patient">Loading study metadata…</div>
+          <div class="hero-sub" id="study-sub">Connecting to PAXS Archive session</div>
+        </div>
+      </div>
+      <div class="hero-stats">
+        <div class="stat-box"><span class="stat-k">SERIES</span><span class="stat-v" id="stat-series">—</span></div>
+        <div class="stat-box"><span class="stat-k">IMAGES</span><span class="stat-v" id="stat-instances">—</span></div>
+        <div class="stat-box"><span class="stat-k">SIZE</span><span class="stat-v" id="stat-size">—</span></div>
+        <div class="stat-box"><span class="stat-k">DATE</span><span class="stat-v" id="stat-date">—</span></div>
+      </div>
+    </section>
+
+    <!-- Mode Tabs -->
+    <nav class="mode-tabs" role="tablist">
+      <button class="mode-tab active" data-tab="media" role="tab" aria-selected="true">
+        <span class="tab-ic">💿</span>
+        <span>
+          <strong>CD / DVD / USB Autorun</strong>
+          <small>Patient &amp; doctor disc / flash with MicroDicom 2026.5</small>
+        </span>
+      </button>
+      <button class="mode-tab" data-tab="dicom-zip" role="tab" aria-selected="false">
+        <span class="tab-ic">📂</span>
+        <span>
+          <strong>Export DICOM / ZIP to Directory</strong>
+          <small>Save ZIP, raw DICOM, or portable viewer to chosen folder</small>
+        </span>
+      </button>
+    </nav>
+
+    <!-- Main 2-Column Workspace -->
+    <div class="workspace">
+      <!-- Left Column: Target & Configuration -->
+      <div class="col-main">
+        <!-- TAB 1: CD/DVD/USB AUTORUN -->
+        <section id="panel-media" class="panel-group">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>1. Choose Destination Media</h2>
+                <p>Auto-detects connected USB flash drives, optical CD/DVD burners, or ISO/folder output.</p>
+              </div>
+              <button id="btn-refresh-drives" class="btn btn-outline btn-sm">↻ Scan Drives</button>
+            </div>
+
+            <div class="target-kinds" id="media-kinds">
+              <button class="kind-chip active" data-kind="usb">🔌 USB / Flash Drive</button>
+              <button class="kind-chip" data-kind="disc">💿 Burn CD / DVD</button>
+              <button class="kind-chip" data-kind="iso">📀 Save Autorun ISO</button>
+              <button class="kind-chip" data-kind="folder">📁 Portable Folder</button>
+            </div>
+
+            <div id="usb-section" class="drive-section">
+              <div id="usb-list" class="drive-grid">
+                <div class="empty-hint">Scanning removable USB drives…</div>
+              </div>
+              <div class="field-row two-col" style="margin-top:12px;">
+                <label class="field">
+                  <span>Study Folder Name on USB</span>
+                  <input id="usb-folder-name" type="text" placeholder="PAXS_STUDY_20261124" maxlength="64" />
+                </label>
+                <label class="check-tile">
+                  <input id="usb-write-root" type="checkbox" />
+                  <span>
+                    <strong>Write directly to USB root (e.g. E:\)</strong>
+                    <small>Places autorun.inf &amp; START_VIEWER.bat at drive root</small>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div id="disc-section" class="drive-section hidden">
+              <div id="disc-list" class="drive-grid">
+                <div class="empty-hint">Scanning optical CD/DVD recorders…</div>
+              </div>
+              <div class="field-row two-col" style="margin-top:12px;">
+                <label class="field">
+                  <span>Disc Volume Label (max 16 chars)</span>
+                  <input id="disc-volume-label" type="text" value="PAXS_DICOM" maxlength="16" />
+                </label>
+                <div class="disc-check-box">
+                  <button id="btn-check-disc" class="btn btn-outline btn-sm">Check Inserted Disc</button>
+                  <span id="disc-check-msg" class="muted-note">Insert a blank CD-R/RW or DVD±R/RW</span>
+                </div>
+              </div>
+            </div>
+
+            <div id="iso-folder-section" class="drive-section hidden">
+              <div class="folder-picker-row">
+                <input id="media-dest-dir" type="text" placeholder="Choose destination directory…" />
+                <button id="btn-pick-media-dir" class="btn btn-outline">Browse…</button>
+              </div>
+              <div class="quick-dirs" id="media-quick-dirs"></div>
+            </div>
+          </div>
+
+          <!-- MicroDicom 2026.5 Autorun Configurator -->
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>2. MicroDicom 2026.5 Autorun &amp; DICOM Layout</h2>
+                <p>Configures automatic offline viewing and stores all DICOM files in a dedicated subdirectory.</p>
+              </div>
+              <label class="switch">
+                <input id="opt-include-md" type="checkbox" checked />
+                <span class="slider"></span>
+                <span class="switch-lbl">Include MicroDicom</span>
+              </label>
+            </div>
+
+            <div id="md-config-grid" class="config-grid">
+              <label class="field">
+                <span>DICOM Files Directory (1–8 chars)</span>
+                <input id="opt-dicom-dir" type="text" value="DICOM" maxlength="8" />
+              </label>
+
+              <label class="field">
+                <span>MicroDicom Package Architecture</span>
+                <select id="opt-md-arch">
+                  <option value="universal">Universal (64-bit + 32-bit Windows)</option>
+                  <option value="x64">64-bit Compact (saves ~26 MB for CD-R)</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>Auto-Launch Target</span>
+                <select id="opt-md-open">
+                  <option value="dicomdir">DICOMDIR (Structured Patient/Study Tree)</option>
+                  <option value="scan">/scan &lt;DIR&gt; (Scan DICOM Directory Directly)</option>
+                </select>
+              </label>
+
+              <label class="check-tile">
+                <input id="opt-anonymize-media" type="checkbox" />
+                <span>
+                  <strong>De-identify / Anonymize PHI</strong>
+                  <small>Strip patient identity for teaching or research discs</small>
+                </span>
+              </label>
+            </div>
+
+            <div class="tree-preview" id="layout-preview"></div>
+          </div>
+        </section>
+
+        <!-- TAB 2: DICOM / ZIP DIRECTORY EXPORTER -->
+        <section id="panel-dicom-zip" class="panel-group hidden">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>1. Select Target Directory</h2>
+                <p>Pick any local, external, or network folder where the exported study will be saved.</p>
+              </div>
+            </div>
+
+            <div class="folder-picker-row">
+              <input id="zip-dest-dir" type="text" placeholder="Choose destination folder (e.g. D:\Exports)…" />
+              <button id="btn-pick-zip-dir" class="btn btn-primary-soft">📁 Choose Folder…</button>
+            </div>
+            <div class="quick-dirs" id="zip-quick-dirs"></div>
+
+            <div class="field-row two-col" style="margin-top:14px;">
+              <label class="field">
+                <span>Output File / Folder Name</span>
+                <input id="zip-output-name" type="text" placeholder="PAXS_STUDY_20261124" maxlength="64" />
+              </label>
+              <label class="field">
+                <span>DICOM Subdirectory Name (for unzipped modes)</span>
+                <input id="zip-dicom-dir" type="text" value="DICOM" maxlength="8" />
+              </label>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>2. Export Format</h2>
+                <p>Choose whether to export a single ZIP archive, unzipped DICOM files, or a portable viewer bundle.</p>
+              </div>
+            </div>
+
+            <div class="format-grid" id="zip-format-grid">
+              <button class="format-card active" data-fmt="dicom-zip">
+                <span class="fmt-ic">🗜️</span>
+                <strong>DICOM ZIP Archive (.zip)</strong>
+                <small>Compressed archive with all original DICOM files saved directly into chosen folder</small>
+              </button>
+              <button class="format-card" data-fmt="dicom-folder">
+                <span class="fmt-ic">🗂️</span>
+                <strong>Unzipped DICOMDIR + DICOM\</strong>
+                <small>Clean PS3.10 folder ready for PACS import or direct file access</small>
+              </button>
+              <button class="format-card" data-fmt="portable-viewer">
+                <span class="fmt-ic">🩺</span>
+                <strong>Portable Folder + MicroDicom</strong>
+                <small>Unzipped DICOMDIR + DICOM\ + MicroDicom 2026.5 Autorun viewer</small>
+              </button>
+              <button class="format-card" data-fmt="anonymized-zip">
+                <span class="fmt-ic">🛡️</span>
+                <strong>Anonymized Research ZIP</strong>
+                <small>Patient PHI stripped &amp; UIDs remapped consistently into a ZIP</small>
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Right Column: Live Progress Cockpit -->
+      <aside class="col-side">
+        <div class="card cockpit-card">
+          <div class="ring-wrap">
+            <svg class="ring-svg" viewBox="0 0 140 140">
+              <circle class="ring-bg" cx="70" cy="70" r="58" />
+              <circle id="ring-fg" class="ring-fg" cx="70" cy="70" r="58" stroke-dasharray="364.42" stroke-dashoffset="364.42" />
+            </svg>
+            <div class="ring-center">
+              <div id="ring-pct" class="ring-pct">0%</div>
+              <div id="ring-phase" class="ring-phase">READY</div>
+            </div>
+          </div>
+
+          <div id="status-msg" class="status-msg">Select destination and click Start Export.</div>
+
+          <!-- 5-Step Pipeline -->
+          <ol class="steps" id="pipeline-steps">
+            <li data-step="downloading"><span class="step-dot"></span>Fetch study from PAXS</li>
+            <li data-step="preparing"><span class="step-dot"></span>Stage DICOMDIR &amp; DICOM\</li>
+            <li data-step="microdicom"><span class="step-dot"></span>Configure MicroDicom 2026.5</li>
+            <li data-step="writing"><span class="step-dot"></span>Write / Burn to destination</li>
+            <li data-step="verifying"><span class="step-dot"></span>SHA-256 &amp; Autorun Verify</li>
+          </ol>
+
+          <!-- Telemetry Grid -->
+          <div class="telemetry">
+            <div><span class="tel-k">FILES</span><span class="tel-v" id="tel-files">0 / 0</span></div>
+            <div><span class="tel-k">WRITTEN</span><span class="tel-v" id="tel-bytes">0 MB</span></div>
+            <div><span class="tel-k">SPEED</span><span class="tel-v" id="tel-speed">—</span></div>
+            <div><span class="tel-k">ELAPSED</span><span class="tel-v" id="tel-time">0s</span></div>
+          </div>
+
+          <div id="error-banner" class="error-banner hidden"></div>
+          <div id="success-banner" class="success-banner hidden"></div>
+
+          <!-- Primary CTA & Done Actions -->
+          <div class="cta-stack">
+            <button id="btn-start" class="btn btn-primary btn-lg">⚡ Start Export &amp; Verify</button>
+            <div id="done-actions" class="done-actions hidden">
+              <button id="btn-launch-md" class="btn btn-emerald">🩺 Preview in MicroDicom Now</button>
+              <button id="btn-open-dest" class="btn btn-outline">📂 Open Destination Folder</button>
+            </div>
+          </div>
+
+          <!-- Live Activity Log -->
+          <details class="log-box" open>
+            <summary>Live Activity Log</summary>
+            <pre id="activity-log" class="log-pre">Waiting to start…</pre>
+          </details>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script src="exporter.js"></script>
+</body>
+</html>

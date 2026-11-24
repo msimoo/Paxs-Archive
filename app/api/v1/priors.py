@@ -13,10 +13,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sqlalchemy import select
-
-from app.api.v1.deps import get_current_user, require_study_access, tenant_scope
-from app.db.models import Study, User
+from app.api.v1.deps import (
+    get_current_user,
+    get_current_user_any,
+    require_study_access,
+    tenant_scope,
+)
+from app.db.models import User
 from app.db.session import get_db
 from app.services import prior_service
 
@@ -44,17 +47,14 @@ def _match_to_dict(m: prior_service.PriorStudyMatch) -> dict[str, Any]:
 async def get_priors_for_study(
     study_uid: str,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    # V-03: read by the viewer, which authenticates with the HttpOnly session
+    # cookie — bearer-only `get_current_user` answered it 401 (AGENTS.md §7).
+    user: User = Depends(get_current_user_any),
 ):
     """Find relevant prior imaging studies for a given study."""
-    # C04: an *existing* anchor study must be visible to the caller (404 when it
-    # belongs to another tenant), but an unknown UID keeps this endpoint's
-    # historical answer (200 + []) rather than turning into a 404.
-    _known = (
-        await db.execute(select(Study.id).where(Study.study_instance_uid == study_uid))
-    ).scalar_one_or_none()
-    if _known is not None:
-        await require_study_access(db, study_uid, user)
+    # Resolve through the tenant-scoped guard even for missing UIDs, so unknown
+    # and foreign studies produce the same response and cannot be enumerated.
+    await require_study_access(db, study_uid, user)
     _tenant_id, _include_all = tenant_scope(user)
     matches = await prior_service.find_prior_studies(
         db, study_instance_uid=study_uid,

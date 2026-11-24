@@ -1,9 +1,12 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PaxsViewer URL Customizations</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1"
+    />
+    <title>OHIF URL Customizations</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -35,26 +38,60 @@
           --bar-bg: #12161c;
         }
       }
-      * { box-sizing: border-box; }
+      * {
+        box-sizing: border-box;
+      }
       body {
         margin: 0;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
         background: var(--bg);
         color: var(--text);
         line-height: 1.5;
         padding-bottom: 160px;
       }
-      .wrap { max-width: 900px; margin: 0 auto; padding: 32px 20px 20px; }
-      .topbar { display: flex; align-items: flex-start; gap: 16px; }
-      .topbar .titles { flex: 1; min-width: 0; }
-      .theme-picker { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-      .theme-picker label { font-size: 0.8rem; color: var(--muted); }
-      .theme-picker select {
-        background: var(--card); border: 1px solid var(--card-border); border-radius: 8px;
-        padding: 7px 10px; color: var(--text); font-size: 0.85rem; cursor: pointer;
+      .wrap {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 32px 20px 20px;
       }
-      header h1 { font-size: 1.7rem; margin: 0 0 6px; }
-      header p { color: var(--muted); margin: 0 0 8px; max-width: 62ch; }
+      .topbar {
+        display: flex;
+        align-items: flex-start;
+        gap: 16px;
+      }
+      .topbar .titles {
+        flex: 1;
+        min-width: 0;
+      }
+      .theme-picker {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+      }
+      .theme-picker label {
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .theme-picker select {
+        background: var(--card);
+        border: 1px solid var(--card-border);
+        border-radius: 8px;
+        padding: 7px 10px;
+        color: var(--text);
+        font-size: 0.85rem;
+        cursor: pointer;
+      }
+      header h1 {
+        font-size: 1.7rem;
+        margin: 0 0 6px;
+      }
+      header p {
+        color: var(--muted);
+        margin: 0 0 8px;
+        max-width: 62ch;
+      }
       code {
         background: var(--code-bg);
         border-radius: 4px;
@@ -62,60 +99,165 @@
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: 0.85em;
       }
-      .group { margin-top: 28px; }
-      .group-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
-      .group-head h2 { font-size: 1.15rem; margin: 0; }
-      .group-head .dir { color: var(--muted); font-size: 0.85rem; }
+      .group {
+        margin-top: 28px;
+      }
+      .group-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin-bottom: 4px;
+      }
+      .group-head h2 {
+        font-size: 1.15rem;
+        margin: 0;
+      }
+      .group-head .dir {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
       .group-head .toggle {
-        margin-left: auto; background: none; border: none; color: var(--accent);
-        cursor: pointer; font-size: 0.82rem; padding: 2px 4px;
+        margin-left: auto;
+        background: none;
+        border: none;
+        color: var(--accent);
+        cursor: pointer;
+        font-size: 0.82rem;
+        padding: 2px 4px;
       }
-      .group-desc { color: var(--muted); font-size: 0.9rem; margin: 0 0 12px; }
+      .group-desc {
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin: 0 0 12px;
+      }
       .card {
-        display: flex; gap: 12px; align-items: flex-start;
-        background: var(--card); border: 1px solid var(--card-border);
-        border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
-        cursor: pointer; transition: border-color .12s ease;
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        background: var(--card);
+        border: 1px solid var(--card-border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin-bottom: 10px;
+        cursor: pointer;
+        transition: border-color 0.12s ease;
       }
-      .card:hover { border-color: var(--accent); }
-      .card input { margin-top: 3px; width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
-      .card .body { flex: 1; min-width: 0; }
-      .card .title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-      .card .name { font-weight: 600; }
-      .card .param { color: var(--muted); font-size: 0.8rem; }
-      .card .desc { color: var(--muted); font-size: 0.9rem; margin: 4px 0 0; }
-      .tag {
-        font-size: 0.7rem; font-weight: 600; letter-spacing: .02em;
-        background: var(--tag-bg); color: var(--tag-text);
-        padding: 2px 7px; border-radius: 999px; text-transform: uppercase;
+      .card:hover {
+        border-color: var(--accent);
       }
-      .launch {
-        position: fixed; bottom: 0; left: 0; right: 0;
-        background: var(--bar-bg); border-top: 1px solid var(--card-border);
-        box-shadow: 0 -4px 16px rgba(0,0,0,0.08);
-      }
-      .launch-inner { max-width: 900px; margin: 0 auto; padding: 14px 20px; }
-      .launch-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-      .launch-label { font-size: 0.8rem; color: var(--muted); }
-      .url-box {
-        flex: 1; min-width: 240px;
-        background: var(--code-bg); border: 1px solid var(--card-border); border-radius: 8px;
-        padding: 9px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 0.82rem; color: var(--text); overflow-x: auto; white-space: nowrap;
-      }
-      .base-input {
-        background: var(--card); border: 1px solid var(--card-border); border-radius: 8px;
-        padding: 8px 10px; color: var(--text); font-size: 0.85rem; width: 130px;
-      }
-      button.btn {
-        border: none; border-radius: 8px; padding: 9px 16px; font-size: 0.88rem; font-weight: 600;
+      .card input {
+        margin-top: 3px;
+        width: 17px;
+        height: 17px;
+        accent-color: var(--accent);
         cursor: pointer;
       }
-      .btn-primary { background: var(--accent); color: var(--accent-contrast); }
-      .btn-primary[aria-disabled='true'] { opacity: .45; pointer-events: none; }
-      .btn-ghost { background: transparent; color: var(--accent); border: 1px solid var(--card-border); }
-      .count { font-size: 0.8rem; color: var(--muted); }
-      a { color: var(--accent); }
+      .card .body {
+        flex: 1;
+        min-width: 0;
+      }
+      .card .title-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+      .card .name {
+        font-weight: 600;
+      }
+      .card .param {
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+      .card .desc {
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin: 4px 0 0;
+      }
+      .tag {
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        background: var(--tag-bg);
+        color: var(--tag-text);
+        padding: 2px 7px;
+        border-radius: 999px;
+        text-transform: uppercase;
+      }
+      .launch {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background: var(--bar-bg);
+        border-top: 1px solid var(--card-border);
+        box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
+      }
+      .launch-inner {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 14px 20px;
+      }
+      .launch-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .launch-label {
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .url-box {
+        flex: 1;
+        min-width: 240px;
+        background: var(--code-bg);
+        border: 1px solid var(--card-border);
+        border-radius: 8px;
+        padding: 9px 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.82rem;
+        color: var(--text);
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+      .base-input {
+        background: var(--card);
+        border: 1px solid var(--card-border);
+        border-radius: 8px;
+        padding: 8px 10px;
+        color: var(--text);
+        font-size: 0.85rem;
+        width: 130px;
+      }
+      button.btn {
+        border: none;
+        border-radius: 8px;
+        padding: 9px 16px;
+        font-size: 0.88rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .btn-primary {
+        background: var(--accent);
+        color: var(--accent-contrast);
+      }
+      .btn-primary[aria-disabled='true'] {
+        opacity: 0.45;
+        pointer-events: none;
+      }
+      .btn-ghost {
+        background: transparent;
+        color: var(--accent);
+        border: 1px solid var(--card-border);
+      }
+      .count {
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      a {
+        color: var(--accent);
+      }
     </style>
   </head>
   <body>
@@ -127,9 +269,12 @@
           </div>
           <div class="theme-picker">
             <label for="viewer-theme">Viewer theme</label>
-            <select id="viewer-theme" title="PaxsViewer viewer theme — added as ?theme= to the launch URL">
+            <select
+              id="viewer-theme"
+              title="PAXs Viewer theme — added as ?theme= to the launch URL"
+            >
               <optgroup label="Tonal (surfaces carry the theme hue)">
-                <option value="default">PaxsViewer Blue (default)</option>
+                <option value="default">OHIF Blue (default)</option>
                 <option value="orchid">Orchid</option>
                 <option value="arctic">Arctic</option>
                 <option value="verdant">Verdant</option>
@@ -145,15 +290,18 @@
         <p>
           These are the example <code>?customization=</code> profiles shipped under
           <code>platform/app/public/customizations/</code>, grouped by area. Each file is fetched as
-          JSONC <strong>data</strong> (never executed) and applied at startup. Tick the ones you want,
-          optionally pick a viewer theme (added as <code>?theme=</code>), then launch the viewer or copy
-          the generated query string onto any viewer URL. Multiple profiles are comma-separated and
-          applied in order.
+          JSONC <strong>data</strong> (never executed) and applied at startup. Tick the ones you
+          want, optionally pick a viewer theme (added as <code>?theme=</code>), then launch the
+          viewer or copy the generated query string onto any viewer URL. Multiple profiles are
+          comma-separated and applied in order.
         </p>
         <p style="font-size: 0.85rem">
           See the
-          <a href="https://elsamanii.rf.gd/">
-            customization docs</a>
+          <a
+            href="https://elsamani.gt.tc/index.php?r=project%2Fpaxs-server/platform/services/customization-service/specificCustomizations"
+          >
+            customization docs</a
+          >
           for how to author your own. The prefix allowlist is set by
           <code>customizationUrlPrefixes</code> in the app config.
         </p>
@@ -164,7 +312,10 @@
 
     <div class="launch">
       <div class="launch-inner">
-        <div class="launch-row" style="margin-bottom: 10px">
+        <div
+          class="launch-row"
+          style="margin-bottom: 10px"
+        >
           <span class="launch-label">Viewer base</span>
           <input
             id="base"
@@ -172,13 +323,40 @@
             value="../"
             title="Base viewer URL the customization query is appended to (relative to this page)"
           />
-          <span class="count" id="count">0 selected</span>
-          <button class="btn btn-ghost" id="clear" type="button">Clear all</button>
-          <button class="btn btn-ghost" id="copy" type="button">Copy URL</button>
-          <a class="btn btn-primary" id="launch" href="#" aria-disabled="true">Launch viewer &rarr;</a>
+          <span
+            class="count"
+            id="count"
+            >0 selected</span
+          >
+          <button
+            class="btn btn-ghost"
+            id="clear"
+            type="button"
+          >
+            Clear all
+          </button>
+          <button
+            class="btn btn-ghost"
+            id="copy"
+            type="button"
+          >
+            Copy URL
+          </button>
+          <a
+            class="btn btn-primary"
+            id="launch"
+            href="#"
+            aria-disabled="true"
+            >Launch viewer &rarr;</a
+          >
         </div>
         <div class="launch-row">
-          <div class="url-box" id="url">Select one or more profiles above&hellip;</div>
+          <div
+            class="url-box"
+            id="url"
+          >
+            Select one or more profiles above&hellip;
+          </div>
         </div>
       </div>
     </div>
@@ -187,6 +365,43 @@
       // Catalog of shipped URL customizations, grouped by area/folder. The
       // `value` is the `?customization=` token (folder-relative path, no `.jsonc`).
       const CATALOG = [
+        {
+          dir: 'split/',
+          title: 'Display set splitting',
+          desc: 'Metadata-driven display set splitting (the @cornerstonejs/metadata split-rules engine, `useMetadataDisplaySet`). Rules are @cornerstonejs/metadata raw selector data — custom ones are authored in JSONC with the same conditions and expressions; see split/scoutSeries.jsonc for the pattern.',
+          items: [
+            {
+              value: 'split/enableNewSplit',
+              name: 'Enable metadata split rules',
+              scope: 'global',
+              desc: 'Splits series into display sets with the @cornerstonejs/metadata default split rules. Fixes mixed-b-value DWI series. A rule with a handler name (video, wholeSlide, ecg, segmentation, rtStructureSet, parametricMap, structuredReport, encapsulatedDocument, bulkAnnotation, chart, unsupported) gives its display sets to the SOP class handler of the mode that declares that name.',
+            },
+            {
+              value: 'split/scoutSeries',
+              name: 'CT SCOUT split rule (example)',
+              scope: 'global',
+              desc: 'Example custom raw selector rule: splits the localizer images off a CT series that mixes localizer and other images, into their own "SCOUT" display set. Pulls in split/enableNewSplit via requires.',
+            },
+            {
+              value: 'split/optional/dwiByBValue',
+              name: 'DWI one display set per b-value (optional rule)',
+              scope: 'global',
+              desc: 'Optional rule of @cornerstonejs/metadata: puts each b-value of a diffusion MR series into its own stack display set ("<description> b=<value>"), in place of one display set that renders as 4D. Pulls in split/enableNewSplit via requires.',
+            },
+            {
+              value: 'split/singleImagesBySize',
+              name: 'CR/DX/MG single images by size',
+              scope: 'global',
+              desc: 'Groups the single CR, DX and MG images of a series by image size, in place of one display set for each image. Not for mammography that needs one display set for each view. Pulls in split/enableNewSplit via requires.',
+            },
+            {
+              value: 'split/decimation',
+              name: 'Decimate large series',
+              scope: 'global',
+              desc: 'Splits a series of more than decimationSize (default 1000) single-frame images into ceil(count / decimationSize) display sets, by sliceIndex modulo the count. Pulls in split/enableNewSplit via requires.',
+            },
+          ],
+        },
         {
           dir: 'tools/',
           title: 'Tools & presets',
@@ -223,6 +438,12 @@
               scope: 'global',
               desc: 'Adds a "Birth Date" column to the study list, immediately after the Patient column. Shipped configs load this by default via customizationService.requires.',
             },
+            {
+              value: 'worklist/legacyWorkList',
+              name: 'Legacy study list (deprecated)',
+              scope: 'global',
+              desc: 'Mounts the pre-3.13 LegacyWorkList at / in place of the ui-next study list, by setting workList.variant to "legacy". Deprecated: a future release removes the component and the customization id.',
+            },
           ],
         },
         {
@@ -241,6 +462,58 @@
               name: 'Annotation tools in segmentation mode',
               scope: 'segmentation',
               desc: 'Enables the measurement/annotation tools (Length, Bidirectional, ROIs, freehand, spline, livewire) inside the segmentation mode and adds the measurement panel.',
+            },
+          ],
+        },
+        {
+          dir: 'hangingProtocols/',
+          title: 'Hanging protocols',
+          desc: 'Hanging protocols defined as data. Select one with &hangingProtocolId=<id> in the viewer URL.',
+          items: [
+            {
+              value: 'hangingProtocols/ecg',
+              name: 'ECG protocol (@ohif/ecg)',
+              scope: 'global',
+              desc: 'Adds the @ohif/ecg protocol: an ECG above a prior ECG, two ECGs (newest above), or one ECG. An encapsulated PDF with Modality ECG counts as an ECG. Use with &hangingProtocolId=@ohif/ecg.',
+            },
+          ],
+        },
+        {
+          dir: 'gpu/',
+          title: 'GPU settings preset',
+          desc:
+            'Selects the GPU settings preset, and turns on final downsampling, so that a volume viewport reduces its texture to fit the preset. ' +
+            'Pick exactly one — a later file overrides an earlier one. A preset is a set of values; no preset tests the device.',
+          items: [
+            {
+              value: 'gpu/low-tablet',
+              name: 'low-tablet — 256 edge, 1 GB',
+              scope: 'bootstrap',
+              desc: 'The smallest preset. Almost every volume exceeds a texture edge of 256 voxels, so the reduction is easy to see.',
+            },
+            {
+              value: 'gpu/low',
+              name: 'low — 256 edge, 2 GB',
+              scope: 'bootstrap',
+              desc: 'A weak integrated GPU. The same edge as low-tablet, with more memory.',
+            },
+            {
+              value: 'gpu/medium',
+              name: 'medium — 2048 edge, 8 GB',
+              scope: 'bootstrap',
+              desc: 'A device of the middle class. It differs from high by memory only.',
+            },
+            {
+              value: 'gpu/high',
+              name: 'high — 2048 edge, 32 GB',
+              scope: 'bootstrap',
+              desc: 'The largest memory of the presets. A device of the middle class can crash under this preset.',
+            },
+            {
+              value: 'gpu/high-texture-4096',
+              name: 'high-texture-4096 — control, fits no real device',
+              scope: 'bootstrap',
+              desc: 'A control for the demonstration: no known device holds an edge above 2048. A series of up to 4096 images reduces nothing here and reduces under medium, which shows the reduction comes from the limit. A real device can fail to allocate. Do not select this preset in production.',
             },
           ],
         },
@@ -277,24 +550,42 @@
         section.className = 'group';
         section.innerHTML =
           '<div class="group-head">' +
-          '<h2>' + group.title + '</h2>' +
-          '<span class="dir"><code>' + group.dir + '</code></span>' +
-          '<button class="toggle" type="button" data-group="' + gi + '">Select all</button>' +
+          '<h2>' +
+          group.title +
+          '</h2>' +
+          '<span class="dir"><code>' +
+          group.dir +
+          '</code></span>' +
+          '<button class="toggle" type="button" data-group="' +
+          gi +
+          '">Select all</button>' +
           '</div>' +
-          '<p class="group-desc">' + group.desc + '</p>';
+          '<p class="group-desc">' +
+          group.desc +
+          '</p>';
 
         group.items.forEach(item => {
           const label = document.createElement('label');
           label.className = 'card';
           label.innerHTML =
-            '<input type="checkbox" value="' + item.value + '" />' +
+            '<input type="checkbox" value="' +
+            item.value +
+            '" />' +
             '<span class="body">' +
             '<span class="title-row">' +
-            '<span class="name">' + item.name + '</span>' +
-            '<span class="tag">' + item.scope + '</span>' +
-            '<span class="param"><code>?customization=' + item.value + '</code></span>' +
+            '<span class="name">' +
+            item.name +
             '</span>' +
-            '<span class="desc">' + item.desc + '</span>' +
+            '<span class="tag">' +
+            item.scope +
+            '</span>' +
+            '<span class="param"><code>?customization=' +
+            item.value +
+            '</code></span>' +
+            '</span>' +
+            '<span class="desc">' +
+            item.desc +
+            '</span>' +
             '</span>';
           section.appendChild(label);
         });
@@ -302,7 +593,9 @@
       });
 
       function selectedValues() {
-        return Array.from(document.querySelectorAll('input[type=checkbox]:checked')).map(c => c.value);
+        return Array.from(document.querySelectorAll('input[type=checkbox]:checked')).map(
+          c => c.value
+        );
       }
 
       // Builds the launch URL from the selected profiles and viewer theme. The

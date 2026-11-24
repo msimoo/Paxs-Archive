@@ -1,0 +1,35 @@
+{
+  "name": "PAXs Viewer",
+  "short_name": "PAXs",
+  "description": "PAXs Viewer — diagnostic image viewer for the PAXS Archive",
+  "dir": "auto",
+  "lang": "en-US",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "paxs-viewer-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "paxs-viewer-mark-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "paxs-viewer-mark-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "paxs-viewer-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "start_url": "../index.html",
+  "background_color": "#060A12",
+  "display": "standalone",
+  "theme_color": "#060A12"
+}

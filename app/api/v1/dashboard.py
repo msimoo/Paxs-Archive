@@ -6,52 +6,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
-from sqlalchemy import case, delete as sa_delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
 
-from app.core.config import resolve_public_base_url, settings
-from app.services.compression_service import codec_status
-from app.db.models import (
-    AuditLog,
-    ClinicalProtocol,
-    CompressionJob,
-    CriticalResult,
-    DicomNode,
-    Instance,
-    KeyImageNote,
-    LossyCompressionRule,
-    MigrationJob,
-    Patient,
-    PatientShare,
-    PerformedProcedureStep,
-    RadiologyReport,
-    ReplicationRecord,
-    RoutingQueueItem,
-    RoutingRule,
-    ScheduledProcedureStep,
-    Series,
-    StorageCommitRequest,
-    Study,
-    StudyLifecycleRule,
-    Tenant,
-    TriageFlag,
-    User,
-)
-from app.db.session import AsyncSessionLocal, get_db, get_read_db
-from app.services import (
-    query_service,
-    storage_service,
-    tenant_service,
-    thumbnail_service,
-    volume_service,
-)
-from app.services.audit_service import add_audit
 from app.api.v1.deps import (
+    assert_can_delete_studies,
     get_current_user,
     get_current_user_any,
     require_admin,
@@ -61,6 +24,21 @@ from app.api.v1.deps import (
     require_study_access,
     tenant_scope,
 )
+from app.core.config import resolve_public_base_url, settings
+from app.core.concurrency import run_blocking
+from app.db.models import User
+from app.db.session import get_db, get_read_db
+from app.services import (
+    dicom_health_service,
+    dashboard_service,
+    query_service,
+    storage_admin_service,
+    storage_service,
+    thumbnail_service,
+    volume_service,
+)
+from app.services.audit_service import add_audit
+from app.services.compression_service import codec_status
 
 log = logging.getLogger("paxs.api.dashboard")
 
@@ -84,7 +62,7 @@ DIMSE_SERVICES = [
     ("C-MOVE (Study Root)", "1.2.840.10008.5.1.4.1.2.2.2", "SCP + SCU"),
     ("C-ECHO (Verification)", "1.2.840.10008.1.1", "SCP + SCU"),
     ("Modality Worklist (MWL)", "1.2.840.10008.5.1.4.31", "SCP"),
-    ("MPPS", "1.2.840.10008.3.1.2.3.3", "SCP"),
+    ("MPPS", "1.2.840.10008.3.1.2.3.3", "SCP + SCU"),
     ("Storage Commitment", "1.2.840.10008.1.20.1", "SCP + SCU"),
 ]
 
@@ -96,9 +74,9 @@ WEB_SERVICES = [
 ]
 
 
-def _dicom_services_matrix() -> list[dict]:
-    """Live DIMSE service list — enabled when the DIMSE receiver is up."""
-    dimse_on = settings.DICOM_RECEIVER_ENABLED
+def _dicom_services_matrix(dicom_live: bool) -> list[dict]:
+    """DIMSE service list whose enabled state comes from the live probe."""
+    dimse_on = bool(dicom_live)
     return [
         {"name": name, "sop_class": sop, "roles": roles, "enabled": dimse_on}
         for (name, sop, roles) in DIMSE_SERVICES
@@ -114,13 +92,7 @@ def _script_count() -> int:
 
 def _named_backend_count() -> int:
     """Number of registered named storage backends (multi-storage)."""
-    from sqlalchemy import func, select
-
-    from app.db.models import StorageBackendConfig
-    from app.db.session import SyncSessionLocal
-
-    with SyncSessionLocal() as session:
-        return int(session.execute(select(func.count(StorageBackendConfig.id))).scalar_one())
+    return storage_admin_service.named_backend_count_sync()
 
 
 
@@ -134,10 +106,9 @@ async def health_live():
 async def health_ready():
     """Readiness probe — the node can serve traffic (DB reachable)."""
     try:
-        async with AsyncSessionLocal() as s:
-            await s.execute(text("SELECT 1"))
-    except Exception:
-        log.exception("readiness check failed")
+        await dashboard_service.ping_db()
+    except Exception as exc:  # varied DB driver failures must not break liveness reporting
+        log.error("readiness_check_failed error_type=%s", type(exc).__name__)
         return JSONResponse(
             {"status": "unavailable", "instance": settings.PAXS_INSTANCE_ID},
             status_code=503,
@@ -145,38 +116,49 @@ async def health_ready():
     return {"status": "ready", "instance": settings.PAXS_INSTANCE_ID}
 
 
-async def health_payload(request: Request | None = None) -> dict:
-    """The health/status payload.
+def _compression_block() -> dict:
+    """Configured compression method plus per-codec availability.
 
-    ``request`` is **optional** so in-process callers that reuse this shape
-    (``/api/v1/config`` renders it as the read-only block) do not have to
-    synthesise one. When absent, ``public_base_url`` falls back to the
-    configured ``PUBLIC_BASE_URL`` / loopback default instead of the request's
-    host — see ``resolve_public_base_url``.
+    Shared by ``/health`` and ``/stats`` so the two never drift: the dashboard
+    shows what the compression worker can actually use (RLE is built in;
+    JPEG-LS / JPEG2000 / HTJ2K depend on installed codec packages).
     """
-    db_ok = False
-    try:
-        async with AsyncSessionLocal() as s:
-            await s.execute(text("SELECT 1"))
-        db_ok = True
-    except Exception:
-        log.exception("health check failed")
     return {
-        "status": "ok",
-        "app": settings.APP_NAME,
-        "version": settings.APP_VERSION,
-        "instance": settings.PAXS_INSTANCE_ID,
-        # Public base URL the dashboard uses to build absolute viewer/share
-        # deep-links, so they resolve to the same origin regardless of which
-        # host the operator opened the dashboard from (localhost vs 127.0.0.1
-        # vs a reverse-proxy hostname). Never a bind address (V2-2).
-        "public_base_url": resolve_public_base_url(request),
-        "database": "ok" if db_ok else "error",
+        "method": settings.DEFAULT_COMPRESSION,
+        "enabled": settings.COMPRESSION_ENABLED,
+        "codecs": codec_status(),
+    }
+
+
+def _volume_streaming_block() -> dict:
+    """Volume/MIP capability block, shared by ``/health`` and ``/stats``."""
+    return {
+        "enabled": settings.VOLUME_STREAMING_ENABLED,
+        "max_slices": settings.VOLUME_MAX_SLICES,
+        "mpr_slice": settings.VOLUME_STREAMING_ENABLED,
+        "mpr_max_pixels": settings.VOLUME_MPR_MAX_PIXELS,
+        "mip": {
+            "enabled": settings.VOLUME_STREAMING_ENABLED,
+            "endpoint": "/api/v1/volume/{series_uid}/mip",
+            "modes": ["mip", "minip", "average", "vrt"],
+        },
+    }
+
+
+def _fusion_block() -> dict:
+    """PET/CT fusion capability block, shared by ``/health`` and ``/stats``."""
+    return {"enabled": True, "endpoint": "/api/v1/fusion/{study_uid}"}
+
+
+def _connection_blocks(dicom_live: bool | None = None) -> dict:
+    """Where the archive's inbound connections live (no secrets, no paths)."""
+    return {
         "dicom": {
             "ae_title": settings.DICOM_AE_TITLE,
             "host": settings.DICOM_HOST,
             "port": settings.DICOM_PORT,
-            "enabled": settings.DICOM_RECEIVER_ENABLED,
+            "enabled": settings.DICOM_RECEIVER_ENABLED if dicom_live is None else dicom_live,
+            "configured": settings.DICOM_RECEIVER_ENABLED,
         },
         "tls": {
             "enabled": settings.DICOM_TLS_ENABLED,
@@ -195,39 +177,99 @@ async def health_payload(request: Request | None = None) -> dict:
             "backends": _named_backend_count(),
         },
         "fhir": {"enabled": settings.FHIR_ENABLED},
-        "compression": {
-            "method": settings.DEFAULT_COMPRESSION,
-            "enabled": settings.COMPRESSION_ENABLED,
-            # Per-method codec availability — which lossless encoders the
-            # compression worker can actually use (RLE built-in, JPEG-LS /
-            # JPEG2000 / HTJ2K depend on installed codec packages).
-            "codecs": codec_status(),
-        },
-        "volume_streaming": {
-            "enabled": settings.VOLUME_STREAMING_ENABLED,
-            "max_slices": settings.VOLUME_MAX_SLICES,
-            "mpr_slice": settings.VOLUME_STREAMING_ENABLED,
-            "mpr_max_pixels": settings.VOLUME_MPR_MAX_PIXELS,
-            "mip": {
-                "enabled": settings.VOLUME_STREAMING_ENABLED,
-                "endpoint": "/api/v1/volume/{series_uid}/mip",
-                "modes": ["mip", "minip", "average", "vrt"],
-            },
-        },
-        "fusion": {
+    }
+
+
+def _live_web_services() -> list[dict]:
+    """Compute live Web & integration layer status from current runtime settings."""
+    from app.dicom import hl7 as hl7_mod
+
+    hl7_live = getattr(hl7_mod, "_listener", None) is not None
+    webhooks = [u.strip() for u in (settings.WEBHOOK_URLS or "").split(",") if u.strip()]
+    return [
+        {
+            "name": "DICOMweb (QIDO/WADO/STOW)",
+            "detail": f"REST /dicom-web · read={'public' if settings.DICOMWEB_PUBLIC_READ else 'auth'} · write={'public' if settings.DICOMWEB_PUBLIC_WRITE else 'auth'}",
             "enabled": True,
-            "endpoint": "/api/v1/fusion/{study_uid}",
         },
+        {
+            "name": "HL7 MLLP (HIS ADT + ORM)",
+            "detail": f"{settings.HL7_HOST}:{settings.HL7_PORT} ({'TLS' if settings.HL7_TLS_ENABLED else 'plain'} · {'running' if hl7_live else 'stopped'})",
+            "enabled": bool(hl7_live or settings.HL7_ENABLED),
+        },
+        {
+            "name": "HL7 ORU (report → EMR)",
+            "detail": f"{settings.HL7_EMR_HOST}:{settings.HL7_EMR_PORT} ({settings.HL7_EMR_APPLICATION})",
+            "enabled": bool(settings.HL7_EMR_ENABLED),
+        },
+        {
+            "name": "FHIR R4",
+            "detail": "REST /fhir (ImagingStudy, DiagnosticReport, Patient)",
+            "enabled": bool(settings.FHIR_ENABLED),
+        },
+        {
+            "name": "Image Fusion (PET/CT, MR/CT)",
+            "detail": "REST /api/v1/fusion",
+            "enabled": bool(settings.FUSION_ENABLED),
+        },
+        {
+            "name": "Transfer Accelerator (STOW-RS)",
+            "detail": f"{settings.TRANSFER_ACCELERATOR_WORKERS} workers · batch {settings.TRANSFER_ACCELERATOR_BATCH_SIZE}",
+            "enabled": bool(settings.TRANSFER_ACCELERATOR_ENABLED),
+        },
+        {
+            "name": "Webhooks",
+            "detail": f"{len(webhooks)} endpoint(s) configured" if webhooks else "none configured",
+            "enabled": bool(webhooks),
+        },
+    ]
+
+
+def _services_block(dicom_probe: dict) -> dict:
+    """The DIMSE + web service capability matrix."""
+    return {
+        "dicom": _dicom_services_matrix(bool(dicom_probe.get("live"))),
+        "dicom_enabled": bool(dicom_probe.get("live")),
+        "dicom_configured": settings.DICOM_RECEIVER_ENABLED,
+        "dicom_probe": dicom_probe,
+        "tls_enabled": settings.DICOM_TLS_ENABLED,
+        "web": _live_web_services(),
+    }
+
+
+async def health_payload(request: Request | None = None) -> dict:
+    """The health/status payload.
+
+    ``request`` is **optional** so in-process callers that reuse this shape
+    (``/api/v1/config`` renders it as the read-only block) do not have to
+    synthesise one. When absent, ``public_base_url`` falls back to the
+    configured ``PUBLIC_BASE_URL`` / loopback default instead of the request's
+    host — see ``resolve_public_base_url``.
+    """
+    db_ok = False
+    try:
+        await dashboard_service.ping_db()
+        db_ok = True
+    except Exception as exc:  # health payload degrades to database=error for any probe failure
+        log.error("health_check_failed error_type=%s", type(exc).__name__)
+    dicom_probe = await asyncio.to_thread(dicom_health_service.probe_receiver)
+    return {
+        "status": "ok",
+        "app": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "instance": settings.PAXS_INSTANCE_ID,
+        # Public base URL the dashboard uses to build absolute viewer/share
+        # deep-links, so they resolve to the same origin regardless of which
+        # host the operator opened the dashboard from (localhost vs 127.0.0.1
+        # vs a reverse-proxy hostname). Never a bind address (V2-2).
+        "public_base_url": resolve_public_base_url(request),
+        "database": "ok" if db_ok else "error",
+        **_connection_blocks(bool(dicom_probe.get("live"))),
+        "compression": _compression_block(),
+        "volume_streaming": _volume_streaming_block(),
+        "fusion": _fusion_block(),
         "rate_limit_per_minute": settings.RATE_LIMIT_GLOBAL_PER_MINUTE,
-        "services": {
-            "dicom": _dicom_services_matrix(),
-            "dicom_enabled": settings.DICOM_RECEIVER_ENABLED,
-            "tls_enabled": settings.DICOM_TLS_ENABLED,
-            "web": [
-                {"name": name, "detail": detail, "enabled": enabled}
-                for (name, detail, enabled) in WEB_SERVICES
-            ],
-        },
+        "services": _services_block(dicom_probe),
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -242,101 +284,66 @@ async def health(request: Request, user: User = Depends(require_admin)):
 @router.get("/stats")
 async def stats(db: AsyncSession = Depends(get_read_db),
                 user: User = Depends(get_current_user_any)):
-    async def _count(model, *where):
-        stmt = select(func.count(model.id))
-        if where:
-            stmt = stmt.where(*where)
-        return (await db.execute(stmt)).scalar_one()
+    counts = await dashboard_service.entity_counts(db, user)
+    features = await dashboard_service.feature_counts(db, user)
+    features.update(await _feature_blocks(db, features, user))
+    # Physical storage usage is archive-wide; do not disclose it in tenant views.
+    # The cache may walk the storage tree, so keep the sync call off the loop.
+    storage_bytes = None
+    if user.role == "ADMIN":
+        storage_bytes = await run_blocking(
+            storage_service.cached_storage_usage_bytes
+        )
+    return {
+        **counts,
+        "storage_bytes": storage_bytes,
+        "compression": _compression_block(),
+        "features": features,
+    }
 
-    patients = await _count(Patient)
-    studies = await _count(Study)
-    series = await _count(Series)
-    instances = await _count(Instance)
-    users = await _count(User)
-    nodes = await _count(DicomNode)
-    shares = await _count(
-        PatientShare,
-        PatientShare.expires_at >= datetime.now(timezone.utc).replace(tzinfo=None),
-    )
-    pending_jobs = await _count(CompressionJob, CompressionJob.status == "PENDING")
 
-    # Live counters for every completed feature module (workflow A + enterprise B + parallel tracks).
-    worklist = {
-        "scheduled": await _count(ScheduledProcedureStep, ScheduledProcedureStep.status == "SCHEDULED"),
-        "in_progress": await _count(ScheduledProcedureStep, ScheduledProcedureStep.status == "IN PROGRESS"),
-        "completed": await _count(ScheduledProcedureStep, ScheduledProcedureStep.status == "COMPLETED"),
-        "canceled": await _count(ScheduledProcedureStep, ScheduledProcedureStep.status == "CANCELED"),
+async def _feature_blocks(db, features: dict, user: User) -> dict:
+    """The settings-derived and in-process blocks of the ``features`` payload.
+
+    Split out of ``stats`` so the endpoint reads as "count, then report": none
+    of this is a query except the reading-worklist counters, and keeping it
+    inline pushed the handler past the ceiling for no benefit.
+    """
+    dicom_probe = await asyncio.to_thread(dicom_health_service.probe_receiver)
+    return {
+        # Viewer processing distribution (roadmap #51, Phase 5 §5.2). These
+        # counters are in-process module state, not DB rows: they make the
+        # hybrid engine's own inputs observable, so the dashboard can show the
+        # actual load and not just the configuration.
+        "viewer_processing": _viewer_processing_telemetry(),
+        # Radiologist reading worklist (roadmap #30) — Unread / Stat / Dictated.
+        "reading": await dashboard_service.reading_counts(db, user),
+        "scripts": {
+            "count": _script_count(),
+            "enabled": settings.SCRIPTS_ENABLED,
+        },
+        "replication": {
+            "enabled": settings.DR_REPLICATION_ENABLED,
+            "pending": features["replication"]["pending"],
+            "replicated": features["replication"]["replicated"],
+            "failed": features["replication"]["failed"],
+        },
+        "volume_streaming": _volume_streaming_block(),
+        "fusion": _fusion_block(),
+        "dicom_services": {
+            "total": len(DIMSE_SERVICES),
+            "enabled": len(DIMSE_SERVICES) if dicom_probe.get("live") else 0,
+            "configured": settings.DICOM_RECEIVER_ENABLED,
+            "live": bool(dicom_probe.get("live")),
+            "tls": settings.DICOM_TLS_ENABLED,
+        },
     }
-    mpps = {
-        "in_progress": await _count(PerformedProcedureStep, PerformedProcedureStep.status == "IN PROGRESS"),
-        "completed": await _count(PerformedProcedureStep, PerformedProcedureStep.status == "COMPLETED"),
-        "discontinued": await _count(PerformedProcedureStep, PerformedProcedureStep.status == "DISCONTINUED"),
-    }
-    commitments = {
-        "pending": await _count(StorageCommitRequest, StorageCommitRequest.status == "PENDING"),
-        "completed": await _count(StorageCommitRequest, StorageCommitRequest.status == "COMPLETED"),
-        "failed": await _count(StorageCommitRequest, StorageCommitRequest.status == "FAILED"),
-    }
-    critical = {
-        "pending": await _count(CriticalResult, CriticalResult.status == "PENDING_ACK"),
-        "acknowledged": await _count(CriticalResult, CriticalResult.status == "ACKNOWLEDGED"),
-    }
-    routing = {
-        "total": await _count(RoutingRule),
-        "enabled": await _count(RoutingRule, RoutingRule.enabled.is_(True)),
-        "queue_pending": await _count(RoutingQueueItem, RoutingQueueItem.status == "PENDING"),
-        "queue_failed": await _count(RoutingQueueItem, RoutingQueueItem.status == "FAILED"),
-        "queue_completed": await _count(RoutingQueueItem, RoutingQueueItem.status == "COMPLETED"),
-    }
-    lossy = {"rules": await _count(LossyCompressionRule)}
-    lifecycle = {
-        "rules": await _count(StudyLifecycleRule),
-        "archived": await _count(Study, Study.lifecycle_state == "ARCHIVED"),
-        "online": await _count(Study, Study.lifecycle_state == "ONLINE"),
-    }
-    migration = {
-        "total": await _count(MigrationJob),
-        "running": await _count(MigrationJob, MigrationJob.status == "RUNNING"),
-    }
-    kin = {"notes": await _count(KeyImageNote)}
-    triage = {"unreviewed": await _count(TriageFlag, TriageFlag.reviewed.is_(False))}
-    protocols = {"count": await _count(ClinicalProtocol)}
-    audit = {"events": await _count(AuditLog)}
-    # Radiologist reading worklist (roadmap #30) — Unread / Stat / Dictated.
+
+
+def _viewer_processing_telemetry() -> dict:
+    """Live viewer-processing counters, never failing the dashboard."""
     try:
-        from app.services import reading_worklist_service as _rwl
-
-        _r = await _rwl.reader_counts(db, None, include_all=True)
-        reading = {
-            "unread": _r["unread"],
-            "dictated": _r["dictated"],
-            "read": _r["read"],
-            "stat": _r["stat"],
-        }
-    except Exception:  # pragma: no cover — never let stats fail the dashboard
-        log.exception("reading worklist counts failed")
-        reading = {"unread": 0, "dictated": 0, "read": 0, "stat": 0}
-    reports = {
-        "total": await _count(RadiologyReport),
-        "draft": await _count(RadiologyReport, RadiologyReport.status == "DRAFT"),
-        "finalized": await _count(RadiologyReport, RadiologyReport.status == "FINALIZED"),
-        "oru_pending": await _count(RadiologyReport, RadiologyReport.oru_status == "PENDING"),
-        "oru_sent": await _count(RadiologyReport, RadiologyReport.oru_status == "SENT"),
-        "oru_failed": await _count(RadiologyReport, RadiologyReport.oru_status == "FAILED"),
-    }
-    tenants = {
-        "total": await _count(Tenant),
-        "active": await _count(Tenant, Tenant.is_active.is_(True)),
-    }
-
-    # Viewer processing distribution (roadmap #51, Phase 5 §5.2). These counters
-    # are in-process module state, not DB rows: `active_server_sessions` is the
-    # live thin-client count the hybrid engine load-balances on, and
-    # `server_vol_cache_mb` is the currently materialised volume cache. Reading
-    # them here makes the engine's own inputs observable — without this the
-    # dashboard could only show the *configuration*, never the actual load.
-    try:
-        viewer_processing = {
+        return {
             "active_server_sessions": volume_service.active_server_session_count(),
             "server_vol_cache_mb": volume_service.estimated_vol_cache_mb(),
             "configured_mode": settings.VIEWER_PROCESSING_MODE,
@@ -347,89 +354,15 @@ async def stats(db: AsyncSession = Depends(get_read_db),
             "rtt_threshold_ms": settings.HYBRID_RTT_THRESHOLD_MS,
             "role_overrides": _role_override_summary(),
         }
-    except Exception:  # pragma: no cover — never let telemetry fail the dashboard
-        log.exception("viewer processing telemetry failed")
-        viewer_processing = {
+    except Exception as exc:  # dashboard telemetry is best-effort; retain its zero fallback
+        log.error("viewer_telemetry_failed error_type=%s", type(exc).__name__)
+        return {
             "active_server_sessions": 0,
             "server_vol_cache_mb": 0,
             "configured_mode": settings.VIEWER_PROCESSING_MODE,
             "max_server_sessions": settings.HYBRID_MAX_SERVER_MPR_SESSIONS,
             "vol_budget_mb": settings.HYBRID_SERVER_VOL_BUDGET_MB,
         }
-
-    # storage usage walks the storage tree (O(objects)) — serve from the TTL
-    # cache, and never block the event loop on a cold cache (to_thread).
-    storage_bytes = await asyncio.to_thread(
-        storage_service.cached_storage_usage_bytes
-    )
-
-    return {
-        "patients": patients,
-        "studies": studies,
-        "series": series,
-        "instances": instances,
-        "storage_bytes": storage_bytes,
-        "users": users,
-        "nodes": nodes,
-        "active_shares": shares,
-        "pending_jobs": pending_jobs,
-        "compression": {
-            "method": settings.DEFAULT_COMPRESSION,
-            "enabled": settings.COMPRESSION_ENABLED,
-            # Per-method codec availability — which lossless encoders the
-            # compression worker can actually use (RLE built-in, JPEG-LS /
-            # JPEG2000 / HTJ2K depend on installed codec packages).
-            "codecs": codec_status(),
-        },
-        "features": {
-            "dicom_services": {
-                "total": len(DIMSE_SERVICES),
-                "enabled": len(DIMSE_SERVICES) if settings.DICOM_RECEIVER_ENABLED else 0,
-                "tls": settings.DICOM_TLS_ENABLED,
-            },
-            "worklist": worklist,
-            "mpps": mpps,
-            "commitments": commitments,
-            "critical_results": critical,
-            "routing": routing,
-            "lossy_compression": lossy,
-            "lifecycle": lifecycle,
-            "migration": migration,
-            "kin": kin,
-            "triage": triage,
-            "protocols": protocols,
-            "audit": audit,
-            "tenants": tenants,
-            "reports": reports,
-            "reading": reading,
-            "scripts": {
-                "count": _script_count(),
-                "enabled": settings.SCRIPTS_ENABLED,
-            },
-            "replication": {
-                "enabled": settings.DR_REPLICATION_ENABLED,
-                "pending": await _count(ReplicationRecord, ReplicationRecord.status == "PENDING"),
-                "replicated": await _count(ReplicationRecord, ReplicationRecord.status == "REPLICATED"),
-                "failed": await _count(ReplicationRecord, ReplicationRecord.status == "FAILED"),
-            },
-            "volume_streaming": {
-                "enabled": settings.VOLUME_STREAMING_ENABLED,
-                "max_slices": settings.VOLUME_MAX_SLICES,
-                "mpr_slice": settings.VOLUME_STREAMING_ENABLED,
-                "mpr_max_pixels": settings.VOLUME_MPR_MAX_PIXELS,
-                "mip": {
-                    "enabled": settings.VOLUME_STREAMING_ENABLED,
-                    "endpoint": "/api/v1/volume/{series_uid}/mip",
-                    "modes": ["mip", "minip", "average", "vrt"],
-                },
-            },
-            "fusion": {
-                "enabled": True,
-                "endpoint": "/api/v1/fusion/{study_uid}",
-            },
-            "viewer_processing": viewer_processing,
-        },
-    }
 
 
 def _role_override_summary() -> dict:
@@ -459,306 +392,35 @@ async def list_audit(limit: int = 60, db: AsyncSession = Depends(get_db),
     Admin/radiologist only — the trail exposes SOP/study UIDs and file
     fingerprints, so it is gated behind require_destructive_role.
     """
-    rows = (
-        await db.execute(
-            select(AuditLog)
-            .order_by(AuditLog.id.desc())
-            .limit(min(max(limit, 1), 200))
-        )
-    ).scalars().all()
-    return [
-        {
-            "id": e.id,
-            "action": e.action,
-            "sop_instance_uid": e.sop_instance_uid,
-            "study_instance_uid": e.study_instance_uid,
-            "sha256": e.sha256_hash,
-            "performed_by": e.performed_by,
-            "performed_at": e.performed_at.isoformat() if e.performed_at else None,
-        }
-        for e in rows
-    ]
+    tenant_id, include_all = tenant_scope(user)
+    return await dashboard_service.list_audit(db, limit, tenant_id, include_all)
 
 
 @router.get("/studies")
 async def list_studies(request: Request, db: AsyncSession = Depends(get_read_db),
                       user: User = Depends(get_current_user_any)):
-    params = dict(request.query_params)
-    page = max(int(params.get("page", 1)), 1)
-    limit = min(max(int(params.get("limit", 20)), 1), 100)
-    search = params.get("search", "").strip()
-    modality = params.get("modality", "").strip()
-    date_from = params.get("from", "").strip()
-    date_to = params.get("to", "").strip()
-    sort = params.get("sort", "date").strip().lower() or "date"
-    order = params.get("order", "desc").strip().lower()
-    state_filter = params.get("state", "").strip().upper()
-    show_critical = params.get("critical", "").strip().lower() in ("1", "true")
-    show_reported = params.get("reported", "").strip().lower() in ("1", "true")
-    show_oru = params.get("oru", "").strip().lower() in ("1", "true")
-    show_his = params.get("his", "").strip().lower() in ("1", "true")
-
-    base = select(Study).options(joinedload(Study.patient)).join(Patient, Study.patient_id == Patient.id)
-    count_stmt = select(func.count(Study.id)).join(Patient, Study.patient_id == Patient.id)
-
-    # VNA scope: admins see every tenant (plus an optional ?tenant= filter);
-    # other signed-in users see their own tenant's studies; guests see the
-    # legacy unscoped data only (pre-VNA archives keep working unchanged).
-    tenant_id, include_all = tenant_service.scope_from_user(user)
-    if not include_all:
-        cond = (Study.tenant_id.is_(None) if tenant_id is None
-                else Study.tenant_id == tenant_id)
-        base = base.where(cond)
-        count_stmt = count_stmt.where(cond)
-    elif user is not None and params.get("tenant"):
-        t = params.get("tenant", "").strip()
-        if t.isdigit():
-            base = base.where(Study.tenant_id == int(t))
-            count_stmt = count_stmt.where(Study.tenant_id == int(t))
-        elif t.lower() in ("none", "null"):
-            base = base.where(Study.tenant_id.is_(None))
-            count_stmt = count_stmt.where(Study.tenant_id.is_(None))
-
-    if search:
-        like = f"%{search}%"
-        cond = or_(
-            Patient.patient_name.like(like),
-            Patient.patient_id.like(like),
-            Study.study_description.like(like),
-            Study.accession_number.like(like),
-        )
-        base = base.where(cond)
-        count_stmt = count_stmt.where(cond)
-    if modality:
-        sub = select(Series.study_id).where(Series.modality == modality)
-        base = base.where(Study.id.in_(sub))
-        count_stmt = count_stmt.where(Study.id.in_(sub))
-    if date_from and date_to:
-        base = base.where(Study.study_date.between(date_from, date_to))
-        count_stmt = count_stmt.where(Study.study_date.between(date_from, date_to))
-    elif date_from:
-        base = base.where(Study.study_date >= date_from)
-        count_stmt = count_stmt.where(Study.study_date >= date_from)
-    elif date_to:
-        base = base.where(Study.study_date <= date_to)
-        count_stmt = count_stmt.where(Study.study_date <= date_to)
-
-    # --- per-status counters (respect all filters except the state/critical
-    # toggles themselves, so the chips work as independent filters) ---
-    # Subqueries shared by the counters and their toggle filters (single
-    # source of truth — they can never drift apart).
-    finalized_ids = select(RadiologyReport.study_id).where(
-        RadiologyReport.status == "FINALIZED")
-    oru_sent_ids = select(RadiologyReport.study_id).where(
-        RadiologyReport.oru_status == "SENT")
-    counts = {
-        "total": (await db.execute(count_stmt)).scalar_one(),
-        "online": (await db.execute(
-            count_stmt.where(Study.lifecycle_state == "ONLINE")
-        )).scalar_one(),
-        "archived": (await db.execute(
-            count_stmt.where(Study.lifecycle_state == "ARCHIVED")
-        )).scalar_one(),
-        "critical": (await db.execute(
-            count_stmt.where(Study.study_instance_uid.in_(
-                select(TriageFlag.study_instance_uid)
-            ))
-        )).scalar_one(),
-        # Studies with a finalized radiology report (E2 — HL7 ORU).
-        "reported": (await db.execute(
-            count_stmt.where(Study.id.in_(finalized_ids))
-        )).scalar_one(),
-        # Of those, the ones whose ORU^R01 was delivered to the EMR.
-        "oru_sent": (await db.execute(
-            count_stmt.where(Study.id.in_(oru_sent_ids))
-        )).scalar_one(),
-        # Studies whose patient was registered by the hospital HIS (HL7 ADT).
-        "his": (await db.execute(
-            count_stmt.where(Patient.source == "his")
-        )).scalar_one(),
-    }
-
-    if state_filter:
-        base = base.where(Study.lifecycle_state == state_filter)
-        count_stmt = count_stmt.where(Study.lifecycle_state == state_filter)
-    if show_critical:
-        tri = Study.study_instance_uid.in_(select(TriageFlag.study_instance_uid))
-        base = base.where(tri)
-        count_stmt = count_stmt.where(tri)
-    if show_reported:
-        rep_ids = Study.id.in_(finalized_ids)
-        base = base.where(rep_ids)
-        count_stmt = count_stmt.where(rep_ids)
-    if show_oru:
-        oru_ids = Study.id.in_(oru_sent_ids)
-        base = base.where(oru_ids)
-        count_stmt = count_stmt.where(oru_ids)
-    if show_his:
-        his_cond = Patient.source == "his"
-        base = base.where(his_cond)
-        count_stmt = count_stmt.where(his_cond)
-
-    total = (await db.execute(count_stmt)).scalar_one()
-
-    # --- sorting ---
-    if sort == "patient":
-        col = Patient.patient_name
-        base = base.order_by(col.is_(None), col.asc() if order == "asc" else col.desc(), Study.id.desc())
-    elif sort == "accession":
-        col = Study.accession_number
-        base = base.order_by(col.is_(None), col.asc() if order == "asc" else col.desc(), Study.id.desc())
-    elif sort == "series":
-        sub = (select(Series.study_id, func.count(Series.id).label("n"))
-               .group_by(Series.study_id)).subquery()
-        base = base.outerjoin(sub, sub.c.study_id == Study.id)
-        n = sub.c.n
-        base = base.order_by(n.is_(None), n.asc() if order == "asc" else n.desc(), Study.id.desc())
-    elif sort == "instances":
-        sub = (select(Series.study_id, func.count(Instance.id).label("n"))
-               .join(Instance, Instance.series_id == Series.id)
-               .group_by(Series.study_id)).subquery()
-        base = base.outerjoin(sub, sub.c.study_id == Study.id)
-        n = sub.c.n
-        base = base.order_by(n.is_(None), n.asc() if order == "asc" else n.desc(), Study.id.desc())
-    elif sort == "modality":
-        # Sort by the study's first (alphabetically smallest) modality code.
-        sub = (select(Series.study_id, func.min(Series.modality).label("m"))
-               .group_by(Series.study_id)).subquery()
-        base = base.outerjoin(sub, sub.c.study_id == Study.id)
-        m = sub.c.m
-        base = base.order_by(m.is_(None), m.asc() if order == "asc" else m.desc(), Study.id.desc())
-    elif sort == "created":
-        base = base.order_by(Study.created_at.is_(None),
-                             Study.created_at.asc() if order == "asc" else Study.created_at.desc(),
-                             Study.id.desc())
-    else:  # date (default)
-        base = base.order_by(Study.study_date.is_not(None).desc(),
-                             Study.study_date.asc() if order == "asc" else Study.study_date.desc(),
-                             Study.id.desc())
-
-    studies = (
-        await db.execute(
-            base.limit(limit).offset((page - 1) * limit)
-        )
-    ).scalars().unique().all()
-
-    study_ids = [s.id for s in studies]
-    agg = await query_service.study_aggregates(db, study_ids)
-    tenant_names = await tenant_service.get_tenant_names(db)
-    # First series (lowest id) of every study in a single query (no N+1).
-    first_series_rows = (
-        await db.execute(
-            select(Series.study_id, Series.series_instance_uid)
-            .where(Series.study_id.in_(study_ids))
-            .order_by(Series.id)
-        )
-    ).all()
-    first_by_study: dict[int, str] = {}
-    for sid, series_uid in first_series_rows:
-        first_by_study.setdefault(sid, series_uid)
-
-    # Report state per study (row badge: draft / finalized / EMR delivery).
-    report_rows = (
-        await db.execute(
-            select(RadiologyReport.study_id, RadiologyReport.id,
-                   RadiologyReport.status, RadiologyReport.oru_status)
-            .where(RadiologyReport.study_id.in_(study_ids))
-        )
-    ).all()
-    report_by_study = {r.study_id: r for r in report_rows}
-
-    items = []
-    for s in studies:
-        a = agg.get(s.id, {})
-        first_series_uid = first_by_study.get(s.id)
-        rep = report_by_study.get(s.id)
-        thumb = None
-        if first_series_uid is not None:
-            thumb = f"/api/v1/studies/{s.study_instance_uid}/series/{first_series_uid}/thumbnail.png"
-        items.append({
-            "study_uid": s.study_instance_uid,
-            "patient_name": s.patient.patient_name,
-            "patient_id": s.patient.patient_id,
-            "patient_source": s.patient.source,
-            # C07: real demographics for the study drawer (never fabricated).
-            "patient_birth_date": s.patient.patient_birth_date if s.patient else None,
-            "patient_sex": s.patient.patient_sex if s.patient else None,
-            "tenant_id": s.tenant_id,
-            "tenant_name": tenant_names.get(s.tenant_id),
-            "study_date": s.study_date,
-            "study_time": s.study_time,
-            "description": s.study_description,
-            "accession": s.accession_number,
-            "modalities": a.get("modalities", []),
-            "n_series": a.get("series", 0),
-            "n_instances": a.get("instances", 0),
-            "created_at": s.created_at.isoformat() if s.created_at else None,
-            "lifecycle_state": s.lifecycle_state,
-            "thumbnail": thumb,
-            # Radiology report state (badge on the row).
-            "report_id": rep.id if rep else None,
-            "report_status": rep.status if rep else None,
-            "oru_status": rep.oru_status if rep else None,
-        })
-    return {
-        "items": items,
-        "total": total,
-        "page": page,
-        "limit": limit,
-        "sort": sort,
-        "order": order,
-        "counts": counts,
-    }
+    filters = dashboard_service.StudyFilters.from_query(dict(request.query_params))
+    return await dashboard_service.list_studies(db, user, filters)
 
 
 @router.get("/triage")
 async def list_triage(db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user_any)):
-    """Unreviewed triage findings across the archive (emergency queue)."""
-    # Severity must sort HIGH -> MEDIUM -> LOW (alphabetical would put
-    # MEDIUM before HIGH).
-    severity_rank = case(
-        (TriageFlag.severity == "HIGH", 0),
-        (TriageFlag.severity == "MEDIUM", 1),
-        (TriageFlag.severity == "LOW", 2),
-        else_=3,
+    """List emergency findings visible in the caller's tenant scope."""
+    tenant_id, include_all = tenant_scope(user)
+    return await dashboard_service.list_triage(
+        db, tenant_id=tenant_id, include_all=include_all
     )
-    flags = (
-        await db.execute(
-            select(TriageFlag, Study.study_instance_uid, Study.study_date,
-                   Patient.patient_name, Patient.patient_id)
-            .join(Study, Study.study_instance_uid == TriageFlag.study_instance_uid)
-            .join(Patient, Patient.id == Study.patient_id)
-            .where(TriageFlag.reviewed.is_(False))
-            .order_by(severity_rank, TriageFlag.created_at.desc())
-            .limit(50)
-        )
-    ).all()
-    return [
-        {
-            "id": f.id,
-            "finding": f.finding,
-            "severity": f.severity,
-            "confidence": f.confidence,
-            "summary": f.summary,
-            "detector": f.detector,
-            "created_at": f.created_at.isoformat() if f.created_at else None,
-            "study_uid": study_uid,
-            "study_date": study_date,
-            "patient_name": patient_name,
-            "patient_id": patient_id,
-        }
-        for (f, study_uid, study_date, patient_name, patient_id) in flags
-    ]
 
 
 @router.post("/triage/{flag_id}/review", status_code=200)
 async def review_triage(flag_id: int, db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user_any)):
-    """Mark a triage finding as reviewed (seen by a clinician)."""
-    flag = (
-        await db.execute(select(TriageFlag).where(TriageFlag.id == flag_id))
-    ).scalar_one_or_none()
+    """Mark a visible triage finding as reviewed (seen by a clinician)."""
+    tenant_id, include_all = tenant_scope(user)
+    flag = await dashboard_service.get_triage_flag(
+        db, flag_id, tenant_id=tenant_id, include_all=include_all
+    )
     if flag is None:
         raise HTTPException(404, "Triage flag not found")
     flag.reviewed = True
@@ -770,21 +432,39 @@ async def study_detail(study_uid: str, db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user_any)):
     # C04: direct UID access must respect the tenant boundary.
     study = await require_study_access(db, study_uid, user)
-    study = (
-        await db.execute(
-            select(Study).options(joinedload(Study.patient))
-            .where(Study.id == study.id)
-        )
-    ).scalar_one()
+    study = await dashboard_service.reload_study(db, study)
+    series_list = await dashboard_service.series_of_study(db, study.id)
+    counts = await query_service.series_instance_counts(
+        db, [s.id for s in series_list]
+    )
+    return _study_detail_payload(study_uid, study, series_list, counts)
 
-    series_list = (
-        await db.execute(
-            select(Series).where(Series.study_id == study.id)
-            .order_by(Series.series_number.is_not(None).desc(), Series.series_number, Series.id)
-        )
-    ).scalars().all()
-    counts = await query_service.series_instance_counts(db, [s.id for s in series_list])
 
+def _series_row(study_uid: str, series, count: int) -> dict:
+    """One series row for the study drawer, with its thumbnail deep-link."""
+    return {
+        "series_uid": series.series_instance_uid,
+        "modality": series.modality,
+        "series_number": series.series_number,
+        "description": series.series_description,
+        "body_part": series.body_part_examined,
+        "instances": count,
+        "thumbnail": (
+            f"/api/v1/studies/{study_uid}/series"
+            f"/{series.series_instance_uid}/thumbnail.png"
+            if count else None
+        ),
+    }
+
+
+def _study_detail_payload(study_uid: str, study, series_list: list,
+                          counts: dict) -> dict:
+    """The study-drawer response: patient, study and per-series rows.
+
+    ``study_uid`` is the request's spelling, kept verbatim for the thumbnail
+    URLs exactly as before the split (a MySQL case-insensitive match can accept
+    a UID that differs in case from the stored one).
+    """
     return {
         "study_uid": study.study_instance_uid,
         "patient": {
@@ -803,19 +483,7 @@ async def study_detail(study_uid: str, db: AsyncSession = Depends(get_db),
             "referring_physician": study.referring_physician,
         },
         "series": [
-            {
-                "series_uid": s.series_instance_uid,
-                "modality": s.modality,
-                "series_number": s.series_number,
-                "description": s.series_description,
-                "body_part": s.body_part_examined,
-                "instances": counts.get(s.id, 0),
-                "thumbnail": (
-                    f"/api/v1/studies/{study_uid}/series/{s.series_instance_uid}/thumbnail.png"
-                    if counts.get(s.id, 0) else None
-                ),
-            }
-            for s in series_list
+            _series_row(study_uid, s, counts.get(s.id, 0)) for s in series_list
         ],
     }
 
@@ -826,14 +494,9 @@ async def series_instances(study_uid: str, series_uid: str, db: AsyncSession = D
     # C04: series-addressed access resolves through the study's tenant.
     await require_series_access(db, series_uid, user)
     tenant_id, include_all = tenant_scope(user)
-    instances = (
-        await db.execute(
-            query_service.instance_query(
-                study_uid, series_uid, tenant_id=tenant_id, include_all=include_all
-            )
-            .order_by(Instance.instance_number.is_not(None).desc(), Instance.instance_number, Instance.id)
-        )
-    ).scalars().all()
+    instances = await dashboard_service.instances_of_series(
+        db, study_uid, series_uid, tenant_id, include_all
+    )
     return [
         {
             "sop_uid": i.sop_instance_uid,
@@ -854,15 +517,10 @@ async def series_thumbnail(study_uid: str, series_uid: str,
                            user: User = Depends(get_current_user_any)):
     await require_series_access(db, series_uid, user)
     tenant_id, include_all = tenant_scope(user)
-    inst = (
-        await db.execute(
-            query_service.instance_query(
-                study_uid, series_uid, tenant_id=tenant_id, include_all=include_all
-            )
-            .order_by(Instance.instance_number.is_not(None).desc(), Instance.instance_number, Instance.id)
-            .limit(1)
-        )
-    ).scalars().first()
+    rows = await dashboard_service.instances_of_series(
+        db, study_uid, series_uid, tenant_id, include_all, limit=1
+    )
+    inst = rows[0] if rows else None
     if inst is None:
         raise HTTPException(404, "No instances in series")
 
@@ -877,7 +535,14 @@ async def series_thumbnail(study_uid: str, series_uid: str,
             backend_name=inst.storage_backend,
         )
         if not ok:
-            raise HTTPException(422, "Could not generate thumbnail")
+            # A preview is optional UI decoration; unsupported/corrupt pixel
+            # data must not turn a study-list image request into a client error
+            # or be replaced with a misleading synthetic medical image.
+            return Response(
+                content=thumbnail_service.empty_thumbnail_png(),
+                media_type="image/png",
+                headers={"Cache-Control": "no-store"},
+            )
     data = await asyncio.to_thread(
         storage_service.read_bytes, thumb, backend_name=inst.storage_backend
     )
@@ -911,31 +576,198 @@ async def presign_instance(study_uid: str, series_uid: str, sop_uid: str,
     }
 
 
+def _effective_backend(inst, study_backend: str | None) -> str | None:
+    """The backend that actually holds ``inst``'s object (A-20).
+
+    ``instances.storage_backend`` is per row; a study can span backends after
+    replication or tiering. Rows that predate per-instance attribution fall back
+    to the study's backend.
+    """
+    return getattr(inst, "storage_backend", None) or study_backend
+
+
+def _fingerprint_instances(rows, study_backend: str | None) -> list[str | None]:
+    """SHA-256 of each instance object, read from the backend that holds it.
+
+    ``rows`` is ``(sop_instance_uid, file_path, size, backend_name)`` tuples —
+    plain values rather than ORM instances, because this runs on a worker thread
+    and after the session's read transaction has been closed.
+
+    Runs off the event loop (C-22): hashing a study means reading every object
+    off disk (or S3), which must never happen on the loop that serves other
+    viewers' pixel fetches. A missing or unreadable object yields ``None`` — the
+    delete is idempotent, so the audit row is still written, just without a
+    fingerprint.
+
+    N-2: the warning names the SOP Instance UID and the exception type, never
+    the object path (a legacy absolute path can carry PHI).
+    """
+    out: list[str | None] = []
+    for sop_uid, file_path, _size, backend_name in rows:
+        try:
+            out.append(
+                storage_service.sha256_of(
+                    file_path, backend_name=backend_name or study_backend
+                )
+            )
+        except (OSError, storage_service.StorageError) as exc:
+            log.warning(
+                "audit fingerprint unavailable for %s (%s)",
+                sop_uid, type(exc).__name__,
+            )
+            out.append(None)
+    return out
+
+
 @router.delete("/studies/{study_uid}", status_code=204)
 async def delete_study(study_uid: str, db: AsyncSession = Depends(get_db),
                        user=Depends(require_destructive_role)):
-    # C04: a destructive role authorises the *action*, not another tenant's data.
+    """Permanently delete a study, its series, instances and stored objects.
+
+    **ADMIN only.** ``require_destructive_role`` is the outer gate (it keeps the
+    PHYSICIAN case a flat 403 before any lookup); the ADMIN narrowing happens
+    *after* the tenant-scoped study lookup so an out-of-scope UID still answers
+    404 rather than 403 (N-1) — see :func:`deps.assert_can_delete_studies`.
+    """
+    study = await _authorize_delete(db, study_uid, user)
+    plan = _delete_plan(study, await dashboard_service.instances_of_study(db, study.id))
+
+    # Close the read transaction before touching storage: crediting a quota
+    # opens its OWN sync connection, and under SQLite's rollback-journal mode an
+    # open reader blocks that writer outright ("database is locked"), which left
+    # the counters high. Nothing has been written yet, so no work is discarded.
+    await db.commit()
+
+    # C-22: fingerprinting reads and hashes every object — off the event loop.
+    study.lifecycle_state = "PURGING"
+    await db.commit()
+    digests = await asyncio.to_thread(
+        _fingerprint_instances, plan.rows, plan.study_backend
+    )
+    try:
+        await asyncio.to_thread(_release_objects, study_uid, plan)
+    except Exception as exc:  # noqa: BLE001 - storage backends fail with driver-specific exceptions
+        # Keep metadata as a retryable marker when storage is unavailable or a
+        # recursive cleanup fails after only part of the study was removed.
+        log.error(
+            "study_delete_storage_failed study_uid=%s error_type=%s",
+            study_uid, type(exc).__name__,
+        )
+        raise HTTPException(
+            409, "Study objects could not be deleted; metadata was kept for retry"
+        ) from None
+
+    for (sop_uid, _path, _size, _bk), digest in zip(plan.rows, digests, strict=True):
+        # The hash was computed on the worker thread above; passing it in (and
+        # omitting file_path) keeps add_audit from hashing again on the loop.
+        add_audit(db, sop_uid, "DELETED", performed_by=user.username,
+                  study_instance_uid=study_uid, sha256=digest)
+
+    await dashboard_service.delete_study_rows(
+        db, study_id=plan.study_id, study_uid=study_uid,
+        delete_signed_reports=True, performed_by=user.username,
+    )
+    _defer_study_deleted(db, study_uid, user.username)
+
+
+async def _authorize_delete(db, study_uid: str, user):
+    """Gate a study delete: in-scope and ADMIN-only.
+
+    C04: a destructive role authorises the *action*, not another tenant's data,
+    so the tenant-scoped lookup runs first and ``assert_can_delete_studies``
+    (ADMIN-only) second — an out-of-scope UID is a 404, never a 403 (N-1).
+
+    Signed reports are deleted later in the same ADMIN-only transaction as the
+    study row. Other roles never reach that path.
+    """
     study = await require_study_access(db, study_uid, user)
+    assert_can_delete_studies(user)
+    return study
 
-    instances = (
-        await db.execute(select(Instance).where(Instance.series_id.in_(
-            select(Series.id).where(Series.study_id == study.id)
-        )))
-    ).scalars().all()
 
-    for inst in instances:
-        add_audit(db, inst.sop_instance_uid, "DELETED", performed_by=user.username,
-                  study_instance_uid=study_uid, file_path=inst.file_path)
+@dataclass(frozen=True)
+class _DeletePlan:
+    """Everything the storage phase needs, snapshotted as plain values.
 
-    # Remove triage flags for this study (they are keyed by UID, not FK).
-    await db.execute(sa_delete(TriageFlag).where(
-        TriageFlag.study_instance_uid == study_uid))
+    The values are copied out before ``db.commit()`` because that boundary
+    expires the ORM objects, and the storage work runs on a worker thread.
+    """
 
-    storage_service.delete_study_files(study_uid, backend_name=study.storage_backend)
-    storage_service.invalidate_usage_cache(backend_name=study.storage_backend)
-    await db.delete(study)
+    study_id: int
+    study_backend: str | None
+    study_tenant: int | None
+    #: ``(sop_instance_uid, file_path, size, backend_name)`` per instance.
+    rows: list[tuple[str, str, int, str | None]]
+    #: backend name -> ``[(file_path, size), …]``
+    by_backend: dict[str | None, list[tuple[str, int]]]
 
-    # Custom server scripts hook
+
+def _delete_plan(study, instances: list) -> _DeletePlan:
+    """Group a study's objects by the backend that actually holds each one.
+
+    A-20: an archive can keep one study's instances on several backends
+    (replication targets, tiering), and the effective backend is per row —
+    ``instances.storage_backend``, falling back to the study's for rows that
+    predate per-instance attribution. Deleting only ``study.storage_backend``
+    left every secondary-backend object on disk as orphaned PHI and credited the
+    quota release to the wrong store.
+    """
+    study_backend = study.storage_backend
+    rows = [
+        (inst.sop_instance_uid, inst.file_path,
+         int(inst.file_size_bytes or 0), _effective_backend(inst, study_backend))
+        for inst in instances
+    ]
+    by_backend: dict[str | None, list[tuple[str, int]]] = {}
+    for sop_uid, file_path, size, backend_name in rows:
+        if file_path:
+            by_backend.setdefault(backend_name, []).append((file_path, size))
+        # Thumbnails live in `.thumbnails/`, outside the study prefix. Include
+        # them explicitly so an admin delete cannot leave derived PHI behind.
+        if sop_uid:
+            by_backend.setdefault(backend_name, []).append(
+                (storage_service.thumbnail_key(sop_uid), 0)
+            )
+    return _DeletePlan(
+        study_id=study.id,
+        study_backend=study_backend,
+        study_tenant=study.tenant_id,
+        rows=rows,
+        by_backend=by_backend,
+    )
+
+
+def _release_objects(study_uid: str, plan: _DeletePlan) -> int:
+    """Unlink every object, crediting each backend its own bytes (C-17 + A-20).
+
+    Deleting before the row deletes is the idempotent order: if the DB work
+    fails, a retry finds the objects already gone, ``delete_file`` credits
+    nothing (it measures before unlinking), and the rows are removed — the retry
+    converges instead of double-crediting the same bytes.
+    """
+    released = 0
+    for backend_name, objects in plan.by_backend.items():
+        released += storage_service.delete_study_files(
+            study_uid, backend_name=backend_name,
+            objects=objects, tenant_id=plan.study_tenant,
+        )
+        storage_service.invalidate_usage_cache(backend_name=backend_name)
+    return released
+
+
+def _defer_study_deleted(db, study_uid: str, performed_by: str) -> None:
+    """Announce the delete only if this transaction commits (C-22).
+
+    Firing the hook inline announced "StudyDeleted" for a delete that a failed
+    commit then rolled back — subscribers archived/purged a study that still
+    existed. ``defer_after_commit`` runs it on the commit ``get_db`` performs and
+    drops it on rollback.
+    """
     from app.services.scripting_service import fire as script_fire
 
-    script_fire("StudyDeleted", study_uid=study_uid, performed_by=user.username)
+    storage_service.defer_after_commit(
+        db,
+        lambda: script_fire(
+            "StudyDeleted", study_uid=study_uid, performed_by=performed_by
+        ),
+    )

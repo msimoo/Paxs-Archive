@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -78,14 +79,15 @@ def scan_and_import_folder_sync(
                 try:
                     file_p.unlink()
                 except OSError as exc:
-                    log.warning("Failed to delete imported file %s: %s", file_p, exc)
+                    log.warning("migration_source_cleanup_failed error_type=%s",
+                                type(exc).__name__)
 
         except Exception as exc:
             # Not a valid DICOM file or store error
             failed += 1
-            err_msg = f"{file_p.name}: {exc}"
-            errors.append(err_msg)
-            log.debug("Skipping/Failed file %s: %s", file_p, exc)
+            errors.append(f"File import failed (error_type={type(exc).__name__}).")
+            log.debug("migration_file_import_failed error_type=%s",
+                      type(exc).__name__)
 
     return {
         "total": len(candidate_files),
@@ -151,15 +153,19 @@ async def run_folder_migration(job_id: int, folder_path: str, delete_after: bool
                 job.finished_at = datetime.utcnow()
                 await session.commit()
 
-    except Exception as exc:
-        log.exception("Folder migration job %d failed", job_id)
+    except Exception as exc:  # job failure is recorded without retaining exception data
+        log.error("folder_migration_job_failed job_id=%s error_type=%s",
+                  job_id, type(exc).__name__)
         async with AsyncSessionLocal() as session:
             job = (
                 await session.execute(select(MigrationJob).where(MigrationJob.id == job_id))
             ).scalar_one_or_none()
             if job:
                 job.status = "FAILED"
-                job.error_message = str(exc)
+                job.error_message = (
+                    "Folder migration failed. Review server diagnostics for the "
+                    "job; patient and filesystem details are omitted."
+                )
                 job.finished_at = datetime.utcnow()
                 await session.commit()
 
@@ -207,22 +213,32 @@ async def run_cmove_migration(
             # Execute C-MOVE via threadpool executor
             res = await loop.run_in_executor(
                 None,
-                send_move,
-                node.host,
-                node.port,
-                node.ae_title,
-                settings.DICOM_AE_TITLE,
-                query_ds,
+                partial(
+                    send_move,
+                    node.host,
+                    node.port,
+                    node.ae_title,
+                    settings.DICOM_AE_TITLE,
+                    query_ds,
+                    # B-16: the migration source is a TLS peer like any other;
+                    # its pinned certificate is the trust anchor for the SCU.
+                    trust_cert=getattr(node, "trust_cert", None),
+                ),
             )
 
             if res.get("ok"):
                 processed += 1
             else:
                 failed += 1
-                errors.append(f"Study {st_uid}: {res.get('reason', res.get('status'))}")
-        except Exception as exc:
+                errors.append(f"Study {st_uid}: remote retrieval failed.")
+        except Exception as exc:  # noqa: BLE001 - boundary guard: one study must not abort the C-MOVE job
+            # The job keeps going and the per-study reason is reported to the
+            # operator; the log stays type-only (the message can carry a path).
+            log.warning("migration_study_failed error_type=%s", type(exc).__name__)
             failed += 1
-            errors.append(f"Study {st_uid}: {exc}")
+            errors.append(
+                f"Study {st_uid}: retrieval failed (error_type={type(exc).__name__})."
+            )
 
         # Update progress
         async with AsyncSessionLocal() as session:

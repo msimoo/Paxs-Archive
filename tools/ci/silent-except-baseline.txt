@@ -1,0 +1,6 @@
+# Known swallowed exception handlers — a shrinking allowlist.
+# A finding NOT listed here fails the build (zero regression).
+# An entry that no longer matches anything ALSO fails, so fix a handler
+# and delete its line. Regenerate with --update-baseline.
+# Format: <path>::<enclosing scope>::<exception type>
+

@@ -10,6 +10,7 @@ const COLUMN_DEFS = [
   { key: "modality",  label: "Modalities" },
   { key: "actions",   label: "Actions" },
 ];
+function defaultCols() { return Object.fromEntries(COLUMN_DEFS.map((c) => [c.key, true])); }
 function archivePatientName(value) {
   const stored = value?.trim() || "";
   if (state.patientNameDisplay === "remove_carets") return stored.replace(/\^/g, "").trim();
@@ -19,7 +20,6 @@ function archivePatientName(value) {
   }
   return stored;
 }
-function defaultCols() { return Object.fromEntries(COLUMN_DEFS.map((c) => [c.key, true])); }
 function loadCols() {
   try {
     const raw = JSON.parse(localStorage.getItem("paxs_studies_cols") || "null");
@@ -28,7 +28,7 @@ function loadCols() {
   return defaultCols();
 }
 
-const state = { page: 1, limit: 20, total: 0, token: localStorage.getItem("paxs_token") || null, authMode: "login", deleting: null, sort: localStorage.getItem("paxs_studies_sort") || "date", order: localStorage.getItem("paxs_studies_order") || "desc", state: "", critical: false, reported: false, oru: false, his: false, density: localStorage.getItem("paxs_studies_density") || "comfortable", cols: loadCols(), _studiesAbort: null };
+const state = { page: 1, limit: 20, total: 0, token: localStorage.getItem("paxs_token") || null, authMode: "login", deleting: null, sort: localStorage.getItem("paxs_studies_sort") || "date", order: localStorage.getItem("paxs_studies_order") || "desc", state: "", critical: false, reported: false, oru: false, his: false, density: localStorage.getItem("paxs_studies_density") || "comfortable", cols: loadCols(), _studiesAbort: null, modEntries: [], modSort: "count", modFilter: "" };
 
 function persistStudiesPrefs() {
   try {
@@ -69,9 +69,27 @@ async function silentRefresh() {
   return _refreshing;
 }
 
+// FS-10: the signed double-submit token, minted at login into a JS-readable
+// cookie ("paxs_csrf"). It is sent on every state-changing request; the server
+// ignores it on bearer-authenticated calls, so attaching it is always safe.
+// Needed because a browser session that has no in-memory access token (e.g. a
+// fresh tab that only carries the HttpOnly session cookie) authenticates by
+// cookie, and the server then requires this token on POST/PUT/PATCH/DELETE.
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "TRACE"]);
+
+function csrfToken() {
+  const m = document.cookie.match(/(?:^|;\s*)paxs_csrf=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
 async function api(path, opts = {}) {
+  const method = (opts.method || "GET").toUpperCase();
   const headers = { ...(opts.headers || {}) };
   if (state.token) headers["Authorization"] = `Bearer ${state.token}`;
+  if (!SAFE_METHODS.has(method) && !headers["X-CSRF-Token"]) {
+    const csrf = csrfToken();
+    if (csrf) headers["X-CSRF-Token"] = csrf;
+  }
   const fetchOpts = { ...opts, headers };
   let res = await fetch(path, fetchOpts);
   if (res.status === 401 && state.token) {
@@ -144,13 +162,13 @@ async function loadTriage() {
   const flags = await res.json();
   if (!flags.length) { el.hidden = true; return; }
   el.hidden = false;
-  $("triage-count").textContent = `${flags.length} finding${flags.length === 1 ? "" : "s"} — click to review`;
+  $("triage-count").textContent = `${flags.length} experimental heuristic flag${flags.length === 1 ? "" : "s"} — not diagnoses; review images`;
   $("triage-list").innerHTML = flags.map((f) => `
-    <div class="triage-item sev-${esc(f.severity.toLowerCase())}">
-      <span class="triage-sev">${esc(f.severity)}</span>
+    <div class="triage-item experimental">
+      <span class="triage-sev">EXPERIMENTAL</span>
       <div class="triage-body">
         <div class="triage-title">${esc(f.finding)} · ${esc(f.patient_name || "?")} (${esc(f.patient_id || "—")})</div>
-        <div class="triage-summary">${esc(f.summary || "")} <span class="mono">conf ${(f.confidence * 100).toFixed(0)}%</span></div>
+        <div class="triage-summary">${esc(f.summary || "")} <span class="mono">Threshold flag only — not diagnostic; qualified clinician review required.</span></div>
       </div>
       <button class="btn sm" data-review="${f.id}">Reviewed ✓</button>
     </div>`).join("");
@@ -336,20 +354,140 @@ function viewerUrl(studyUid) {
   // (localhost vs 127.0.0.1 vs a reverse-proxy hostname), and falls back to the
   // current origin until the health payload lands. Deep-links go straight to
   // the viewer mode route (/viewer/viewer) which opens the study directly.
-  //
+
   // V2-4: the fallback also carries the sub-path. location.origin alone drops
   // any path prefix, so behind https://host/paxs/ the link would point at
   // https://host/viewer/viewer (404). PAXS_BASE_PATH is injected into the shell
   // by the server; the server-provided PUBLIC_BASE_URL already includes it.
-  const prefix = (window.PAXS_BASE_PATH || '').replace(/\/+$/, "");
-  const base = (window.PAXS_PUBLIC_BASE_URL || (location.origin + prefix)).replace(/\/+$/, "");
-  return `${base}/viewer/viewer?StudyInstanceUIDs=${encodeURIComponent(studyUid)}`;
+  // paxsBase() is shared with the DICOMweb card so both deep-links and the
+  // endpoint the viewer reads from resolve to the same origin.
+  return `${paxsBase()}/viewer/viewer?StudyInstanceUIDs=${encodeURIComponent(studyUid)}`;
+}
+
+async function resolveViewerUrl(studyUid) {
+  // Opening a study always starts in PAXs's standard diagnostic view. MPR and
+  // 3D remain available as explicit tools after the radiologist opens it.
+  return viewerUrl(studyUid);
+}
+
+async function openStudyInViewer(studyUid, control) {
+  if (control) {
+    control.disabled = true;
+    control.setAttribute('aria-busy', 'true');
+    control.title = 'Opening study in the standard 2D view';
+  }
+  try {
+    location.href = await resolveViewerUrl(studyUid);
+  } finally {
+    if (control) {
+      control.disabled = false;
+      control.removeAttribute('aria-busy');
+    }
+  }
+}
+
+function openStudyInNewTab(studyUid) {
+  if (window.pywebview) {
+    void openStudyInViewer(studyUid);
+    return;
+  }
+  const tab = window.open('about:blank', '_blank');
+  if (!tab) {
+    void openStudyInViewer(studyUid);
+    return;
+  }
+  tab.opener = null;
+  tab.document.title = 'PAXS Viewer';
+  const status = tab.document.createElement('p');
+  status.textContent = 'Preparing the image viewer…';
+  tab.document.body.appendChild(status);
+  void resolveViewerUrl(studyUid).then((url) => {
+    if (!tab.closed) tab.location.replace(url);
+  });
 }
 
 function viewerLink(studyUid) {
   return window.PAXS_VIEWER
-    ? `<button class="btn sm viewer" title="Open this study in PaxsViewer (DICOMweb)" onclick="location.href=viewerUrl('${studyUid}')">Viewer</button>`
+    ? `<button type="button" class="btn sm viewer" title="Open this study in PaxsViewer (DICOMweb)" data-action="open-viewer" data-study-id="${esc(studyUid)}">Viewer</button>`
     : "";
+}
+
+function setupThumbnailImages(container) {
+  for (const img of container.querySelectorAll("img.thumb")) {
+    const showLoaded = () => {
+      img.previousElementSibling?.remove();
+      img.classList.add("loaded");
+    };
+    const showMissing = () => {
+      img.previousElementSibling?.remove();
+      const placeholder = document.createElement("div");
+      placeholder.className = "thumb empty";
+      placeholder.append("NO");
+      placeholder.appendChild(document.createElement("br"));
+      placeholder.append("IMG");
+      img.replaceWith(placeholder);
+    };
+    img.addEventListener("load", showLoaded, { once: true });
+    img.addEventListener("error", showMissing, { once: true });
+    if (img.complete) {
+      if (img.naturalWidth > 0) showLoaded();
+      else showMissing();
+    }
+  }
+}
+
+// Deleting a study destroys clinical data and its stored objects. The API
+// enforces DESTRUCTIVE_ROLES on its own (ADMIN + RADIOLOGIST), but the control
+// was rendered for every signed-in account, so a PHYSICIAN/TECHNOLOGIST clicked
+// it, confirmed, and got a bare "Delete failed (403)". The button is now only
+// rendered for an ADMIN — fail closed while the role is still unknown.
+function canDeleteStudies() {
+  return state.role === "ADMIN";
+}
+
+/** Human-readable reason for a refused DELETE (the toast used to show only the code). */
+function deleteFailureText(status, body) {
+  const detail = body && typeof body.detail === "string" ? body.detail.trim() : "";
+  if (status === 401) return "Your session expired — sign in again to delete studies";
+  if (status === 403) return detail || "Only an administrator can delete studies";
+  if (status === 404) return "Study not found (it may belong to another tenant)";
+  if (status === 409) return detail || "This study has a signed report and cannot be deleted";
+  return detail ? `Delete failed: ${detail}` : `Delete failed (${status})`;
+}
+
+function bindStudyActions(container) {
+  container.addEventListener("click", (event) => {
+    const link = event.target.closest('a[href*="/viewer/viewer?StudyInstanceUIDs="]');
+    if (!link || !container.contains(link) || event.button !== 0 ||
+        event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    let studyUid = "";
+    try { studyUid = new URL(link.href, location.href).searchParams.get("StudyInstanceUIDs") || ""; }
+    catch (_) { return; }
+    if (!studyUid) return;
+    event.preventDefault();
+    if (link.target && link.target !== '_self') openStudyInNewTab(studyUid);
+    else void openStudyInViewer(studyUid, link);
+  }, true);
+  container.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-action]");
+    if (!button || !container.contains(button)) return;
+    const { action, studyId, patientName = "Patient" } = button.dataset;
+    const encodedStudyId = encodeURIComponent(studyId || "");
+    if (action === "open-viewer") {
+      event.preventDefault();
+      void openStudyInViewer(studyId, button);
+    }
+    else if (action === "open-report") {
+      event.preventDefault();
+      openReport(encodedStudyId, patientName);
+    } else if (action === "forward-study") openForward(encodedStudyId, patientName);
+    else if (action === "share-study") createShare(encodedStudyId, patientName);
+    else if (action === "delete-study") confirmDelete(encodedStudyId, patientName);
+    else if (action === "toggle-stat") rwlToggleStat(encodedStudyId, button.dataset.stat === "true");
+    else if (action === "assign-radiologist") rwlAssign(encodedStudyId, button.dataset.radiologist || "");
+    else if (action === "mark-read") rwlMarkRead(encodedStudyId);
+    else if (action === "mark-unread") rwlMarkUnread(encodedStudyId);
+  });
 }
 
 function modalityChips(mods) {
@@ -377,7 +515,7 @@ function renderStudies(items) {
     const modCode = mods.length ? esc(mods[0]) : "DCM";
     const modColor = MOD_COLORS[mods[0]] || "#94a3b8";
     const thumb = s.thumbnail
-      ? `<div class="thumb-wrap"><div class="thumb-skel" aria-hidden="true"></div><img class="thumb" src="${s.thumbnail}" loading="lazy" alt="" onload="this.previousElementSibling.remove();this.classList.add('loaded')" onerror="this.previousElementSibling.remove();this.replaceWith(Object.assign(document.createElement('div'),{className:'thumb empty',innerHTML:'NO<br/>IMG'}))" /><span class="thumb-hint">View</span><span class="mod-tag" style="--mod:${modColor}">${modCode}</span></div>`
+      ? `<div class="thumb-wrap"><div class="thumb-skel" aria-hidden="true"></div><img class="thumb" src="${esc(s.thumbnail)}" loading="lazy" alt="" /><span class="thumb-hint">View</span><span class="mod-tag" style="--mod:${modColor}">${modCode}</span></div>`
       : `<div class="thumb-wrap"><div class="thumb empty">NO<br/>IMG</div><span class="mod-tag" style="--mod:${modColor}">${modCode}</span></div>`;
     const stateBadge = s.lifecycle_state === "ARCHIVED"
       ? '<span class="state-badge archived" title="Cold storage tier">❄ ARCHIVED</span>'
@@ -386,7 +524,7 @@ function renderStudies(items) {
         : "";
     // Radiology report state badge — click to open the report.
     const repBadge = s.report_status
-      ? `<a class="report-badge ${s.report_status.toLowerCase()}${s.report_status === "FINALIZED" && s.oru_status === "SENT" ? " sent" : ""}${s.report_status === "FINALIZED" && s.oru_status === "FAILED" ? " fail" : ""}" title="Open the radiology report" onclick="openReport('${encodeURIComponent(s.study_uid)}', '${esc(s.patient_name || "Patient")}')">${s.report_status === "FINALIZED" ? (s.oru_status === "SENT" ? "📄 EMR ✓" : s.oru_status === "FAILED" ? "📄 EMR ✕" : "📄 FINALIZED") : "📝 DRAFT"}</a>`
+      ? `<a href="#" role="button" class="report-badge ${s.report_status.toLowerCase()}${s.report_status === "FINALIZED" && s.oru_status === "SENT" ? " sent" : ""}${s.report_status === "FINALIZED" && s.oru_status === "FAILED" ? " fail" : ""}" title="Open the radiology report" data-action="open-report" data-study-id="${esc(s.study_uid)}" data-patient-name="${esc(s.patient_name || "Patient")}">${s.report_status === "FINALIZED" ? (s.oru_status === "SENT" ? "📄 EMR ✓" : s.oru_status === "FAILED" ? "📄 EMR ✕" : "📄 FINALIZED") : "📝 DRAFT"}</a>`
       : "";
     return `
     <div class="study-row" style="--mod:${modColor};animation-delay:${Math.min((state.page - 1) * 20, 300)}ms">
@@ -404,13 +542,15 @@ function renderStudies(items) {
       <div class="cell" data-col="modality">${modalityChips(s.modalities)}</div>
       <div class="actions" data-col="actions">
         ${viewerLink(s.study_uid)}
-        <button class="icon-btn" title="Open in viewer" onclick="location.href=viewerUrl('${s.study_uid}')">👁</button>
-        <button class="icon-btn" title="Send study to a DICOM node (C-STORE SCU)" onclick="openForward('${encodeURIComponent(s.study_uid)}', '${esc(s.patient_name || "Patient")}')">➤</button>
-        <button class="icon-btn" title="Create patient share link" onclick="createShare('${encodeURIComponent(s.study_uid)}', '${esc(s.patient_name || "Patient")}')">🔗</button>
-        <button class="icon-btn danger" title="Delete study" onclick="confirmDelete('${encodeURIComponent(s.study_uid)}', '${esc(s.patient_name || "study")}')">🗑</button>
+        <button type="button" class="icon-btn" title="Open in viewer" data-action="open-viewer" data-study-id="${esc(s.study_uid)}">👁</button>
+        <button type="button" class="icon-btn" title="Send study to a DICOM node (C-STORE SCU)" data-action="forward-study" data-study-id="${esc(s.study_uid)}" data-patient-name="${esc(s.patient_name || "Patient")}">➤</button>
+        <a class="icon-btn" href="${esc((window.PAXS_BASE_PATH || "").replace(/\/+$/, ""))}/api/v1/export/dicomdir/client/${esc(encodeURIComponent(s.study_uid))}/dicom-zip" target="_blank" rel="noopener" title="Export study (DICOM/ZIP)" aria-label="Export study (DICOM/ZIP)">↓</a>
+        <button type="button" class="icon-btn" title="Create patient share link" data-action="share-study" data-study-id="${esc(s.study_uid)}" data-patient-name="${esc(s.patient_name || "Patient")}">🔗</button>
+        ${canDeleteStudies() ? `<button type="button" class="icon-btn danger" title="Delete study (administrator only)" data-action="delete-study" data-study-id="${esc(s.study_uid)}" data-patient-name="${esc(s.patient_name || "study")}">🗑</button>` : ""}
       </div>
     </div>`;
   }).join("");
+  setupThumbnailImages(list);
 
   $("pager").hidden = !items.length;
   const pages = Math.max(1, Math.ceil(state.total / state.limit));
@@ -480,12 +620,73 @@ function setTermsTab(tab) {
 }
 
 /* ---------------- radiology reports ---------------- */
+// C-19: a FINALIZED report is immutable — its findings and impression are the
+// signed record and the API refuses to rewrite them (409). Corrections are
+// append-only addenda. `GET /reports?study_uid=` is a list and carries no
+// addenda, while `GET /reports/{id}` does, so the chain is fetched when the
+// modal opens and re-fetched after an append: the modal shows what the server
+// persisted, never an optimistic local copy.
+const REPORT_SIGNED_STATES = ["FINALIZED", "AMENDED"];
+
+function reportAddendaApi() {
+  // Shared renderer (app/static/paxs-report-addenda.js). Absent only if the page
+  // was cached from before it shipped — then the report still renders, just
+  // without the chain, rather than throwing inside the modal.
+  return window.PaxsReportAddenda || null;
+}
+
+function reportIsSigned(report) {
+  return !!report &&
+    REPORT_SIGNED_STATES.indexOf(String(report.status || "").toUpperCase()) !== -1;
+}
+
+async function fetchReportAddenda(report) {
+  if (!reportIsSigned(report) || report.id == null) return [];
+  const res = await api(`/api/v1/reports/${encodeURIComponent(report.id)}`);
+  if (!res.ok) return [];
+  const detail = await res.json().catch(() => ({}));
+  return Array.isArray(detail.addenda) ? detail.addenda : [];
+}
+
 async function openReport(studyUid, patientName) {
   if (!state.token) { toast("Sign in to open reports", "err"); openLogin(); return; }
   const uid = decodeURIComponent(studyUid);
   $("report-modal").hidden = false;
   $("report-meta").textContent = `${patientName} — loading report…`;
   $("report-body").innerHTML = "";
+  const printLink = $("report-print-link");
+  const pdfBtn = $("report-pdf-btn");
+  if (printLink) {
+    printLink.href = `/api/v1/reports/print/${encodeURIComponent(uid)}`;
+    printLink.hidden = false;
+  }
+  if (pdfBtn) {
+    pdfBtn.hidden = false;
+    pdfBtn.onclick = async () => {
+      pdfBtn.disabled = true;
+      try {
+        const pdfRes = await api(`/api/v1/reports/pdf/${encodeURIComponent(uid)}`);
+        if (!pdfRes.ok) { toast(`PDF export failed (${pdfRes.status})`, "err"); return; }
+        const disp = pdfRes.headers.get("Content-Disposition") || "";
+        const match = disp.match(/filename="([^"]+)"/i);
+        const fname = match ? match[1] : `PAXS_Report_${uid.slice(0, 16)}.pdf`;
+        const blob = await pdfRes.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fname;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+        toast(`Exported ${fname}`, "ok");
+      } catch (e) {
+        toast("PDF export failed", "err");
+      } finally {
+        pdfBtn.disabled = false;
+      }
+    };
+  }
   const res = await api(`/api/v1/reports?study_uid=${encodeURIComponent(uid)}`);
   if (!res.ok) { $("report-meta").textContent = `Failed to load report (${res.status})`; return; }
   const reports = await res.json();
@@ -495,15 +696,29 @@ async function openReport(studyUid, patientName) {
     return;
   }
   const r = reports[0];
+  const addenda = await fetchReportAddenda(r);
   $("report-meta").textContent = `${patientName}${r.patient_id ? ` (${r.patient_id})` : ""} · ${r.study_instance_uid || uid}`;
-  const head = r.status === "FINALIZED"
+  renderReportBody(r, addenda);
+  wireAddendumForm(r);
+}
+
+function renderReportBody(r, addenda) {
+  const signed = reportIsSigned(r);
+  const head = signed
     ? '<span class="wl-status done">✓ FINALIZED</span>'
     : '<span class="wl-status open">DRAFT</span>';
-  const delivery = r.status === "FINALIZED"
+  const delivery = signed
     ? (r.oru_status === "SENT" ? '<span class="wl-status done">→ EMR ✓</span>'
        : r.oru_status === "FAILED" ? '<span class="wl-status cx">→ EMR ✕</span>'
        : '<span class="wl-status open">→ EMR pending</span>')
     : "";
+  // The signed sections are rendered first and never below the chain: reading
+  // order is part of the contract (what was signed, then what was added).
+  const chainApi = reportAddendaApi();
+  // The renderer owns escaping (one implementation, both surfaces); the local
+  // `esc` stays for the sections above, which are this file's markup.
+  const chain = chainApi ? chainApi.chainHtml(addenda) : "";
+  const canAdd = !!chainApi && signed && chainApi.canAuthor(state.role);
   $("report-body").innerHTML = `
     <div class="report-head">${head} ${delivery}
       ${r.radiologist ? `<span class="sub">by ${esc(r.radiologist)}</span>` : ""}
@@ -515,7 +730,51 @@ async function openReport(studyUid, patientName) {
     ${r.impression ? `<div class="report-sec"><b>Impression</b><p>${esc(r.impression)}</p></div>` : ""}
     ${r.oru_error ? `<div class="report-sec err"><b>EMR delivery error</b><p>${esc(r.oru_error)}</p></div>` : ""}
     ${!r.clinical_history && !r.findings && !r.impression ? `<p class="sub">No content in this report yet.</p>` : ""}
+    <div id="report-addenda-chain">${chain}</div>
+    ${canAdd ? chainApi.formHtml({ prefix: "report-addendum" }) : ""}
   `;
+}
+
+function wireAddendumForm(report) {
+  const form = $("report-addendum-form");
+  if (!form) return;
+  const input = $("report-addendum-text");
+  const errorBox = $("report-addendum-error");
+  const submit = $("report-addendum-submit");
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const text = (input.value || "").trim();
+    if (!text) {
+      errorBox.textContent = "An addendum needs text.";
+      errorBox.hidden = false;
+      input.focus();
+      return;
+    }
+    errorBox.hidden = true;
+    submit.disabled = true;
+    const res = await api(`/api/v1/reports/${encodeURIComponent(report.id)}/addendum`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    submit.disabled = false;
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      errorBox.textContent = typeof body.detail === "string"
+        ? body.detail
+        : `Could not add the addendum (${res.status})`;
+      errorBox.hidden = false;
+      return;
+    }
+    input.value = "";
+    toast("Addendum added", "ok");
+    const chainApi = reportAddendaApi();
+    const chainEl = $("report-addenda-chain");
+    if (chainApi && chainEl) {
+      chainEl.innerHTML = chainApi.chainHtml(await fetchReportAddenda(report));
+    }
+  });
 }
 
 /* ---------------- share ---------------- */
@@ -546,6 +805,7 @@ async function createShare(studyUid, patientName) {
 /* ---------------- delete ---------------- */
 function confirmDelete(studyUid, patientName) {
   if (!state.token) { toast("Sign in to delete studies", "err"); openLogin(); return; }
+  if (!canDeleteStudies()) { toast("Only an administrator can delete studies", "err"); return; }
   state.deleting = { uid: decodeURIComponent(studyUid), name: patientName };
   $("confirm-text").textContent = `This permanently removes the study for ${patientName} and all its files.`;
   $("confirm-modal").hidden = false;
@@ -563,12 +823,14 @@ function shakeAuth() {
 function setAuthMode(mode) {
   state.authMode = mode;
   const isLogin = mode === "login";
+  const isLdap = mode === "ldap";
   $("tab-login").classList.toggle("active", isLogin);
-  $("tab-register").classList.toggle("active", !isLogin);
-  $("auth-name-field").hidden = isLogin;
-  $("auth-title").textContent = isLogin ? "Welcome back" : "Create your account";
-  $("auth-subtitle").textContent = isLogin ? "Sign in to manage the archive" : "Join your team on PAXS Archive";
-  $("auth-submit-label").textContent = isLogin ? "Sign in" : "Create account";
+  $("tab-ldap").classList.toggle("active", isLdap);
+  $("tab-register").classList.toggle("active", mode === "register");
+  $("auth-name-field").hidden = isLogin || isLdap;
+  $("auth-title").textContent = isLdap ? "Directory sign in" : (isLogin ? "Welcome back" : "Create your account");
+  $("auth-subtitle").textContent = isLdap ? "Use your hospital LDAP / Active Directory account" : (isLogin ? "Sign in to manage the archive" : "Join your team on PAXS Archive");
+  $("auth-submit-label").textContent = isLdap ? "Sign in with LDAP" : (isLogin ? "Sign in" : "Create account");
   setTimeout(() => (isLogin ? $("auth-user") : $("auth-name")).focus(), 60);
 }
 
@@ -577,8 +839,8 @@ function setAuthLoading(on) {
   btn.disabled = on;
   btn.classList.toggle("loading", on);
   $("auth-submit-label").textContent = on
-    ? (state.authMode === "login" ? "Signing in…" : "Creating account…")
-    : (state.authMode === "login" ? "Sign in" : "Create account");
+    ? (state.authMode === "ldap" ? "Signing in with LDAP…" : (state.authMode === "login" ? "Signing in…" : "Creating account…"))
+    : (state.authMode === "ldap" ? "Sign in with LDAP" : (state.authMode === "login" ? "Sign in" : "Create account"));
 }
 
 function openLogin() {
@@ -600,10 +862,13 @@ async function doAuth() {
   }
   setAuthLoading(true);
   try {
-    const body = state.authMode === "login"
+    const body = state.authMode === "login" || state.authMode === "ldap"
       ? JSON.stringify({ username, password })
       : JSON.stringify({ username, password, full_name: fullName || null });
-    const res = await fetch(`/api/v1/auth/${state.authMode === "login" ? "login" : "register"}`, {
+    const url = state.authMode === "ldap"
+      ? "/api/v1/ldap/login"
+      : `/api/v1/auth/${state.authMode === "login" ? "login" : "register"}`;
+    const res = await fetch(url, {
       method: "POST", headers: { "Content-Type": "application/json" }, body,
     });
     const data = await res.json().catch(() => ({}));
@@ -626,17 +891,25 @@ async function doAuth() {
     await loadTriage();
     // A gated boot defers all data loading until login succeeds.
     if (state.gated) { state.gated = false; finishBoot(); }
+    // Re-signing in over a live session can change the role, so the action
+    // column (delete is ADMIN-only) must be re-rendered from the new identity.
+    else loadStudies();
   } finally {
     setAuthLoading(false);
   }
 }
 
 /* ---------------- view navigation ---------------- */
+let transferPollTimer = null;
+let transferLoading = false;
 const VIEWS = ["dashboard", "studies", "reading", "workflow", "nodes", "admin", "settings"];
 
 function switchView(view, settingsTab = "sys") {
-  if (view !== "settings") window.clearTimeout(discActivityTimer);
   if (!VIEWS.includes(view)) view = "dashboard";
+  if (view !== "settings") {
+    stopDimseQueuePolling();
+    window.clearTimeout(discActivityTimer);
+  }
   [...document.querySelectorAll(".view")].forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   [...document.querySelectorAll(".nav-tab")].forEach((b) =>
     b.classList.toggle("active", b.dataset.view === view));
@@ -644,14 +917,20 @@ function switchView(view, settingsTab = "sys") {
     dashboard: () => { loadStats(); loadTriage(); },
     studies: () => { loadStudies(); loadModalities(); loadTenantFilter(); },
     reading: () => { loadReadingCounts(); loadReadingTasks(); },
-    workflow: () => { loadWorklist(); loadPerformed(); loadCommitments(); },
-    nodes: () => { loadNodes(); },
+    workflow: () => { if (window.PaxsWorkflow) window.PaxsWorkflow.load(); else { loadWorklist(); loadPerformed(); loadCommitments(); } },
+    nodes: () => { loadNodes(); loadTransfers(); },
     admin: () => {
       const activeBtn = document.querySelector("#admin-tabs button.active");
       loadAdminSubTab(activeBtn ? activeBtn.dataset.tab : "sys");
     },
     settings: () => { loadSettings(false, settingsTab); },
   };
+  if (transferPollTimer !== null) {
+    clearInterval(transferPollTimer);
+    transferPollTimer = null;
+  }
+  if (view === "nodes" && !window.PaxsTransfers) transferPollTimer = setInterval(loadTransfers, 5000);
+  if (view !== "nodes" && window.PaxsTransfers?.stopPoll) window.PaxsTransfers.stopPoll();
   (loaders[view] || (() => {}))();
   /* Push browser history so the Back button navigates between views
      instead of leaving the dashboard entirely. */
@@ -730,6 +1009,175 @@ function renderGroup(g) {
   el.innerHTML = head + `<div class="cfg-fields">${g.fields.map(cfgRowHTML).join("")}</div>`;
 }
 
+/* ---------------- DICOMweb endpoint (Settings → System) ----------------
+   The viewer never reads pixels from a private path: every image it renders
+   comes over DICOMweb from `PUBLIC_BASE_URL + /dicom-web`. That URL was only
+   discoverable by reading the source, so the System panel now states it, the
+   four routes behind it, and the switches that decide who may call it.
+
+   Everything on this card is derived — the host from `readonly.public_base_url`
+   (the same value `viewerUrl()` and share links use), the flags from the very
+   rows rendered below. No second source of truth, so the card cannot disagree
+   with the form it sits above. */
+
+/** Absolute origin + sub-path the browser uses for every PAXS deep-link. */
+function paxsBase() {
+  const prefix = (window.PAXS_BASE_PATH || "").replace(/\/+$/, "");
+  return (window.PAXS_PUBLIC_BASE_URL || (location.origin + prefix)).replace(/\/+$/, "");
+}
+
+const DICOMWEB_ROOT = "/dicom-web";
+
+/* The four calls a diagnostic viewer actually makes, in the order it makes
+   them: find the study, read its metadata, pull frames, then store results. */
+const DICOMWEB_ROUTES = [
+  { svc: "QIDO-RS", method: "GET", path: "/studies", note: "Find studies, series and instances" },
+  { svc: "WADO-RS", method: "GET", path: "/studies/{studyUID}/metadata", note: "Study metadata — the viewer's first call" },
+  { svc: "WADO-RS", method: "GET", path: "/studies/{studyUID}/series/{seriesUID}/instances/{sopUID}/frames/1", note: "Pixel data for one frame" },
+  { svc: "STOW-RS", method: "POST", path: "/studies", note: "Store an instance" },
+];
+
+function cfgFieldValue(key) {
+  const groups = (state.config && state.config.groups) || [];
+  for (const g of groups) {
+    const f = (g.fields || []).find((x) => x.key === key);
+    if (f) return f.value;
+  }
+  return undefined;
+}
+
+function dwFlagHTML(key, label, tab) {
+  const v = cfgFieldValue(key);
+  const known = v !== undefined;
+  const on = v === true;
+  const state = !known ? "unknown" : on ? "on" : "off";
+  return `<button type="button" class="dw-chip dw-chip-${state}" data-dw-jump="${key}" data-dw-tab="${tab}"
+      title="${known ? "Jump to ${esc(key)}" : "Not exposed by this server"}">
+      ${esc(label)} <b>${known ? (on ? "allowed" : "blocked") : "—"}</b></button>`;
+}
+
+function dicomwebCardHTML(ro) {
+  const base = paxsBase();
+  const root = `${base}${DICOMWEB_ROOT}`;
+  const prefix = window.PAXS_BASE_PATH || "";
+  const source = ro.public_base_url ? "PUBLIC_BASE_URL" : "this browser's origin";
+  // A PUBLIC_BASE_URL that is not an absolute URL (a typo in Settings) must not
+  // take the whole panel down with it — degrade to a hint without the host.
+  let host = "";
+  try { host = new URL(root).host; } catch (e) { host = ""; }
+
+  const rows = DICOMWEB_ROUTES.map((r) => {
+    const full = `${root}${r.path}`;
+    return `<div class="dw-route">
+      <span class="dw-svc">${esc(r.svc)}</span>
+      <span class="dw-method dw-method-${r.method.toLowerCase()}">${esc(r.method)}</span>
+      <code class="dw-path" title="${esc(full)}">${esc(DICOMWEB_ROOT + r.path)}</code>
+      <span class="dw-note">${esc(r.note)}</span>
+      <button type="button" class="dw-copy" data-dw-copy="${esc(full)}" aria-label="Copy ${esc(r.svc)} URL" title="Copy URL">⧉</button>
+    </div>`;
+  }).join("");
+
+  return `<section class="cfg-dicomweb" aria-labelledby="dw-title">
+    <div class="dw-head">
+      <div>
+        <b id="dw-title"><svg class="rail-ic" aria-hidden="true"><use href="#ic-link"/></svg>DICOMweb endpoint</b>
+        <span class="cfg-desc">PaxsViewer reads every image over this root — the same origin share links and QR codes use.</span>
+      </div>
+      <span class="dw-state" data-dw-state><span class="dw-dot"></span>not tested</span>
+    </div>
+
+    <div class="dw-base">
+      <code data-dw-base>${esc(root)}</code>
+      <button type="button" class="btn sm" data-dw-copy="${esc(root)}">Copy URL</button>
+      <button type="button" class="btn sm ghost" data-dw-probe title="Call QIDO-RS on this origin and report what the server answers">Test</button>
+      <a class="btn sm ghost" href="${esc(base)}/viewer/viewer" target="_blank" rel="noopener"
+         title="Open PaxsViewer — it reads pixels from exactly this root">Viewer ↗</a>
+    </div>
+
+    <div class="dw-routes">${rows}</div>
+
+    <div class="dw-flags">
+      ${dwFlagHTML("DICOMWEB_PUBLIC_READ", "Anonymous reads", "sys")}
+      ${dwFlagHTML("DICOMWEB_PUBLIC_WRITE", "Anonymous writes", "security")}
+      <span class="dw-chip dw-chip-info">Authenticated clients <b>session cookie · bearer token</b></span>
+      <span class="dw-chip dw-chip-info"
+        title="Resolved from ${esc(source)} — the same value share links and QR codes use. Change Public base URL below if your workstations reach this server under a different hostname."
+        >Host from <b>${esc(source)}</b></span>
+    </div>
+
+    <p class="dw-hint">
+      ${host ? `Workstations must resolve <code>${esc(host)}</code>.` : ""}
+      ${prefix ? `Served under the reverse-proxy prefix <code>${esc(prefix)}</code>.` : ""}
+      Set <b>Public base URL</b> below to the hostname your viewers use — this endpoint, share links and QR codes are all built from it.
+    </p>
+  </section>`;
+}
+
+async function probeDicomweb(stateEl) {
+  const dot = (kind, text) => {
+    stateEl.className = `dw-state dw-state-${kind}`;
+    stateEl.innerHTML = `<span class="dw-dot"></span>${esc(text)}`;
+  };
+  dot("busy", "testing…");
+  try {
+    const res = await api(`${DICOMWEB_ROOT}/studies?limit=1`, {
+      headers: { Accept: "application/dicom+json" },
+    });
+    if (res.ok) {
+      const body = await res.json().catch(() => null);
+      const n = Array.isArray(body) ? body.length : null;
+      dot("ok", `reachable · ${res.status}${n !== null ? ` · ${n} stud${n === 1 ? "y" : "ies"} returned` : ""}`);
+    } else if (res.status === 401 || res.status === 403) {
+      // Not a failure: anonymous reads are off by default, and this is what a
+      // signed-out client is supposed to see.
+      dot("auth", `reachable · ${res.status} — sign-in required`);
+    } else {
+      dot("err", `reachable · ${res.status}`);
+    }
+  } catch (e) {
+    dot("err", "unreachable from this browser");
+  }
+}
+
+function mountDicomwebCard(ro) {
+  const sys = $("set-sys");
+  if (!sys) return;
+  const live = sys.querySelector(".cfg-live");
+  const card = document.createElement("div");
+  card.innerHTML = dicomwebCardHTML(ro);
+  const section = card.firstElementChild;
+  if (live && live.nextSibling) sys.insertBefore(section, live.nextSibling);
+  else sys.insertBefore(section, sys.firstChild);
+
+  section.querySelectorAll("[data-dw-copy]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const url = btn.dataset.dwCopy;
+      if (!url) return;
+      navigator.clipboard?.writeText(url)
+        .then(() => toast("DICOMweb URL copied", "ok"))
+        .catch(() => toast("Clipboard blocked — select the URL and copy it", "err"));
+    });
+  });
+
+  const stateEl = section.querySelector("[data-dw-state]");
+  const probe = section.querySelector("[data-dw-probe]");
+  if (probe && stateEl) probe.addEventListener("click", () => probeDicomweb(stateEl));
+
+  section.querySelectorAll("[data-dw-jump]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const tab = chip.dataset.dwTab;
+      if (tab && tab !== "sys") openSettingsTab(tab);
+      const row = document.querySelector(`.cfg-row[data-row="${chip.dataset.dwJump}"]`);
+      if (!row) return;
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+      row.classList.add("cfg-row-flash");
+      setTimeout(() => row.classList.remove("cfg-row-flash"), 1200);
+      const ctrl = row.querySelector("[data-cfg]");
+      if (ctrl && !ctrl.disabled) ctrl.focus({ preventScroll: true });
+    });
+  });
+}
+
 function countDirty() {
   if (!state.config) return 0;
   let n = 0;
@@ -788,7 +1236,10 @@ async function loadSettings(force = false, tab = "sys") {
 
   // live status strip in the System panel
   const sys = $(`set-sys`);
-  if (sys && cfg.readonly) sys.insertAdjacentHTML("afterbegin", cfgLiveHTML(cfg.readonly));
+  if (sys && cfg.readonly) {
+    sys.insertAdjacentHTML("afterbegin", cfgLiveHTML(cfg.readonly));
+    mountDicomwebCard(cfg.readonly);
+  }
 
   wireCfgInputs();
   refreshSavebar();
@@ -953,24 +1404,207 @@ async function refreshDiscActivity() {
   }
 }
 
+/* ---------------- modality registry (Settings → Modality) ---------------- */
+
+// Human-readable expansion of the DICOM modality codes that actually show up in
+// a general archive. Unknown codes are shown verbatim rather than hidden — a
+// modality this table has never heard of is exactly the thing an operator needs
+// to see, not the thing to suppress.
+const MODALITY_NAMES = {
+  CT: "Computed Tomography",
+  MR: "Magnetic Resonance",
+  CR: "Computed Radiography",
+  DX: "Digital Radiography",
+  MG: "Mammography",
+  US: "Ultrasound",
+  NM: "Nuclear Medicine",
+  PT: "PET",
+  XA: "X-Ray Angiography",
+  RF: "Radio Fluoroscopy",
+  SC: "Secondary Capture",
+  SR: "Structured Report",
+  OT: "Other",
+  ES: "Endoscopy",
+  IO: "Intraoral Radiography",
+  PX: "Panoramic X-Ray",
+  GM: "General Microscopy",
+  SM: "Slide Microscopy",
+  ECG: "Electrocardiography",
+  DOC: "Document",
+  KO: "Key Object Selection",
+  SEG: "Segmentation",
+  RTIMAGE: "RT Image",
+  RTPLAN: "RT Plan",
+  RTDOSE: "RT Dose",
+  RTSTRUCT: "RT Structure Set",
+};
+
+function modalityLabel(code) {
+  return MODALITY_NAMES[code] || "Modality " + code;
+}
+
+function fmtCount(n) {
+  return Number(n || 0).toLocaleString("en-US");
+}
+
+/** Aggregate the QIDO series rows into one entry per modality code. */
+function aggregateModalities(rows) {
+  const byCode = new Map();
+  let totalSeries = 0;
+  let totalInstances = 0;
+  for (const row of rows) {
+    const code = row["00080060"]?.Value?.[0];
+    if (!code) continue; // a series with no Modality (0008,0060) cannot be registered
+    const instances = Number(row["00201209"]?.Value?.[0] || 0);
+    const entry = byCode.get(code) || { code, series: 0, instances: 0, bodyParts: new Set() };
+    entry.series += 1;
+    entry.instances += instances;
+    const part = row["00180015"]?.Value?.[0];
+    if (part) entry.bodyParts.add(part);
+    byCode.set(code, entry);
+    totalSeries += 1;
+    totalInstances += instances;
+  }
+  const entries = [...byCode.values()].map((e) => ({
+    ...e,
+    bodyParts: [...e.bodyParts].sort(),
+    share: totalSeries ? Math.round((e.series / totalSeries) * 100) : 0,
+  }));
+  return { entries, totalSeries, totalInstances };
+}
+
+function renderModalityKpis(entries, totalSeries, totalInstances) {
+  const el = $("mod-kpis");
+  if (!el) return;
+  if (!entries.length) { el.innerHTML = ""; return; }
+  const top = entries.reduce((a, b) => (b.series > a.series ? b : a), entries[0]);
+  const kpis = [
+    { k: "Modalities in use", v: fmtCount(entries.length), s: "distinct DICOM codes" },
+    { k: "Series indexed", v: fmtCount(totalSeries), s: "across every modality" },
+    { k: "Images indexed", v: fmtCount(totalInstances), s: "instances on disk" },
+    { k: "Largest modality", v: top.code, s: `${top.share}% of all series` },
+  ];
+  el.innerHTML = kpis.map((kpi) => `
+    <div class="mod-kpi">
+      <span class="mod-kpi-k">${esc(kpi.k)}</span>
+      <span class="mod-kpi-v">${esc(kpi.v)}</span>
+      <span class="mod-kpi-s">${esc(kpi.s)}</span>
+    </div>`).join("");
+}
+
+function modalityCard(entry, maxSeries) {
+  const color = MOD_COLORS[entry.code] || "#94a3b8";
+  const bar = maxSeries ? Math.max(4, Math.round((entry.series / maxSeries) * 100)) : 4;
+  const parts = entry.bodyParts.slice(0, 3).join(" · ");
+  return `
+    <article class="mod-card" style="--mod:${color}">
+      <div class="mod-card-head">
+        <span class="mod-code">${esc(entry.code)}</span>
+        <span class="mod-share" title="${entry.share}% of the archive's series">${entry.share}%</span>
+      </div>
+      <div class="mod-name">${esc(modalityLabel(entry.code))}</div>
+      <div class="mod-metrics">
+        <span><b>${fmtCount(entry.series)}</b> series</span>
+        <span class="mod-sep">·</span>
+        <span><b>${fmtCount(entry.instances)}</b> images</span>
+      </div>
+      <div class="mod-bar" role="img" aria-label="${entry.share}% of series"><i style="width:${bar}%"></i></div>
+      ${parts ? `<div class="mod-parts" title="Body parts examined">${esc(parts)}</div>` : ""}
+    </article>`;
+}
+
+function renderModalityCards() {
+  const el = $("set-modality");
+  if (!el) return;
+  const all = state.modEntries || [];
+  if (!all.length) {
+    el.innerHTML = `
+      <div class="mod-empty">
+        <div class="mod-empty-ico">🩻</div>
+        <p><b>No modalities registered yet</b></p>
+        <p>Send a study with C-STORE to port 10400, or upload a DICOM file — the first
+        series to land registers its modality here.</p>
+      </div>`;
+    return;
+  }
+  const needle = (state.modFilter || "").trim().toLowerCase();
+  const filtered = needle
+    ? all.filter((e) => e.code.toLowerCase().includes(needle)
+        || modalityLabel(e.code).toLowerCase().includes(needle))
+    : all;
+  if (!filtered.length) {
+    el.innerHTML = `<p class="sub mod-nomatch">No modality matches “${esc(state.modFilter)}”.
+      <button type="button" class="btn mini" id="mod-clear">Clear filter</button></p>`;
+    $("mod-clear")?.addEventListener("click", () => {
+      state.modFilter = "";
+      $("mod-filter").value = "";
+      renderModalityCards();
+    });
+    return;
+  }
+  const sorted = [...filtered].sort((a, b) => state.modSort === "name"
+    ? a.code.localeCompare(b.code)
+    : (b.series - a.series) || a.code.localeCompare(b.code));
+  const maxSeries = Math.max(...sorted.map((e) => e.series));
+  el.innerHTML = `<div class="mod-grid">${sorted.map((e) => modalityCard(e, maxSeries)).join("")}</div>`;
+}
+
+function modalityStamp(text) {
+  const el = $("mod-stamp");
+  if (el) el.textContent = text;
+}
+
 async function loadModalityRegistry() {
   const el = $("set-modality");
   if (!el) return;
+  el.innerHTML = `<div class="mod-skel">${Array.from({ length: 6 }, () => '<span class="mod-skel-tile"></span>').join("")}</div>`;
+  modalityStamp("Reading…");
+  const btn = $("mod-refresh");
+  if (btn) btn.disabled = true;
   try {
     const res = await api("/dicom-web/series?includefield=all");
-    if (!res.ok) return;
-    const rows = await res.json();
-    const counts = {};
-    rows.forEach((r) => {
-      const m = r["00080060"]?.Value?.[0];
-      if (m) counts[m] = (counts[m] || 0) + 1;
-    });
-    const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-    el.innerHTML = entries.length
-      ? `<div class="mod-grid">${entries.map(([m, c]) =>
-          `<div class="mod-tile"><span class="mod-tile-ico" style="color:${MOD_COLORS[m] || "#94a3b8"}">${esc(m)}</span><span class="mod-tile-n">${c} series</span></div>`).join("")}</div>`
-      : `<p class="sub">No modalities yet — ingest a study to populate the registry.</p>`;
-  } catch (e) { /* offline */ }
+    if (!res.ok) throw new Error(`the archive answered ${res.status}`);
+    const { entries, totalSeries, totalInstances } = aggregateModalities(await res.json());
+    state.modEntries = entries;
+    renderModalityKpis(entries, totalSeries, totalInstances);
+    renderModalityCards();
+    modalityStamp(`${entries.length} modalities · ${fmtCount(totalSeries)} series · updated ${new Date().toLocaleTimeString()}`);
+  } catch (err) {
+    // A silent failure here reads as "this archive has no modalities", which is
+    // a materially different claim from "the registry could not be read".
+    console.error("modality registry load failed", err);
+    state.modEntries = [];
+    renderModalityKpis([], 0, 0);
+    modalityStamp("Unavailable");
+    el.innerHTML = `
+      <div class="mod-error">
+        <p><b>The modality registry could not be read.</b></p>
+        <p class="sub">${esc(err && err.message ? err.message : "Unknown error")} — the study
+        data may be unavailable, or your session may have expired.</p>
+        <button type="button" class="btn sm" id="mod-retry">Retry</button>
+      </div>`;
+    $("mod-retry")?.addEventListener("click", () => loadModalityRegistry());
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function bindModalityControls() {
+  $("mod-refresh")?.addEventListener("click", () => loadModalityRegistry());
+  $("mod-filter")?.addEventListener("input", (e) => {
+    state.modFilter = e.target.value;
+    renderModalityCards();
+  });
+  [...document.querySelectorAll("[data-msort]")].forEach((b) =>
+    b.addEventListener("click", () => {
+      state.modSort = b.dataset.msort;
+      [...document.querySelectorAll("[data-msort]")].forEach((x) => {
+        const active = x === b;
+        x.classList.toggle("active", active);
+        x.setAttribute("aria-pressed", String(active));
+      });
+      renderModalityCards();
+    }));
 }
 
 function openSettingsTab(stab) {
@@ -981,17 +1615,177 @@ function openSettingsTab(stab) {
   if (stab === "modality") loadModalityRegistry();
   if (stab === "db") loadDatabaseTab();
   if (stab === "redis") loadRedisTab();
-  if (stab === "compression") { loadLossy(); loadLifecycle(); loadRouter(); fillNodeSelect(); loadRoutingQueue(); }
+  if (stab === "compression") {
+    loadLossy(); loadLifecycle(); loadRouter(); fillNodeSelect(); loadRoutingQueue();
+  }
   if (stab === "optical") refreshDiscActivity();
   else window.clearTimeout(discActivityTimer);
+  if (stab === "dimse-queue") startDimseQueuePolling();
+  else stopDimseQueuePolling();
 }
+
+/* ---------------- live DIMSE receive queue ---------------- */
+let dimseQueueTimer = null;
+let dimseQueueRequest = null;
+
+function dimseQueueVisible() {
+  return !document.hidden && $("view-settings")?.classList.contains("active") && !$("spanel-dimse-queue")?.hidden;
+}
+
+function stopDimseQueuePolling() {
+  clearTimeout(dimseQueueTimer);
+  dimseQueueTimer = null;
+  dimseQueueRequest?.abort();
+  dimseQueueRequest = null;
+}
+
+function dimseQueueCell(row, value, className = "") {
+  const cell = document.createElement("td");
+  cell.className = className;
+  cell.textContent = value == null || value === "" ? "—" : String(value);
+  row.appendChild(cell);
+  return cell;
+}
+
+function formatDimseBytes(value) {
+  let bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let unit = 0;
+  while (bytes >= 1024 && unit < units.length - 1) { bytes /= 1024; unit += 1; }
+  return `${bytes.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+}
+
+function renderDimseQueue(rows) {
+  const body = $("dimse-queue-body");
+  if (!body) return;
+  if (!rows.length) {
+    const tr = document.createElement("tr");
+    dimseQueueCell(tr, "No studies are currently being received.", "dimse-queue-message").colSpan = 8;
+    body.replaceChildren(tr);
+    return;
+  }
+
+  const existing = new Map([...body.querySelectorAll("tr[data-study-uid]")].map((row) => [row.dataset.studyUid, row]));
+  body.querySelectorAll("tr:not([data-study-uid])").forEach((row) => row.remove());
+  const live = new Set();
+  rows.forEach((item) => {
+    const key = String(item.study_uid || "");
+    live.add(key);
+    let tr = existing.get(key);
+    if (!tr) {
+      tr = document.createElement("tr");
+      tr.dataset.studyUid = key;
+      tr.innerHTML = `<td><strong></strong><small></small></td><td class="dimse-queue-uid"></td><td><span class="dimse-modality-badge"></span></td><td class="dimse-queue-mono"></td><td class="dimse-progress"><div class="transfer-progress-head"><span></span><strong></strong></div><div class="transfer-progress-track" role="progressbar"><span></span></div></td><td></td><td><span class="transfer-status dimse-queue-status"><i aria-hidden="true"></i><b></b></span></td><td></td>`;
+    }
+    const cells = tr.cells;
+    cells[0].querySelector("strong").textContent = item.patient_name || "Unknown patient";
+    cells[0].querySelector("small").textContent = item.patient_id || "—";
+    cells[1].textContent = item.study_uid || "—";
+    cells[1].title = item.study_uid == null ? "" : String(item.study_uid);
+    cells[2].querySelector("span").textContent = item.modality || "—";
+    cells[3].textContent = item.calling_ae || "—";
+    const statusText = String(item.status || "unknown");
+    const statusKey = statusText.toLowerCase().replaceAll(" ", "_");
+    const completed = ["complete", "completed"].includes(statusKey);
+    const failed = ["failed", "error"].includes(statusKey);
+    const terminal = completed || failed;
+    const received = Math.max(0, Number(item.received_instances) || 0);
+    const expected = Number(item.expected_instances);
+    const knownTotal = Number.isFinite(expected) && expected > 0;
+    const determinate = knownTotal || completed;
+    const percent = completed ? 100 : knownTotal ? Math.min(100, Math.round((received / expected) * 100)) : null;
+    const progress = cells[4];
+    progress.querySelector(".transfer-progress-head span").textContent = knownTotal ? `${received} / ${expected} files` : `${received} files`;
+    progress.querySelector(".transfer-progress-head strong").textContent = determinate ? `${percent}%` : failed ? "—" : "…";
+    const track = progress.querySelector(".transfer-progress-track");
+    track.classList.toggle("determinate", determinate);
+    track.classList.toggle("indeterminate", !determinate && !failed);
+    track.classList.toggle("empty", failed && !knownTotal);
+    track.setAttribute("aria-label", `Received ${received} ${received === 1 ? "file" : "files"}`);
+    if (determinate) {
+      track.setAttribute("aria-valuenow", String(percent));
+      track.setAttribute("aria-valuemin", "0");
+      track.setAttribute("aria-valuemax", "100");
+      track.removeAttribute("aria-valuetext");
+    } else {
+      track.removeAttribute("aria-valuenow");
+      track.removeAttribute("aria-valuemin");
+      track.removeAttribute("aria-valuemax");
+      track.setAttribute("aria-valuetext", failed
+        ? `${received} files received before failure; total unknown`
+        : `${received} files received; total unknown`);
+    }
+    track.firstElementChild.style.width = determinate ? `${percent}%` : failed ? "0%" : "34%";
+    cells[5].textContent = formatDimseBytes(item.bytes_received);
+    const status = cells[6].querySelector(".dimse-queue-status");
+    status.className = `transfer-status dimse-queue-status ${terminal ? statusKey : "running"}`;
+    status.dataset.status = statusKey;
+    status.querySelector("b").textContent = statusText;
+    tr.classList.toggle("dimse-queue-active", !terminal);
+    const updated = item.updated_at ? new Date(item.updated_at) : null;
+    cells[7].textContent = updated && !Number.isNaN(updated.valueOf()) ? updated.toLocaleString() : (item.updated_at || "—");
+    body.appendChild(tr);
+  });
+  existing.forEach((row, key) => { if (!live.has(key)) row.remove(); });
+}
+
+function renderDimseQueueMessage(message) {
+  const body = $("dimse-queue-body");
+  if (!body) return;
+  const tr = document.createElement("tr");
+  dimseQueueCell(tr, message, "dimse-queue-message").colSpan = 8;
+  body.replaceChildren(tr);
+}
+
+function clearDimseQueueData(message = "Open this tab to load the queue.") {
+  renderDimseQueueMessage(message);
+  const stamp = $("dimse-queue-stamp");
+  if (stamp) stamp.textContent = "Waiting…";
+}
+
+async function pollDimseQueue() {
+  if (!dimseQueueVisible()) return;
+  dimseQueueRequest?.abort();
+  const request = new AbortController();
+  dimseQueueRequest = request;
+  try {
+    const res = await api("/api/dimse/queue", { signal: request.signal });
+    if (request !== dimseQueueRequest) return;
+    if (res.status === 403) renderDimseQueueMessage("Administrator access is required to view patient queue data.");
+    else if (!res.ok) renderDimseQueueMessage(`Queue unavailable (${res.status}).`);
+    else {
+      const data = await res.json();
+      if (request !== dimseQueueRequest) return;
+      renderDimseQueue(Array.isArray(data) ? data : []);
+      $("dimse-queue-stamp").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }
+  } catch (error) {
+    if (request === dimseQueueRequest && error.name !== "AbortError") renderDimseQueueMessage("Queue unavailable. Retrying…");
+  } finally {
+    if (request === dimseQueueRequest) {
+      dimseQueueRequest = null;
+      if (dimseQueueVisible()) dimseQueueTimer = setTimeout(pollDimseQueue, 1500);
+    }
+  }
+}
+
+function startDimseQueuePolling() {
+  stopDimseQueuePolling();
+  if (dimseQueueVisible()) pollDimseQueue();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopDimseQueuePolling();
+  else if (!$("spanel-dimse-queue")?.hidden && $("view-settings")?.classList.contains("active")) startDimseQueuePolling();
+});
 
 /* ---------------- database tab ---------------- */
 function dbFormBody() {
   return {
     backend: $("db-backend").value,
     host: $("db-host").value.trim(),
-    port: parseInt($("db-port").value, 10) || 3306,
+    port: parseInt($("db-port").value, 10) || 5432,
     user: $("db-user").value.trim(),
     password: $("db-pass").value,
     name: $("db-name").value.trim(),
@@ -1007,9 +1801,7 @@ async function loadDatabaseTab() {
   }
   const s = await res.json();
   const admin = !!s.admin;
-  const badge = s.backend === "mysql"
-    ? '<span class="db-badge mysql">MySQL 8.0</span>'
-    : '<span class="db-badge sqlite">SQLite</span>';
+  const badge = '<span class="db-badge postgresql">PostgreSQL</span>';
   const mig = s.up_to_date
     ? '<span class="ok-dot"></span> up to date'
     : `<span class="warn-txt">migration pending</span> <code class="mono faint">${esc(s.current_revision || "—")} → ${esc(s.head_revision || "?")}</code>`;
@@ -1026,9 +1818,9 @@ async function loadDatabaseTab() {
 
   // prefill the config form from the saved configuration (password lives in .env only)
   if (s.saved) {
-    $("db-backend").value = s.saved.backend === "sqlite" ? "sqlite" : "mysql";
+    $("db-backend").value = "postgresql";
     $("db-host").value = s.saved.host || "";
-    $("db-port").value = s.saved.port || 3306;
+    $("db-port").value = s.saved.port || 5432;
     $("db-user").value = s.saved.user || "";
     $("db-name").value = s.saved.name || "";
     $("db-config-note").innerHTML = '<span class="faint">Password kept server-side — re-enter only to change it.</span>';
@@ -1041,9 +1833,9 @@ async function loadDatabaseTab() {
 }
 
 function syncDbForm() {
-  const mysql = $("db-backend").value === "mysql";
-  ["db-host", "db-port", "db-user", "db-pass", "db-name"].forEach((id) => { $(id).disabled = !mysql; });
-  $("db-test").disabled = !mysql;
+  // PostgreSQL is the only engine; every connection field always applies.
+  ["db-host", "db-port", "db-user", "db-pass", "db-name"].forEach((id) => { $(id).disabled = false; });
+  $("db-test").disabled = false;
 }
 
 async function dbTest() {
@@ -1072,8 +1864,8 @@ async function dbTest() {
 async function dbSave() {
   const note = $("db-config-note");
   const body = dbFormBody();
-  if (body.backend === "mysql" && (!body.host || !body.user || !body.name)) {
-    note.innerHTML = '<span class="err-dot"></span> host, username and database are required for MySQL';
+  if (!body.host || !body.user || !body.name) {
+    note.innerHTML = '<span class="err-dot"></span> host, username and database are required for PostgreSQL';
     return;
   }
   const res = await api("/api/v1/db/configure", {
@@ -1212,6 +2004,12 @@ async function loadRedisTab() {
     } else if (res.status === 401) {
       if (st) st.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><p class="sub" style="margin:0"><span class="warn-txt">●</span> Redis status requires sign-in. Please log in as ADMIN.</p><button class="btn ghost sm" id="redis-login-btn">Sign in</button></div>`;
       $("redis-login-btn")?.addEventListener("click", () => { if (typeof openLogin === "function") openLogin(); });
+      return;
+    } else if (res.status === 403) {
+      // B-3/FS-8: the whole Redis panel is ADMIN-only; say so instead of the
+      // generic "server unavailable" text, which sends admins chasing a
+      // non-existent outage.
+      if (st) st.innerHTML = `<p class="sub" style="margin:0"><span class="warn-txt">●</span> The Redis cache panel is restricted to administrators.</p>`;
       return;
     } else {
       if (st) st.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><p class="sub" style="margin:0"><span class="err-dot"></span> Redis status unavailable (${res.status}). Ensure server is running.</p><button class="btn ghost sm" id="redis-refresh-btn">⟳ Retry</button></div>`;
@@ -1569,7 +2367,7 @@ async function redisRawInfo() {
 }
 
 /* ---------------- reading worklist (roadmap #30) ---------------- */
-const RWL = { state: "UNREAD", page: 1, limit: 25, mine: false };
+const RWL = { state: "UNREAD", page: 1, limit: 10, total: 0, mine: false, abort: null };
 
 async function loadReadingCounts() {
   const res = await api("/api/v1/worklist-tasks/counts");
@@ -1584,13 +2382,56 @@ async function loadReadingCounts() {
 function setCount(id, n) { const el = $(id); if (el) el.textContent = n ?? 0; }
 
 async function loadReadingTasks() {
-  if (!state.token) { $("rwl-list").innerHTML = `<p class="sub" style="padding:18px">Sign in to see your reading tasks.</p>`; return; }
+  const list = $("rwl-list");
+  const pager = $("rwl-pager");
+  if (RWL.abort) RWL.abort.abort();
+  if (!state.token) {
+    list.innerHTML = `<p class="sub" style="padding:18px">Sign in to see your reading tasks.</p>`;
+    pager.hidden = true;
+    return;
+  }
+  const controller = new AbortController();
+  RWL.abort = controller;
   const q = new URLSearchParams({ state: RWL.state, page: RWL.page, limit: RWL.limit });
   if (RWL.mine) q.set("radiologist", state.username || "");
-  const res = await api(`/api/v1/worklist-tasks?${q}`);
-  if (!res.ok) { $("rwl-list").innerHTML = `<p class="sub" style="padding:18px">Failed to load tasks (${res.status}).</p>`; return; }
-  const data = await res.json();
-  renderReadingTasks(data.items || []);
+  pager.hidden = true;
+  list.innerHTML = `<p class="sub reading-loading">Loading ${RWL.limit} ${RWL.state.toLowerCase()} studies…</p>`;
+  try {
+    const res = await api(`/api/v1/worklist-tasks?${q}`, { signal: controller.signal });
+    if (!res.ok) {
+      renderReadingError(readingLoadError(res.status));
+      return;
+    }
+    const data = await res.json();
+    const items = Array.isArray(data.items) ? data.items : [];
+    RWL.total = Number.isFinite(data.total) ? data.total : items.length;
+    const lastPage = Math.max(1, Math.ceil(RWL.total / RWL.limit));
+    if (RWL.page > lastPage) { RWL.page = lastPage; return loadReadingTasks(); }
+    renderReadingTasks(items);
+    renderReadingPager();
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    // The visible retry state handles network and malformed-response failures without logging request data.
+    renderReadingError("Could not reach the reading worklist. Check the connection and try again.");
+  }
+}
+
+function readingLoadError(status) {
+  if (status === 401) return "Your session has expired. Sign in again to load reading tasks.";
+  if (status === 403) return "Your account does not have access to the reading worklist.";
+  return `The reading worklist could not be loaded (HTTP ${status}). Try again.`;
+}
+
+function renderReadingError(message) {
+  $("rwl-list").innerHTML = `<div class="reading-error" role="alert"><span aria-hidden="true">!</span><p>${esc(message)}</p><button class="btn sm" type="button" data-rwl-retry>Retry</button></div>`;
+}
+
+function renderReadingPager() {
+  const pages = Math.max(1, Math.ceil(RWL.total / RWL.limit));
+  $("rwl-pager").hidden = RWL.total === 0;
+  $("rwl-pg-info").textContent = `Page ${RWL.page} of ${pages} · ${RWL.total} studies`;
+  $("rwl-pg-prev").disabled = RWL.page <= 1;
+  $("rwl-pg-next").disabled = RWL.page >= pages;
 }
 
 function renderReadingTasks(items) {
@@ -1612,12 +2453,12 @@ function renderReadingTasks(items) {
         ? '<span class="wl-status prog">🎙️ dictated</span>'
         : '<span class="wl-status open">📖 unread</span>';
     const repBadge = s.report_status
-      ? `<a class="report-badge ${s.report_status.toLowerCase()}" title="Open the radiology report" onclick="openReport('${encodeURIComponent(s.study_uid)}', '${esc(s.patient_name || "Patient")}')">${s.report_status === "FINALIZED" ? "📄 FINALIZED" : "📝 DRAFT"}</a>`
+      ? `<a href="#" role="button" class="report-badge ${s.report_status.toLowerCase()}" title="Open the radiology report" data-action="open-report" data-study-id="${esc(s.study_uid)}" data-patient-name="${esc(s.patient_name || "Patient")}">${s.report_status === "FINALIZED" ? "📄 FINALIZED" : "📝 DRAFT"}</a>`
       : "";
     const assignee = s.assigned_radiologist
       ? `<span class="sub">→ ${esc(s.assigned_radiologist)}</span>` : "";
     const thumb = s.thumbnail
-      ? `<div class="thumb-wrap"><div class="thumb-skel" aria-hidden="true"></div><img class="thumb" src="${s.thumbnail}" loading="lazy" alt="" onload="this.previousElementSibling.remove();this.classList.add('loaded')" onerror="this.previousElementSibling.remove();this.replaceWith(Object.assign(document.createElement('div'),{className:'thumb empty',innerHTML:'NO<br/>IMG'}))" /><span class="thumb-hint">View</span><span class="mod-tag" style="--mod:${modColor}">${modCode}</span></div>`
+      ? `<div class="thumb-wrap"><div class="thumb-skel" aria-hidden="true"></div><img class="thumb" src="${esc(s.thumbnail)}" loading="lazy" alt="" /><span class="thumb-hint">View</span><span class="mod-tag" style="--mod:${modColor}">${modCode}</span></div>`
       : `<div class="thumb-wrap"><div class="thumb empty">NO<br/>IMG</div><span class="mod-tag" style="--mod:${modColor}">${modCode}</span></div>`;
     return `
     <div class="study-row" style="--mod:${modColor};animation-delay:${Math.min((RWL.page - 1) * 20, 300)}ms">
@@ -1635,13 +2476,14 @@ function renderReadingTasks(items) {
       <div class="cell">${taskBadge}</div>
       <div class="actions">
         ${viewerLink(s.study_uid)}
-        <button class="icon-btn" title="Open in viewer" onclick="location.href=viewerUrl('${s.study_uid}')">👁</button>
-        <button class="icon-btn ${s.stat_flag ? "danger" : ""}" title="Toggle STAT flag" onclick="rwlToggleStat('${encodeURIComponent(s.study_uid)}', ${s.stat_flag ? "false" : "true"})">🚨</button>
-        <button class="icon-btn" title="Assign a radiologist" onclick="rwlAssign('${encodeURIComponent(s.study_uid)}', '${esc(s.assigned_radiologist || "")}')">👤</button>
-        ${s.task_state !== "READ" ? `<button class="icon-btn" title="Mark as read" onclick="rwlMarkRead('${encodeURIComponent(s.study_uid)}')">✓</button>` : `<button class="icon-btn" title="Move back to unread" onclick="rwlMarkUnread('${encodeURIComponent(s.study_uid)}')">↺</button>`}
+        <button type="button" class="icon-btn" title="Open in viewer" data-action="open-viewer" data-study-id="${esc(s.study_uid)}">👁</button>
+        <button type="button" class="icon-btn ${s.stat_flag ? "danger" : ""}" title="Toggle STAT flag" data-action="toggle-stat" data-study-id="${esc(s.study_uid)}" data-stat="${s.stat_flag ? "false" : "true"}">🚨</button>
+        <button type="button" class="icon-btn" title="Assign a radiologist" data-action="assign-radiologist" data-study-id="${esc(s.study_uid)}" data-radiologist="${esc(s.assigned_radiologist || "")}">👤</button>
+        ${s.task_state !== "READ" ? `<button type="button" class="icon-btn" title="Mark as read" data-action="mark-read" data-study-id="${esc(s.study_uid)}">✓</button>` : `<button type="button" class="icon-btn" title="Move back to unread" data-action="mark-unread" data-study-id="${esc(s.study_uid)}">↺</button>`}
       </div>
     </div>`;
   }).join("");
+  setupThumbnailImages(list);
 }
 
 async function rwlToggleStat(uid, on) {
@@ -1679,6 +2521,8 @@ async function rwlMarkUnread(uid) {
 
 /* ---------------- modality worklist ---------------- */
 async function loadWorklist() {
+  // The redesigned Workflow console (workflow-console.js) owns rendering now.
+  if (!$("worklist-list")) { window.PaxsWorkflow?.load(); return; }
   const status = $("wl-filter").value;
   const res = await api(`/api/v1/worklist${status ? `?status=${encodeURIComponent(status)}` : ""}`);
   if (!res.ok) { $("worklist-list").innerHTML = `<p class="sub">Failed to load worklist (${res.status}) — sign in.</p>`; return; }
@@ -1753,6 +2597,7 @@ async function addStep() {
 
 /* ---------------- performed steps (MPPS) ---------------- */
 async function loadPerformed() {
+  if (!$("mpps-list")) return;
   const res = await api("/api/v1/mpps");
   if (!res.ok) { $("mpps-list").innerHTML = `<p class="sub">Failed to load performed steps (${res.status}) — sign in.</p>`; return; }
   const steps = await res.json();
@@ -1783,42 +2628,262 @@ const FAIL_REASON = {
 };
 
 async function loadCommitments() {
+  if (!$("commit-list")) return;
   const status = $("commit-filter").value;
-  const res = await api(`/api/v1/commitments${status ? `?status=${encodeURIComponent(status)}` : ""}`);
-  if (!res.ok) { $("commit-list").innerHTML = `<p class="sub">Failed to load commitments (${res.status}) — sign in.</p>`; return; }
-  const rows = await res.json();
-  if (!rows.length) { $("commit-list").innerHTML = `<p class="sub">No storage commitment requests yet. A modality asking &quot;are these images archived?&quot; via N-ACTION appears here.</p>`; return; }
-  $("commit-list").innerHTML = rows.map((c) => {
-    const badge = c.status === "COMPLETED" ? '<span class="wl-status done">✓ committed</span>'
-      : c.status === "FAILED" ? '<span class="wl-status cx">✕ failed</span>'
-      : '<span class="wl-status open">⏳ pending</span>';
-    const fails = (c.failures || []).map((f) =>
-      `<span class="cmt-fail">${esc(f.sop_instance_uid)} → ${FAIL_REASON[f.failure_reason] || `0x${(f.failure_reason ?? 0).toString(16)}`}</span>`).join("");
-    return `
-    <div class="node-item">
-      <div class="cell-main">
-        <div class="name">${esc(c.ae_title || "unknown AE")} ${badge}</div>
-        <div class="sub mono">tx ${esc(c.transaction_uid)} · ${c.verified_count}/${c.instance_count} instances verified${c.sent_at ? ` · report ${new Date(c.sent_at).toLocaleString()}` : ""}</div>
-        ${fails ? `<div class="sub">${fails}</div>` : ""}
-      </div>
-    </div>`;
-  }).join("");
+  const list = $("commit-list");
+  list.innerHTML = `<p class="sub wf-loading">Loading commitment requests…</p>`;
+  try {
+    const res = await api(`/api/v1/commitments${status ? `?status=${encodeURIComponent(status)}` : ""}`);
+    if (!res.ok) {
+      const message = res.status === 401 ? "Your session has expired. Sign in again to view commitments."
+        : res.status === 403 ? "Your account does not have access to storage commitments."
+          : `The server could not load commitment requests (HTTP ${res.status}). Retry, or ask an administrator to check the server if the problem continues.`;
+      renderCommitmentError(message);
+      return;
+    }
+    const rows = await res.json();
+    if (!rows.length) {
+      list.innerHTML = `<p class="sub">No storage commitment requests yet. A modality asking &quot;are these images archived?&quot; via N-ACTION appears here.</p>`;
+      return;
+    }
+    list.innerHTML = rows.map((c) => {
+      const badge = c.status === "COMPLETED" ? '<span class="wl-status done">✓ committed</span>'
+        : c.status === "FAILED" ? '<span class="wl-status cx">✕ failed</span>'
+          : '<span class="wl-status open">⏳ pending</span>';
+      const fails = (c.failures || []).map((f) =>
+        `<span class="cmt-fail">${esc(f.sop_instance_uid)} → ${FAIL_REASON[f.failure_reason] || `0x${(f.failure_reason ?? 0).toString(16)}`}</span>`).join("");
+      return `
+      <div class="node-item">
+        <div class="cell-main">
+          <div class="name">${esc(c.ae_title || "unknown AE")} ${badge}</div>
+          <div class="sub mono">tx ${esc(c.transaction_uid)} · ${c.verified_count}/${c.instance_count} instances verified${c.sent_at ? ` · report ${new Date(c.sent_at).toLocaleString()}` : ""}</div>
+          ${fails ? `<div class="sub">${fails}</div>` : ""}
+        </div>
+      </div>`;
+    }).join("");
+  } catch (_) {
+    // Show a recoverable message instead of leaving stale data after a network or response error.
+    renderCommitmentError("Could not reach the commitment service. Check the connection and retry.");
+  }
+}
+
+function renderCommitmentError(message) {
+  $("commit-list").innerHTML = `<div class="wf-request-error" role="alert"><span aria-hidden="true">!</span><p>${esc(message)}</p><button class="btn sm" type="button" data-retry-commitments>Retry</button></div>`;
 }
 
 /* ---------------- dicom nodes ---------------- */
+async function clearTransferHistory() {
+  if (window.PaxsTransfers) return window.PaxsTransfers.clearHistory();
+  const button = $("transfer-clear-history");
+  if (!button || button.disabled) return;
+  if (!window.confirm("Clear up to 100 completed, partial, failed, or cancelled transfer records? Queued/running jobs and stored images will be kept.")) return;
+  button.disabled = true;
+  try {
+    const response = await api("/api/v1/transfers/history?limit=100", { method: "DELETE" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(data.detail || `Could not clear finished jobs (${response.status})`, "err");
+      return;
+    }
+    toast(data.deleted ? `${data.deleted} finished job records cleared. Clear again if older history remains.` : "No finished transfer records to clear", "ok");
+    await loadTransfers();
+  } catch (_error) {
+    toast("Transfer service could not be reached. Check the connection and retry.", "err");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function bindTransferCancelButtons(list) {
+  list.querySelectorAll("[data-transfer-cancel]").forEach((button) => button.addEventListener("click", async () => {
+    const jobId = button.dataset.transferCancel;
+    const direction = button.dataset.transferDirection || "transfer";
+    if (!window.confirm(`Cancel this queued ${direction.toLowerCase()} job? It will not start after cancellation.`)) return;
+    button.disabled = true;
+    const cancel = await api(`/api/v1/transfers/${jobId}/cancel`, { method: "POST" });
+    const data = await cancel.json().catch(() => ({}));
+    if (!cancel.ok) toast(data.detail || `Could not cancel job (${cancel.status})`, "err");
+    else toast("Transfer cancelled", "ok");
+    loadTransfers();
+  }));
+}
+
+function transferProgressMessage(job) {
+  const completed = job.completed_items || 0;
+  const failed = job.failed_items || 0;
+  if (job.status === "PENDING") return "Waiting in queue · starts automatically when a worker is available";
+  if (job.status === "RUNNING") return job.direction === "RETRIEVE"
+    ? `${completed} received and saved${failed ? ` · ${failed} failed` : ""} · images are indexed as they arrive`
+    : `${completed} confirmed sent${failed ? ` · ${failed} failed` : ""} · one DICOM association for this job`;
+  if (job.status === "COMPLETED") return job.direction === "RETRIEVE"
+    ? `${completed} images saved to configured storage and indexed in the archive database`
+    : `${completed} images confirmed by the destination`;
+  if (job.status === "PARTIAL") return `${completed} completed · ${failed} failed`;
+  if (job.status === "CANCELLED") return "Cancelled before the worker started";
+  if (job.error_code === "NO_MATCHES") return "The remote peer returned no images. Verify the study exists there and retrieve service is enabled.";
+  if (job.error_code === "NO_SUCCESSFUL_INSTANCES") return "Images were found, but none transferred successfully. Check the peer and archive logs.";
+  return `Transfer failed${job.error_code ? ` · ${job.error_code}` : ""}; review the error details before retrying`;
+}
+
+async function loadTransfers() {
+  if (window.PaxsTransfers) return window.PaxsTransfers.load();
+  const list = $("transfer-list");
+  if (!list || transferLoading) return;
+  transferLoading = true;
+  let res;
+  try {
+    res = await api("/api/v1/transfers?limit=30");
+  } catch (_error) {
+    list.innerHTML = '<p class="sub">Transfer jobs could not be reached. Check the server connection and refresh.</p>';
+    transferLoading = false;
+    return;
+  }
+  transferLoading = false;
+  if (!res.ok) {
+    list.innerHTML = `<p class="sub">Could not load transfer jobs (${res.status}). Sign in with a transfer-enabled account and refresh.</p>`;
+    return;
+  }
+  const jobs = await res.json();
+  const stats = $("transfer-stats");
+
+  if (!jobs.length) {
+    if (stats) stats.hidden = true;
+    list.innerHTML = '<div class="transfer-empty"><b>No transfer jobs yet</b><span>Use ➤ on a study to send it, or choose “Queue study” in the remote retrieve window. Queued jobs appear here and start on their own.</span></div>';
+    return;
+  }
+
+  // Four counters over the same page of jobs the list shows. Derived, never
+  // invented: a board that reports numbers the list contradicts is worse than
+  // no board.
+  if (stats) {
+    const tally = jobs.reduce((acc, job) => {
+      const key = String(job.status || "").toUpperCase();
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+    const counters = [
+      ["is-queued", tally.PENDING || 0, "Queued"],
+      ["is-running", tally.RUNNING || 0, "Running"],
+      ["is-done", tally.COMPLETED || 0, "Completed"],
+      ["is-issue", (tally.FAILED || 0) + (tally.PARTIAL || 0), "Needs attention"],
+    ];
+    stats.innerHTML = counters.map(([cls, count, label]) =>
+      `<div class="transfer-stat ${cls}"><b>${count}</b><span>${label}</span></div>`
+    ).join("");
+    stats.hidden = false;
+  }
+
+  list.innerHTML = jobs.map((job) => {
+    const studies = Array.isArray(job.study_uids) ? job.study_uids.length : 0;
+    const result = transferProgressMessage(job);
+    const total = Number(job.total_items) || 0;
+    const completed = Number(job.completed_items) || 0;
+    const failed = Number(job.failed_items) || 0;
+    const knownTotal = total > 0;
+    const percent = knownTotal ? Math.min(100, Math.round(((completed + failed) / total) * 100)) : 0;
+    const active = job.status === "RUNNING";
+    const status = String(job.status || "").toUpperCase();
+    const progressLabel = knownTotal ? `${percent}%` : active ? "In progress" : job.status === "PENDING" ? "Queued" : "—";
+    const created = job.created_at ? new Date(job.created_at).toLocaleString() : "—";
+    const started = job.started_at ? new Date(job.started_at).toLocaleTimeString() : null;
+    const canCancel = job.status === "PENDING";
+    const error = job.error_message ? `<div class="transfer-error">${esc(job.error_message)}</div>` : "";
+    const isRetrieve = job.direction === "RETRIEVE";
+    const cancel = canCancel
+      ? `<button class="transfer-cancel-x" data-transfer-cancel="${job.id}" data-transfer-direction="${esc(job.direction)}" type="button" title="Cancel queued job" aria-label="Cancel queued ${esc(job.direction)} job">×</button>`
+      : "";
+    return `<article class="transfer-job ${active ? "is-running" : ""}" data-status="${esc(status.toLowerCase())}">
+      <div class="transfer-job-top">
+        <div class="transfer-job-title">
+          <span class="transfer-direction ${isRetrieve ? "retrieve" : "send"}" aria-hidden="true">${isRetrieve ? "↓" : "↑"}</span>
+          <div>
+            <div class="name">${esc(isRetrieve ? "Retrieve from" : "Send to")} ${esc(job.node_ae_title)}</div>
+            <div class="sub mono">${esc(job.transport)} · ${studies} ${studies === 1 ? "study" : "studies"} · job #${job.id}</div>
+          </div>
+        </div>
+        <div class="transfer-job-tags">
+          <span class="transfer-status ${esc(status.toLowerCase())}">${esc(status)}</span>
+          ${cancel}
+        </div>
+      </div>
+      <div class="transfer-progress-head"><span>${esc(result)}</span><strong>${progressLabel}</strong></div>
+      <div class="transfer-progress-track ${knownTotal ? "determinate" : active ? "indeterminate" : "empty"}" role="progressbar" aria-label="${esc(job.direction)} job progress" ${knownTotal ? `aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"` : "aria-valuetext=\"Waiting for first confirmed instance count\""}><span style="width:${knownTotal ? percent : 0}%"></span></div>
+      <div class="transfer-job-meta"><span>${knownTotal ? `${completed + failed} of ${total} images processed` : active ? `${completed} saved/sent · ${failed} failed · total discovered during transfer` : `${completed} completed · ${failed} failed`}</span><span>${started ? `Started ${esc(started)}` : `Queued ${esc(created)}`}</span></div>${error}
+    </article>`;
+  }).join("");
+  bindTransferCancelButtons(list);
+}
+
+async function enqueueTransfer(nodeAeTitle, direction, transport, studyUid, options = null) {
+  if (!studyUid) { toast("Enter a Study UID first", "err"); return false; }
+  let res;
+  try {
+    res = await api("/api/v1/transfers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        direction,
+        transport: transport === "dicomweb" ? "DICOMWEB" : transport === "cmove" ? "CMOVE" : "DIMSE",
+        node_ae_title: nodeAeTitle,
+        study_uids: [studyUid],
+      }),
+    });
+  } catch (_error) {
+    toast("Transfer service could not be reached. Check the server connection and retry.", "err");
+    return false;
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    toast(data.detail || `Could not queue transfer (${res.status})`, "err");
+    return false;
+  }
+  if (!options?.quiet) {
+    toast(`${direction === "SEND" ? "Send" : "Retrieve"} queued for ${nodeAeTitle} · job #${data.id}`, "ok");
+    loadTransfers();
+  }
+  return true;
+}
+
+function sortNodeList() {
+  const mode = $("node-sort").value;
+  const list = $("node-list");
+  const rows = [...list.querySelectorAll(".node-item")];
+  rows.sort((a, b) => {
+    const byTitle = a.querySelector("[data-ping]").dataset.ping.localeCompare(
+      b.querySelector("[data-ping]").dataset.ping, undefined, { numeric: true },
+    );
+    if (mode === "title-desc") return -byTitle;
+    if (mode === "status") return a.dataset.nodeDisabled - b.dataset.nodeDisabled || byTitle;
+    if (mode === "transport") return b.dataset.nodeWeb - a.dataset.nodeWeb || byTitle;
+    return byTitle;
+  });
+  list.append(...rows);
+}
+
 async function loadNodes() {
+  const dcmtkStatus = $("node-dcmtk-status");
+  dcmtkStatus.hidden = true;
+  void api("/api/v1/nodes/dcmtk/status").then(async (response) => {
+    if (!response.ok) return;
+    const dcmtk = await response.json();
+    dcmtkStatus.textContent = dcmtk.available
+      ? `DCMTK ${dcmtk.version} · ${(dcmtk.operations || ["C-ECHO"]).join(", ")}${dcmtk.move_reason ? ` · ${dcmtk.move_reason}` : ""}`
+      : (dcmtk.reason || "DCMTK is not configured");
+    dcmtkStatus.hidden = false;
+  }).catch(() => { dcmtkStatus.hidden = true; });
   const res = await api("/api/v1/nodes");
   if (!res.ok) { $("node-list").innerHTML = `<p class="sub">Failed to load nodes (${res.status}) — sign in as admin.</p>`; return; }
   const nodes = await res.json();
+  window.PAXS_NODES = nodes;
   if (!nodes.length) { $("node-list").innerHTML = `<p class="sub">No nodes registered yet. Add the AE title of a peer archive so C-MOVE can find it.</p>`; return; }
   $("node-list").innerHTML = nodes.map((n) => {
     const webBtns = n.web_url ? `
-        <button class="btn sm" data-webq="${esc(n.ae_title)}" title="Query this node over DICOMweb (QIDO-RS — C-FIND's REST twin)">Web Query</button>
-        <button class="btn sm" data-webr="${esc(n.ae_title)}" title="Retrieve a study over DICOMweb (WADO-RS — C-GET's REST twin)">Web Retrieve</button>
-        <button class="btn sm" data-webu="${esc(n.ae_title)}" title="Upload a local study to this node over DICOMweb (STOW-RS — C-STORE's REST twin)">Web Upload</button>
-        <button class="btn sm fast" data-fastu="${esc(n.ae_title)}" title="Transfer Accelerator — parallel chunked STOW-RS upload, bypassing C-STORE">⚡ Fast Upload</button>` : "";
+        <button class="btn sm" data-webq="${esc(n.ae_title)}" title="Query this node over DICOMweb (QIDO-RS — C-FIND's REST twin)"><svg class="rail-ic node-icon node-icon-accent" aria-hidden="true"><use href="#ic-node-search"/></svg> Query</button>
+        <button class="btn sm" data-webr="${esc(n.ae_title)}" title="Retrieve a study over DICOMweb (WADO-RS — C-GET's REST twin)"><svg class="rail-ic node-icon node-icon-ok" aria-hidden="true"><use href="#ic-node-download"/></svg> Retrieve</button>
+        <button class="btn sm" data-webu="${esc(n.ae_title)}" title="Upload a local study to this node over DICOMweb (STOW-RS — C-STORE's REST twin)"><svg class="rail-ic node-icon node-icon-accent" aria-hidden="true"><use href="#ic-node-upload"/></svg> Upload</button>
+        <button class="btn sm fast" data-fastu="${esc(n.ae_title)}" title="Transfer Accelerator — parallel chunked STOW-RS upload, bypassing C-STORE"><svg class="rail-ic node-icon node-icon-ok" aria-hidden="true"><use href="#ic-bolt"/></svg> Fast upload</button>` : "";
     return `
-    <div class="node-item">
+    <div class="node-item" data-node-web="${n.web_url ? "1" : "0"}" data-node-disabled="${n.enabled ? "0" : "1"}">
       <div class="cell-main">
         <div class="name">${esc(n.ae_title)} ${n.enabled ? "" : '<span class="tag-disabled">disabled</span>'}
           ${n.web_url ? '<span class="wl-status open" style="font-size:10px">DICOMweb</span>' : ""}
@@ -1826,27 +2891,34 @@ async function loadNodes() {
         <div class="sub mono">${esc(n.host)}:${n.port}${n.description ? ` · ${esc(n.description)}` : ""}${n.web_url ? `<br/><span class="faint">web ${esc(n.web_url)}</span>` : ""}</div>
       </div>
       <div class="actions">
-        <button class="btn sm" data-ping="${esc(n.ae_title)}">Ping</button>
-        <button class="btn sm" data-find="${esc(n.ae_title)}" title="Query this node (C-FIND SCU)">Find</button>
-        <button class="btn sm" data-pull="${esc(n.ae_title)}" title="Pull studies from this node (C-GET SCU)">Pull</button>
-        ${webBtns}
-        <button class="btn sm danger" data-del="${esc(n.ae_title)}">Del</button>
+        <span class="act-group act-dimse" role="group" aria-label="DIMSE operations"><span class="node-action-label" aria-hidden="true">DIMSE</span>
+          <button class="btn sm" data-ping="${esc(n.ae_title)}"><svg class="rail-ic node-icon node-icon-ok" aria-hidden="true"><use href="#ic-node-ping"/></svg> Ping</button>
+          <button class="btn sm" data-find="${esc(n.ae_title)}" title="Query this node (C-FIND SCU)"><svg class="rail-ic node-icon node-icon-accent" aria-hidden="true"><use href="#ic-node-search"/></svg> Find</button>
+          <button class="btn sm" data-pull="${esc(n.ae_title)}" title="Pull studies from this node (C-GET SCU)"><svg class="rail-ic node-icon node-icon-ok" aria-hidden="true"><use href="#ic-node-download"/></svg> Pull</button>
+          ${state.role === "ADMIN" && n.enabled && n.dcmtk_move ? `<button class="btn sm" data-move="${esc(n.ae_title)}" title="Retrieve studies using DCMTK C-MOVE"><svg class="rail-ic node-icon node-icon-ok" aria-hidden="true"><use href="#ic-node-download"/></svg> C-MOVE</button>` : ""}
+        </span>
+        ${webBtns ? `<span class="act-group act-web" role="group" aria-label="DICOMweb operations"><span class="node-action-label" aria-hidden="true">DICOMweb</span>${webBtns}</span>` : ""}
+        <button class="btn sm danger" data-del="${esc(n.ae_title)}"><svg class="rail-ic node-icon node-icon-danger" aria-hidden="true"><use href="#ic-node-remove"/></svg> Remove</button>
       </div>
     </div>`;
   }).join("");
+  sortNodeList();
   [...document.querySelectorAll("[data-ping]")].forEach((b) =>
     b.addEventListener("click", async () => {
-      b.disabled = true; b.textContent = "…";
+      b.disabled = true;
       const res = await api(`/api/v1/nodes/${encodeURIComponent(b.dataset.ping)}/ping`, { method: "POST" });
-      b.disabled = false; b.textContent = "Ping";
+      b.disabled = false;
       if (!res.ok) { toast(`Ping failed (${res.status})`, "err"); return; }
       const r = await res.json();
-      toast(r.ok ? `C-ECHO ok (${r.ae_title})` : `C-ECHO failed: ${r.reason || r.status}`, r.ok ? "ok" : "err");
+      const engine = r.engine === "dcmtk" ? " via DCMTK" : "";
+      toast(r.ok ? `C-ECHO ok (${r.ae_title})${engine}` : `C-ECHO failed${engine}: ${r.reason || r.status}`, r.ok ? "ok" : "err");
     }));
   [...document.querySelectorAll("[data-find]")].forEach((b) =>
     b.addEventListener("click", () => openFind(b.dataset.find)));
   [...document.querySelectorAll("[data-pull]")].forEach((b) =>
     b.addEventListener("click", () => openPull(b.dataset.pull)));
+  [...document.querySelectorAll("[data-move]")].forEach((b) =>
+    b.addEventListener("click", () => openFind(b.dataset.move, "cmove")));
   [...document.querySelectorAll("[data-webq]")].forEach((b) =>
     b.addEventListener("click", () => openFind(b.dataset.webq, "dicomweb")));
   [...document.querySelectorAll("[data-webr]")].forEach((b) =>
@@ -1966,24 +3038,27 @@ function dbpPoolHTML(p) {
   const pct = sync.pool_size ? Math.round((sync.checkedout / sync.pool_size) * 100) : 0;
   const overflowPct = sync.max_overflow ? Math.round((sync.overflow / sync.max_overflow) * 100) : 0;
   return `
-    <div class="sys-row"><span class="sys-k">Backend</span><span class="sys-v">${esc(p.backend)}${p.backend === "mysql" ? ' <span class="badge">MySQL</span>' : ""}</span></div>
-    <div class="sys-row"><span class="sys-k">Database</span><span class="sys-v mono">${esc(p.database)}</span></div>
-    <div class="sys-row"><span class="sys-k">Sync pool</span><span class="sys-v">${esc(sync.class || "—")}</span></div>
     <div class="sys-row"><span class="sys-k">Checked out</span><span class="sys-v"><b>${sync.checkedout}</b> / ${sync.pool_size} <span class="faint">(${pct}%)</span></span></div>
     <div class="sys-row"><span class="sys-k">Pool size</span><span class="sys-v">${sync.size} <span class="faint">(max ${sync.pool_size})</span></span></div>
     <div class="sys-row"><span class="sys-k">Overflow</span><span class="sys-v">${sync.overflow} <span class="faint">(max ${sync.max_overflow}, ${overflowPct}%)</span></span></div>
-    <div class="sys-row"><span class="sys-k">Async engine pool</span><span class="sys-v">${esc(p.pool?.async_class || "—")} <span class="faint">(NullPool)</span></span></div>
-    <div class="sys-row"><span class="sys-k">Staleness guards</span><span class="sys-v">pre-ping ${p.pool?.pre_ping ? "✓" : "✕"} · recycle ${p.pool?.recycle_seconds}s</span></div>`;
+    <div class="sys-row"><span class="sys-k">Database</span><span class="sys-v mono">${esc(p.database)}</span></div>
+    <div class="sys-row"><span class="sys-k">Sync pool</span><span class="sys-v">${esc(sync.class || "—")}</span></div>
+    <div class="sys-row"><span class="sys-k">Async engine pool</span><span class="sys-v">${esc(p.pool?.async_class || "—")}</span></div>
+    <div class="sys-row"><span class="sys-k">Staleness guards</span><span class="sys-v">pre-ping ${p.pool?.pre_ping ? "✓" : "✕"} · recycle ${p.pool?.recycle_seconds}s</span></div>
+    <div class="sys-row"><span class="sys-k">Backend</span><span class="sys-v">${esc(p.backend)}</span></div>`;
 }
 
-function dbpMySQLHTML(m) {
+function dbpPostgresHTML(m) {
   if (!m) return "";
-  if (m.ok === false) return `<div class="sys-row"><span class="sys-k">MySQL counters</span><span class="sys-v err-dot"></span><span class="faint"> ${esc(m.error)}</span></div>`;
+  if (m.ok === false) return `<div class="sys-row"><span class="sys-k">PostgreSQL counters</span><span class="sys-v err-dot"></span><span class="faint"> ${esc(m.error)}</span></div>`;
+  const hit = m.cache_hit_ratio == null ? "—" : `${(m.cache_hit_ratio * 100).toFixed(1)}%`;
   return `
-    <div class="sys-row"><span class="sys-k">Threads connected</span><span class="sys-v"><b>${m.threads_connected}</b> / ${m.max_connections}</span></div>
-    <div class="sys-row"><span class="sys-k">Max used connections</span><span class="sys-v">${m.max_used_connections}</span></div>
-    <div class="sys-row"><span class="sys-k">Total connections</span><span class="sys-v">${m.total_connections}</span></div>
-    <div class="sys-row"><span class="sys-k">Server slow queries</span><span class="sys-v">${m.slow_queries_total} <span class="faint">(long_query_time ${m.long_query_time}s)</span></span></div>
+    <div class="sys-row"><span class="sys-k">Connections</span><span class="sys-v"><b>${m.connections}</b> / ${m.max_connections} <span class="faint">(${m.active} active)</span></span></div>
+    <div class="sys-row"><span class="sys-k">Idle in transaction</span><span class="sys-v">${m.idle_in_transaction}</span></div>
+    <div class="sys-row"><span class="sys-k">Commits · rollbacks</span><span class="sys-v">${m.commits} · ${m.rollbacks}</span></div>
+    <div class="sys-row"><span class="sys-k">Buffer cache hit</span><span class="sys-v">${hit}</span></div>
+    <div class="sys-row"><span class="sys-k">Deadlocks</span><span class="sys-v">${m.deadlocks}</span></div>
+    <div class="sys-row"><span class="sys-k">Database size</span><span class="sys-v">${(m.database_bytes / 1048576).toFixed(1)} MB</span></div>
     <div class="sys-row"><span class="sys-k">Uptime</span><span class="sys-v">${(m.uptime_seconds / 3600).toFixed(1)} h</span></div>`;
 }
 
@@ -1995,7 +3070,12 @@ async function loadDbPerf() {
     return;
   }
   const p = await res.json();
-  pool.innerHTML = `<div class="sys-grid" style="grid-template-columns:repeat(auto-fill,minmax(210px,1fr))">${dbpPoolHTML(p)}${dbpMySQLHTML(p.mysql)}</div>`;
+  pool.innerHTML = `
+    <h4><svg class="rail-ic" aria-hidden="true"><use href="#ic-gauge"/></svg>Connection pool</h4>
+    <div class="sys-grid">${dbpPoolHTML(p)}</div>
+    ${p.postgresql ? `
+      <h4><svg class="rail-ic" aria-hidden="true"><use href="#ic-database"/></svg>PostgreSQL counters</h4>
+      <div class="sys-grid">${dbpPostgresHTML(p.postgresql)}</div>` : ""}`;
 
   // replica card
   const rep = $("dbperf-replica");
@@ -2004,11 +3084,11 @@ async function loadDbPerf() {
   } else {
     const on = p.replica.enabled;
     const lag = p.replica.lag_seconds;
-    rep.innerHTML = `<div class="sys-grid" style="grid-template-columns:repeat(auto-fill,minmax(210px,1fr))">
+    rep.innerHTML = `<div class="sys-grid">
       <div class="sys-row"><span class="sys-k">Replica</span><span class="sys-v mono">${esc(p.replica.url_masked || "")}</span></div>
       <div class="sys-row"><span class="sys-k">Status</span><span class="sys-v">${p.replica.connected ? '<span class="ok-dot"></span>connected' : `<span class="err-dot"></span>down — ${esc(p.replica.error || "")}`}</span></div>
       <div class="sys-row"><span class="sys-k">Replication lag</span><span class="sys-v">${lag == null ? "—" : `<b>${lag}</b> s`}${p.replica.io_running ? ` · IO ${esc(p.replica.io_running)} · SQL ${esc(p.replica.sql_running)}` : ""}</span></div>
-      <div class="sys-row"><span class="sys-k">Route reads</span><span class="sys-v"><label class="sw"><input type="checkbox" id="rep-route"${on ? " checked" : ""}${p.replica.connected ? "" : " disabled"} /><i></i></label> <span class="faint">${on ? "replica" : "primary"}</span></span></div>
+      <div class="sys-row"><span class="sys-k">Route reads</span><span class="sys-v"><label class="sw"><input type="checkbox" id="rep-route" aria-label="Route reads to replica"${on ? " checked" : ""}${p.replica.connected ? "" : " disabled"} /><i></i></label> <span class="faint">${on ? "replica" : "primary"}</span></span></div>
     </div>`;
     const sw = $("rep-route");
     if (sw) sw.addEventListener("change", async () => {
@@ -2039,7 +3119,7 @@ async function loadDbPerfSlow() {
   if (!res.ok) { el.innerHTML = `<p class="sub">Slow-query log unavailable (${res.status}).</p>`; return; }
   const rows = await res.json();
   if (!rows.length) {
-    el.innerHTML = `<p class="sub">No slow queries recorded yet — flip the log on and hammer the archive.</p>`;
+    el.innerHTML = `<p class="sub">No slow queries recorded.</p>`;
     return;
   }
   el.innerHTML = rows.map((q) => `
@@ -2147,7 +3227,6 @@ async function loadLicensePanel() {
     const fpInput = $("lic-fp-input");
     if (fpInput && _adminServerFp) {
       fpInput.value = _adminServerFp;
-      fpInput.onclick = () => fpInput.select();
     }
 
     if (!stRes.ok || !st) {
@@ -2319,7 +3398,7 @@ async function testProtocolMatch() {
 }
 
 /* ----- user management (Admin → Users) ----- */
-const USER_ROLES = ["ADMIN", "RADIOLOGIST", "PHYSICIAN", "TECHNOLOGIST"];
+const USER_ROLES = ["ADMIN", "RADIOLOGIST", "PHYSICIAN", "TECHNOLOGIST", "REPORT_WRITER"];
 let _userModalAction = null;
 
 function avatarColor(name) {
@@ -2641,6 +3720,9 @@ async function loadServices() {
       <div class="svc-head">${svcBadge(w.enabled)} <b>${esc(w.name)}</b></div>
       <div class="svc-sub mono">${esc(w.detail)}</div>
     </div>`).join("");
+  if (window.PaxsServicesConsole && typeof window.PaxsServicesConsole.load === "function") {
+    void window.PaxsServicesConsole.load();
+  }
 }
 
 /* ----- system overview ----- */
@@ -2682,6 +3764,7 @@ async function fillNodeSelect() {
   const sel = $("rt-node");
   if (!res.ok) { sel.innerHTML = `<option value="">Sign in as admin</option>`; sel.disabled = true; return; }
   const nodes = await res.json();
+  window.PAXS_NODES = nodes;
   sel.innerHTML = nodes.length
     ? nodes.map((n) => `<option value="${n.id}">${esc(n.ae_title)} (${esc(n.host)}:${n.port})</option>`).join("")
     : `<option value="">No nodes — add one first</option>`;
@@ -3309,7 +4392,8 @@ async function loadScripts() {
     list.innerHTML = bks.map((sc) => `
       <div class="node-row bk-row ${sc.enabled ? "" : "bk-disabled"}">
         <div class="bk-main">
-          <span class="bk-name">🐍 ${esc(sc.name)} ${sc.loaded ? '<span class="bk-def">loaded</span>' : '<span class="bk-off">error</span>'}${sc.enabled ? "" : ' <span class="bk-off">disabled</span>'}</span>
+          <span class="bk-name">🐍 ${esc(sc.name)} ${sc.valid ? (sc.loaded ? '<span class="bk-def">loaded</span>' : '<span class="bk-def">available</span>') : '<span class="bk-off">syntax error</span>'}${sc.enabled ? "" : ' <span class="bk-off">disabled</span>'}</span>
+          ${sc.description || sc.author ? `<span class="bk-meta">${esc(sc.description || "")}${sc.author ? ` · by ${esc(sc.author)}` : ""}</span>` : ""}
           <span class="bk-meta">${sc.handlers && sc.handlers.length ? esc(sc.handlers.join(", ")) : "no handlers"}${sc.events ? ` · events: ${esc(sc.events.join(", "))}` : ""}</span>
           <span class="bk-meta">${sc.modified ? new Date(sc.modified).toLocaleString() : ""}</span>
         </div>
@@ -3344,9 +4428,9 @@ async function scriptAction(name, act) {
     return;
   }
   if (act === "run") {
-    const res = await api(`/api/v1/scripts/${encodeURIComponent(name)}/run`, {
+    const res = await api("/api/v1/scripts/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ event: "StudyReceived", payload: { study_uid: "1.2.3.9.9.9", patient_id: "P-TEST" } }),
+      body: JSON.stringify({ name, event: "StudyReceived", payload: { study_uid: "1.2.3.9.9.9", patient_id: "P-TEST" } }),
     });
     const d = await res.json().catch(() => ({}));
     if (res.ok) toast(`${name}: ran ${d.event || "ok"}`, "ok");
@@ -3447,7 +4531,6 @@ async function replicateStudyNow() {
 function openSchedule() {
   if (!state.token) { toast("Sign in to view the worklist", "err"); openLogin(); return; }
   switchView("workflow");
-  loadWorklist(); loadPerformed(); loadCommitments();
 }
 
 function openNodes() {
@@ -3461,13 +4544,14 @@ function findFilters() {
   const f = {};
   const pid = $("find-pid").value.trim();
   const name = $("find-name").value.trim();
-  const date = $("find-date").value.trim();
+  const from = $("find-date-from").value.replace(/-/g, "");
+  const to = $("find-date-to").value.replace(/-/g, "");
   const acc = $("find-acc").value.trim();
   const mod = $("find-mod").value.trim();
   const study = $("find-study").value.trim();
   if (pid) f.PatientID = pid;
   if (name) f.PatientName = name;
-  if (date) f.StudyDate = date;
+  if (from || to) f.StudyDate = `${from}-${to}`;
   if (acc) f.AccessionNumber = acc;
   if (mod) f.Modality = mod;
   if (study) f.StudyInstanceUID = study;
@@ -3477,135 +4561,197 @@ function findFilters() {
 function openFind(aeTitle, transport) {
   if (!state.token) { toast("Sign in to query nodes", "err"); openLogin(); return; }
   state.findNode = aeTitle;
-  state.findTransport = transport === "dicomweb" ? "dicomweb" : "dicom";
-  const tag = state.findTransport === "dicomweb"
-    ? '<span class="mwl-tag" style="background:rgba(52,211,153,.14);color:#34d399;border-color:rgba(52,211,153,.35)">QIDO-RS</span>'
-    : '<span class="mwl-tag">C-FIND</span>';
-  $("find-meta").innerHTML = `Querying ${esc(aeTitle)} — ${state.findTransport === "dicomweb" ? "DICOMweb QIDO-RS" : "C-FIND"} ${$("find-level").value} level. ${tag}`;
-  $("find-results").innerHTML = `<p class="sub">Set match keys, then run the query.</p>`;
+  state.findTransport = ["dicomweb", "cmove"].includes(transport) ? transport : "dicom";
+  $("find-meta").textContent = `${aeTitle} · Search remotely, select one or more studies, then retrieve all images in each selected study.`;
+  $("find-transport-tag").textContent = {
+    dicomweb: "QIDO-RS · WADO-RS", cmove: "C-FIND · C-MOVE (DCMTK)", dicom: "C-FIND · C-GET",
+  }[state.findTransport];
+  ["find-pid", "find-name", "find-date-from", "find-date-to", "find-acc", "find-mod", "find-study"].forEach((id) => { $(id).value = ""; });
+  $("find-results-summary").textContent = "Enter at least one search criterion to protect the remote archive from an unfiltered query.";
+  $("find-selection-count").textContent = "0 selected";
+  $("find-footer-selection").textContent = "Retrieved images are saved to configured storage and indexed in the archive database. Track job status in Transfer jobs.";
+  $("find-results").innerHTML = '<div class="transfer-empty"><b>Search a remote archive</b><span>Try a patient ID, patient name, or date range. You can select several studies after the results load.</span></div>';
+  $("find-queue-selected").disabled = true;
+  $("find-select-visible").disabled = true;
+  $("find-clear-selection").disabled = true;
   $("find-modal").hidden = false;
+}
+
+function openPull(aeTitle, transport) {
+  openFind(aeTitle, transport);
+}
+
+function renderRemoteStudies(matches) {
+  const list = matches.slice(0, 200);
+  $("find-results").innerHTML = list.map((study) => {
+    const uid = study.StudyInstanceUID || "";
+    const patient = study.PatientName || "Patient name unavailable";
+    const patientId = study.PatientID || "Patient ID unavailable";
+    const description = study.StudyDescription || "Study description unavailable";
+    const modalities = study.ModalitiesInStudy || study.Modality || "Modality unavailable";
+    const date = study.StudyDate ? fmtDate(study.StudyDate) : "Date unavailable";
+    const accession = study.AccessionNumber || "No accession number";
+    const counts = [study.NumberOfStudyRelatedSeries && `${study.NumberOfStudyRelatedSeries} series`, study.NumberOfStudyRelatedInstances && `${study.NumberOfStudyRelatedInstances} images`].filter(Boolean).join(" · ");
+    const checkbox = uid ? `<input type="checkbox" data-study-select value="${esc(uid)}" aria-label="Select study ${esc(description)} for retrieval" />` : '<span class="transfer-no-uid" title="This peer did not return a Study Instance UID">Unavailable</span>';
+    return `<article class="transfer-study-row">
+      <label class="transfer-study-check">${checkbox}<span class="transfer-queued-tag" hidden>Queued</span></label>
+      <div class="transfer-study-main"><div class="transfer-study-title">${esc(description)}</div><div class="transfer-study-patient">${esc(patient)} <span>·</span> ${esc(patientId)}</div><div class="transfer-study-meta"><span>${esc(date)}</span><span>${esc(modalities)}</span><span>${esc(accession)}</span>${counts ? `<span>${esc(counts)}</span>` : ""}</div></div>
+      ${uid ? `<a class="transfer-study-open" href="${viewerUrl(uid)}" target="_blank" rel="noopener">View</a>` : ""}
+    </article>`;
+  }).join("");
+  if (matches.length > 200) {
+    $("find-results").insertAdjacentHTML("beforeend", '<div class="transfer-limit-note">Showing the first 200 results. Narrow the date range or add another filter to find more specific studies.</div>');
+  }
+  bindRemoteStudySelection();
+}
+
+function updateRemoteStudySelection() {
+  const checks = $("find-results").querySelectorAll("[data-study-select]");
+  checks.forEach((checkbox) => checkbox.closest(".transfer-study-row")?.classList.toggle("is-selected", checkbox.checked));
+  const selected = $("find-results").querySelectorAll("[data-study-select]:checked").length;
+  $("find-selection-count").textContent = `${selected} selected`;
+  $("find-queue-selected").textContent = selected ? `Retrieve selected (${selected})` : "Retrieve selected";
+  $("find-queue-selected").disabled = selected === 0;
+  $("find-clear-selection").disabled = selected === 0;
+}
+
+function selectVisibleRemoteStudies() {
+  const available = [...$("find-results").querySelectorAll("[data-study-select]")];
+  let selected = available.filter((checkbox) => checkbox.checked && !checkbox.disabled).length;
+  for (const checkbox of available) {
+    if (!checkbox.checked && !checkbox.disabled && selected < 30) { checkbox.checked = true; selected++; }
+  }
+  updateRemoteStudySelection();
+}
+
+function clearRemoteStudySelection() {
+  $("find-results").querySelectorAll("[data-study-select]:checked").forEach((checkbox) => { checkbox.checked = false; });
+  updateRemoteStudySelection();
+}
+
+function bindRemoteStudySelection() {
+  $("find-results").querySelectorAll("[data-study-select]").forEach((checkbox) => checkbox.addEventListener("change", () => {
+    checkbox.closest(".transfer-study-row")?.classList.toggle("is-selected", checkbox.checked);
+    const selected = $("find-results").querySelectorAll("[data-study-select]:checked");
+    if (selected.length > 30) {
+      checkbox.checked = false;
+      checkbox.closest(".transfer-study-row")?.classList.remove("is-selected");
+      toast("Queue no more than 30 studies at once", "err");
+    }
+    updateRemoteStudySelection();
+  }));
+  $("find-select-visible").disabled = !$("find-results").querySelector("[data-study-select]");
+}
+
+async function queueSelectedStudies() {
+  const button = $("find-queue-selected");
+  const studyUids = [...$("find-results").querySelectorAll("[data-study-select]:checked")].map((checkbox) => checkbox.value);
+  if (!studyUids.length || studyUids.length > 30) return;
+  button.disabled = true;
+  button.textContent = "Queueing…";
+  let queued = 0;
+  for (const studyUid of studyUids) {
+    const checkbox = [...$("find-results").querySelectorAll("[data-study-select]")].find((item) => item.value === studyUid);
+    if (!await enqueueTransfer(state.findNode, "RETRIEVE", state.findTransport, studyUid, { quiet: true })) break;
+    if (checkbox) {
+      checkbox.checked = false;
+      checkbox.disabled = true;
+      checkbox.closest(".transfer-study-row")?.classList.remove("is-selected");
+      checkbox.closest(".transfer-study-row")?.classList.add("is-queued");
+      const tag = checkbox.closest(".transfer-study-check")?.querySelector(".transfer-queued-tag");
+      if (tag) tag.hidden = false;
+    }
+    queued++;
+  }
+  button.textContent = "Retrieve selected";
+  updateRemoteStudySelection();
+  loadTransfers();
+  if (queued === studyUids.length) {
+    $("find-footer-selection").textContent = `${queued} ${queued === 1 ? "study" : "studies"} queued. Images will be retrieved, saved to configured storage, and indexed in the archive database. Track progress in Transfer jobs.`;
+    toast(`${queued} ${queued === 1 ? "study" : "studies"} queued for retrieval`, "ok");
+  } else if (queued) {
+    $("find-footer-selection").textContent = `${queued} of ${studyUids.length} studies queued. Retrieved images are saved to configured storage and indexed in the archive database; follow each job in Transfer jobs.`;
+    toast(`${queued} of ${studyUids.length} studies queued; the queue may be full`, "err");
+  } else {
+    toast("No studies were queued. Check your role and available queue capacity.", "err");
+  }
+}
+
+async function requestRemoteStudies(filters) {
+  const path = state.findTransport === "dicomweb" ? "web/query" : "find";
+  try {
+    const res = await api(`/api/v1/nodes/${encodeURIComponent(state.findNode)}/${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level: "STUDY", filters }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) return { error: data.detail || data.reason || `Search failed (${res.status}).` };
+    return { matches: data.matches || [], truncated: data.truncated === true };
+  } catch (_error) {
+    return { error: "The remote archive could not be reached. Check the connection and try again." };
+  }
+}
+
+function remoteFindErrorGuidance(error, aeTitle) {
+  const message = String(error || "");
+  const callingAeFailure = message.match(/does not allow calling AE title '([^']+)'/i);
+  if (callingAeFailure) {
+    return `${aeTitle} rejected calling AE ${callingAeFailure[1]}. Add that AE title to the remote PACS allowlist.`;
+  }
+  const calledAeFailure = message.match(/does not recognize called AE title '([^']+)'/i);
+  if (calledAeFailure) {
+    return `The remote PACS does not recognize called AE ${calledAeFailure[1]}. Match the node AE title to the remote PACS configuration.`;
+  }
+  if (/association rejected/i.test(message)) {
+    return `${aeTitle} refused the DICOM association. Ask its administrator to allow calling AE PAXS_SCU, verify the called AE title ${aeTitle}, and enable Study Root C-FIND.`;
+  }
+  if (/C-FIND failed \(TimeoutError\)/i.test(message)) {
+    return "MIPACS did not answer before the network timeout. Check its DICOM service and firewall rules.";
+  }
+  if (/status 0xA700/i.test(message)) {
+    return "MIPACS accepted the query but reported insufficient resources. Retry later or check the peer's query service.";
+  }
+  return "Review the filters, peer connection, and the node's query permissions.";
 }
 
 async function runFind() {
   const btn = $("find-run");
-  btn.disabled = true; btn.textContent = "…";
-  $("find-results").innerHTML = `<p class="sub">Querying ${esc(state.findNode)}…</p>`;
-  const path = state.findTransport === "dicomweb" ? "web/query" : "find";
-  const res = await api(`/api/v1/nodes/${encodeURIComponent(state.findNode)}/${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ level: $("find-level").value, filters: findFilters() }),
-  });
-  btn.disabled = false; btn.textContent = "Run query ▶";
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) { $("find-results").innerHTML = `<p class="sub">Query failed (${res.status}): ${esc(data.detail || "")}</p>`; return; }
-  const matches = data.matches || [];
-  if (!matches.length) { $("find-results").innerHTML = `<p class="sub">No matches on ${esc(state.findNode)}.</p>`; return; }
-  const level = $("find-level").value;
-  $("find-results").innerHTML = matches.map((m) => {
-    const id = m.PatientID ? `<span class="mono">${esc(m.PatientID)}</span>` : "";
-    const when = m.StudyDate ? `<span class="mono">${esc(m.StudyDate)}</span>` : "";
-    const desc = m.StudyDescription ? ` · ${esc(m.StudyDescription)}` : "";
-    const mods = m.ModalitiesInStudy ? ` · ${esc(m.ModalitiesInStudy)}` : (m.Modality ? ` · ${esc(m.Modality)}` : "");
-    const view = (level === "STUDY" && m.StudyInstanceUID)
-      ? ` · <a class="wl-link" href="${viewerUrl(m.StudyInstanceUID)}">open →</a>`
-      : (m.StudyInstanceUID ? ` · <span class="mono faint">${esc(m.StudyInstanceUID)}</span>` : "");
-    const pullBtn = m.StudyInstanceUID
-      ? `<button class="btn sm" data-pull-study="${esc(m.StudyInstanceUID)}" data-pull-node="${esc(state.findNode)}" style="margin-left:auto;white-space:nowrap" title="Download & copy this study into PAXS Archive">Pull to PAXS ▼</button>`
-      : (m.PatientID ? `<button class="btn sm" data-pull-pid="${esc(m.PatientID)}" data-pull-node="${esc(state.findNode)}" style="margin-left:auto;white-space:nowrap" title="Download & copy all patient studies into PAXS Archive">Pull to PAXS ▼</button>` : "");
-    return `<div class="node-item" style="display:flex;align-items:center;justify-content:space-between">
-      <div class="cell-main">
-        <div class="name">${esc(m.PatientName || "—")} ${id}</div>
-        <div class="sub mono">${when}${mods}${desc}${view}</div>
-      </div>
-      ${pullBtn}
-    </div>`;
-  }).join("");
-
-  // Wire 1-click pull buttons from find results
-  document.querySelectorAll("[data-pull-study]").forEach((b) => {
-    b.addEventListener("click", () => {
-      openPull(b.dataset.pullNode, state.findTransport);
-      $("pull-study").value = b.dataset.pullStudy;
-      if ($("pull-pid")) $("pull-pid").value = "";
-      runPull();
-    });
-  });
-  document.querySelectorAll("[data-pull-pid]").forEach((b) => {
-    b.addEventListener("click", () => {
-      openPull(b.dataset.pullNode, state.findTransport);
-      if ($("pull-pid")) $("pull-pid").value = b.dataset.pullPid;
-      $("pull-study").value = "";
-      runPull();
-    });
-  });
-
-  toast(`${matches.length} match(es) from ${state.findNode}`, "ok");
-}
-
-/* ---------------- pull (C-GET SCU) ---------------- */
-function pullFilters() {
-  const f = {};
-  const pid = $("pull-pid") ? $("pull-pid").value.trim() : "";
-  const study = $("pull-study").value.trim();
-  const series = $("pull-series").value.trim();
-  const sop = $("pull-sop").value.trim();
-  if (pid) f.PatientID = pid;
-  if (study) f.StudyInstanceUID = study;
-  if (series) f.SeriesInstanceUID = series;
-  if (sop) f.SOPInstanceUID = sop;
-  return f;
-}
-
-function openPull(aeTitle, transport) {
-  if (!state.token) { toast("Sign in to pull studies", "err"); openLogin(); return; }
-  state.pullNode = aeTitle;
-  state.pullTransport = transport === "dicomweb" ? "dicomweb" : "dicom";
-  const tag = state.pullTransport === "dicomweb"
-    ? '<span class="mwl-tag" style="background:rgba(52,211,153,.14);color:#34d399;border-color:rgba(52,211,153,.35)">WADO-RS</span>'
-    : '<span class="mwl-tag" style="background:rgba(129,140,248,.14);color:#818cf8;border-color:rgba(129,140,248,.35)">C-GET</span>';
-  $("pull-meta").innerHTML = `${esc(aeTitle)} — ${state.pullTransport === "dicomweb" ? "DICOMweb WADO-RS fetch" : "C-GET fetch"}; results are stored and indexed locally. ${tag}`;
-  $("pull-results").innerHTML = `<p class="sub">Set a Study UID (or Series/SOP), then pull — instances are stored and indexed like a C-STORE.</p>`;
-  /* auto-archive (lifecycle tiering) is a DICOMweb WADO-RS option */
-  const wrap = $("pull-archive-wrap");
-  wrap.hidden = state.pullTransport !== "dicomweb";
-  $("pull-archive").checked = false;
-  $("pull-modal").hidden = false;
-}
-
-async function runPull() {
-  const btn = $("pull-run");
-  const filters = pullFilters();
-  if (!Object.keys(filters).length) { toast("Enter a Patient ID or Study UID first", "err"); return; }
-  btn.disabled = true; btn.textContent = "…";
-  $("pull-results").innerHTML = `<p class="sub">Pulling from ${esc(state.pullNode)}…</p>`;
-  const path = state.pullTransport === "dicomweb" ? "web/retrieve" : "pull";
-  const body = { level: $("pull-level").value, filters };
-  if (state.pullTransport === "dicomweb") body.auto_archive = $("pull-archive").checked;
-  const res = await api(`/api/v1/nodes/${encodeURIComponent(state.pullNode)}/${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  btn.disabled = false; btn.textContent = "Pull down ▼";
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) { $("pull-results").innerHTML = `<p class="sub">Pull failed (${res.status}): ${esc(data.detail || "")}</p>`; return; }
-  const rows = data.results || [];
-  if (!rows.length) { $("pull-results").innerHTML = `<p class="sub">No instances received from ${esc(state.pullNode)}.</p>`; return; }
-  const archiveNote = data.auto_archived
-    ? `<div class="sub" style="color:#34d399;margin-top:6px">❄️ Study tiered to cold storage (${esc(data.archive_state || "ARCHIVED")})</div>`
-    : (data.archive_error
-      ? `<div class="sub" style="color:var(--danger);margin-top:6px">Auto-archive requested but failed: ${esc(data.archive_error)}</div>`
-      : (data.archive_state ? `<div class="sub" style="color:var(--danger);margin-top:6px">Auto-archive requested but failed (${esc(data.archive_state || "error")})</div>` : ""));
-  $("pull-results").innerHTML = rows.map((r) => `
-    <div class="node-item">
-      <div class="cell-main">
-        <div class="name">${r.ok ? "✅" : "❌"} <span class="mono">${esc(r.sop_uid || "?")}</span></div>
-        <div class="sub mono">${esc(r.study_uid || "")}${r.reason ? ` · ${esc(r.reason)}` : ""}</div>
-      </div>
-    </div>`).join("") + archiveNote;
-  toast(`${data.pulled} instance(s) pulled from ${state.pullNode}`, data.failed ? "err" : "ok");
-  loadStudies();
+  $("find-results").innerHTML = '<div class="transfer-empty"><b>Preparing search</b><span>Searching can take a moment on large archives.</span></div>';
+  $("find-selection-count").textContent = "0 selected";
+  $("find-queue-selected").disabled = true;
+  $("find-select-visible").disabled = true;
+  $("find-clear-selection").disabled = true;
+  const filters = findFilters();
+  const from = $("find-date-from").value;
+  const to = $("find-date-to").value;
+  if (!Object.keys(filters).length) {
+    $("find-results-summary").textContent = "Choose at least one filter: patient ID/name, study date, modality, accession, or Study UID.";
+    return;
+  }
+  if (from && to && from > to) {
+    $("find-results-summary").textContent = "The start date must be on or before the end date.";
+    return;
+  }
+  btn.disabled = true; btn.textContent = "Searching…";
+  $("find-results-summary").textContent = `Searching ${state.findNode}…`;
+  $("find-results").innerHTML = '<div class="transfer-empty"><b>Searching the remote archive</b><span>Results will appear here. Large date ranges may take longer.</span></div>';
+  const result = await requestRemoteStudies(filters);
+  btn.disabled = false; btn.textContent = "Search studies →";
+  if (result.error) {
+    $("find-results-summary").textContent = result.error;
+    $("find-results").innerHTML = `<div class="transfer-empty is-error"><b>Search did not complete</b><span>${esc(remoteFindErrorGuidance(result.error, state.findNode))}</span></div>`;
+    return;
+  }
+  const matches = result.matches;
+  if (!matches.length) {
+    $("find-results-summary").textContent = `No matching studies found on ${state.findNode}.`;
+    $("find-results").innerHTML = '<div class="transfer-empty"><b>No studies matched</b><span>Try a broader date range or remove one of the filters.</span></div>';
+    return;
+  }
+  renderRemoteStudies(matches);
+  $("find-results-summary").textContent = `${result.truncated || matches.length >= 200 ? "200+" : matches.length} studies found on ${state.findNode}. Select one or more to retrieve.`;
+  toast(`${matches.length} study ${matches.length === 1 ? "found" : "studies found"}`, "ok");
 }
 
 /* ---------------- web upload (STOW-RS SCU) ---------------- */
@@ -3775,6 +4921,7 @@ async function openForward(studyUid, patientName) {
   const res = await api("/api/v1/nodes");
   if (!res.ok) { $("forward-nodes").innerHTML = `<p class="sub">Failed to load nodes (${res.status}) — sign in as admin.</p>`; return; }
   const nodes = await res.json();
+  window.PAXS_NODES = nodes;
   if (!nodes.length) { $("forward-nodes").innerHTML = `<p class="sub">No nodes registered. Add a destination in the Nodes panel first.</p>`; return; }
   $("forward-nodes").innerHTML = nodes.map((n) => `
     <div class="node-item">
@@ -3789,18 +4936,9 @@ async function openForward(studyUid, patientName) {
   [...document.querySelectorAll("[data-fwd]")].forEach((b) =>
     b.addEventListener("click", async () => {
       b.disabled = true; b.textContent = "…";
-      const res = await api(`/api/v1/nodes/${encodeURIComponent(b.dataset.fwd)}/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ study_uids: [state.forwardStudy] }),
-      });
+      const queued = await enqueueTransfer(b.dataset.fwd, "SEND", "dicom", state.forwardStudy);
       b.disabled = false; b.textContent = "Send →";
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { toast(data.detail || `Forward failed (${res.status})`, "err"); return; }
-      const msg = data.ok
-        ? `Forwarded ${data.sent} instance(s) to ${data.ae_title}`
-        : `Forward to ${data.ae_title} failed: ${data.reason || `${data.failed} instance(s) failed`}`;
-      toast(msg, data.ok ? "ok" : "err");
+      if (queued) $("forward-modal").hidden = true;
     }));
 }
 
@@ -3814,6 +4952,15 @@ const DICOM_EXT_RE = /\.(dcm|dicom|ima)$/i;
 const BATCH_FILES = 40;                  // max parts per STOW request
 const MAX_BATCH_BYTES = 48 * 1024 * 1024; // ...and max bytes per request
 
+/* Invariant (Finding 4): `MAX_BATCH_BYTES` bounds a *batch*, never a single
+   file. `batchDicomFiles` flushes the batch in hand before adding a file that
+   would cross the cap, but it cannot split one file — so a single instance
+   larger than the cap is sent alone, as its own batch. That is deliberate: the
+   server owns the per-instance ceiling (`MAX_INSTANCE_UPLOAD_BYTES`, 512 MiB)
+   and answers 413 above it, so the client must not silently drop a legal
+   multi-frame instance merely because it exceeds the batch budget. */
+const SCAN_CONCURRENCY = 8;              // bounded parallel DICOM sniffing
+
 async function isDicomFile(file) {
   if (DICOM_EXT_RE.test(file.name)) return true;
   try {
@@ -3826,7 +4973,48 @@ async function isDicomFile(file) {
   return false;
 }
 
+/* Finding 6: the scan awaited `isDicomFile` one file at a time, and each call
+   may read 132 bytes from disk — a 5,000-file folder serialised 5,000 reads.
+   Bounded parallelism keeps at most SCAN_CONCURRENCY reads in flight: enough to
+   hide the latency, few enough that a folder drop cannot exhaust the browser's
+   file handles. */
+async function scanDicomFiles(files, { signal, onProgress } = {}) {
+  const found = [];
+  let next = 0;
+  let done = 0;
+  async function worker() {
+    while (next < files.length) {
+      if (signal && signal.aborted) return;
+      const file = files[next++];
+      if (await isDicomFile(file)) found.push(file);
+      done++;
+      if (onProgress) onProgress(done);
+    }
+  }
+  const workers = Math.min(SCAN_CONCURRENCY, files.length);
+  await Promise.all(Array.from({ length: workers }, worker));
+  // Parallel workers finish out of order; restore the picker's order so the
+  // batch boundaries — and the order the operator sees — stay deterministic.
+  const order = new Map(files.map((f, i) => [f, i]));
+  found.sort((a, b) => order.get(a) - order.get(b));
+  return found;
+}
+
+function newBoundary() {
+  // Nit 9: a UUID rather than Math.random().toString(36). The boundary must not
+  // occur inside the payload, and 122 bits of crypto.randomUUID is a far
+  // stronger guarantee than 52 bits of Math.random (not a CSPRNG).
+  const rnd = (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+    ? crypto.randomUUID().replace(/-/g, "")
+    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  return `paxs-ui-${rnd}`;
+}
+
 function buildMultipartBody(files, boundary) {
+  // Finding 5: a Blob over the buffers already in hand is zero-copy — the
+  // browser holds references and streams them to the socket. The previous
+  // `new Uint8Array(total)` allocated a second full-size copy (up to 48 MB) per
+  // batch, a spike the client does not need.
   const enc = new TextEncoder();
   const parts = [];
   for (const f of files) {
@@ -3835,11 +5023,9 @@ function buildMultipartBody(files, boundary) {
     parts.push(enc.encode("\r\n"));
   }
   parts.push(enc.encode(`--${boundary}--\r\n`));
-  const total = parts.reduce((n, p) => n + p.length, 0);
-  const body = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) { body.set(p, off); off += p.length; }
-  return body;
+  return new Blob(parts, {
+    type: `multipart/related; type="application/dicom"; boundary=${boundary}`,
+  });
 }
 
 async function* batchDicomFiles(files) {
@@ -4065,11 +5251,15 @@ async function uploadFiles(files, opts = {}) {
   if (!prefiltered) {
     upPhase("scan");
     upProgress(0, `Scanning ${files.length} files for DICOM…`);
-    dicom = [];
-    for (const f of files) {
-      if (ac.signal.aborted) { cancelled = true; break; }
-      if (await isDicomFile(f)) dicom.push(f);
-    }
+    dicom = await scanDicomFiles(files, {
+      signal: ac.signal,
+      onProgress: (n) => {
+        if (n === files.length || n % 25 === 0) {
+          upProgress((n / files.length) * 100, `Scanning ${n}/${files.length} files for DICOM…`);
+        }
+      },
+    });
+    if (ac.signal.aborted) cancelled = true;
   }
   if (!cancelled && !dicom.length) {
     upEnd(ac);
@@ -4083,42 +5273,71 @@ async function uploadFiles(files, opts = {}) {
   );
 
   upPhase("upload");
-  let done = 0, failed = 0, batches = 0;
+  let done = 0, failed = 0, batches = 0, lastError = "";
   // Per-study summary aggregated across batches (STOW response carries a
   // "summary.studies" block: study uid, instance count, existed flag).
   const aggStudies = new Map(); // study_instance_uid -> { instances, existed }
   for await (const batch of batchDicomFiles(dicom)) {
     if (ac.signal.aborted) { cancelled = true; break; }
     batches++;
-    const boundary = `paxs-ui-${Math.random().toString(36).slice(2)}`;
+    const boundary = newBoundary();
     const label = batches === 1 && dicom.length <= BATCH_FILES
       ? `Uploading ${dicom.length} file(s)…`
       : `Uploading ${Math.min(done + batch.length, dicom.length)}/${dicom.length} files (batch ${batches})`;
     upProgress((done / dicom.length) * 100, label);
     try {
-      const res = await fetch("/dicom-web/studies", {
+      // Must go through api(), not fetch(): STOW is a state-changing call
+      // authenticated by the session cookie, so the server requires the
+      // signed double-submit token (and accepts the bearer token when the
+      // SPA still holds one). A bare fetch() sent neither, and every upload
+      // — single file and folder alike — was answered
+      // 403 {"detail":"CSRF token missing or invalid"}.
+      const res = await api("/dicom-web/studies", {
         method: "POST",
-        headers: { "Content-Type": `multipart/related; type="application/dicom"; boundary=${boundary}` },
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": `multipart/related; type="application/dicom"; boundary=${boundary}`,
+        },
         body: buildMultipartBody(batch, boundary),
         signal: ac.signal,
       });
-      let storedThis = 0;
-      try {
-        const data = await res.json();
-        const list = data?.summary?.studies;
-        if (Array.isArray(list)) {
-          for (const s of list) {
-            const cur = aggStudies.get(s.study_instance_uid) || { instances: 0, existed: !!s.existed };
-            cur.instances += s.instances;
-            aggStudies.set(s.study_instance_uid, cur);
-          }
+      // Read the body once: a failed STOW answers JSON ({"detail": ...}) or
+      // plain text (413), and the reason is what the operator needs to see.
+      const bodyText = await res.text().catch(() => "");
+      let data = null;
+      try { data = bodyText ? JSON.parse(bodyText) : null; } catch (_) { /* non-JSON error body */ }
+      const list = data?.summary?.studies;
+      if (Array.isArray(list)) {
+        for (const s of list) {
+          const cur = aggStudies.get(s.study_instance_uid) || { instances: 0, existed: !!s.existed };
+          // Nit 11: the server sends a JSON number, but a proxy or an older
+          // build can send a string — `+=` on a string concatenates, which
+          // would turn "1" + 1 into "11" in the study summary.
+          cur.instances += Number(s.instances) || 0;
+          aggStudies.set(s.study_instance_uid, cur);
         }
-        storedThis = Array.isArray(data?.["00081199"]?.Value) ? data["00081199"].Value.length : 0;
-      } catch (_) { /* non-JSON error body (400/413) */ }
-      failed += Math.max(0, batch.length - storedThis);
+      }
+      if (!res.ok) {
+        // Report the server's own words — "1 failed" with no reason is what
+        // made this look like a broken button rather than a rejected request.
+        lastError = (data && (data.detail || data.message)) || bodyText.slice(0, 200).trim()
+          || `HTTP ${res.status}`;
+        failed += batch.length;
+      } else {
+        // Finding 3: a 200 without `00081199` is not a failure. The server
+        // accepted the request but returned no ReferencedSOPSequence, and the
+        // old `storedThis = 0` then reported every file in the batch as failed
+        // — an upload that fully succeeded showing "0 stored, N failed".
+        // Absent evidence of a per-instance failure, a 200 means stored.
+        const storedThis = Array.isArray(data?.["00081199"]?.Value)
+          ? data["00081199"].Value.length
+          : batch.length;
+        failed += Math.max(0, batch.length - storedThis);
+      }
     } catch (err) {
       if (err?.name === "AbortError") { cancelled = true; break; }
       failed += batch.length;
+      lastError = err?.message || "network error";
     }
     done += batch.length;
   }
@@ -4145,14 +5364,22 @@ async function uploadFiles(files, opts = {}) {
     upSuccess(detail, summaryList);
     toast(`Upload complete — ${dicom.length} file(s)${extra}${skipped ? `, ${skipped} non-DICOM skipped` : ""}`, "ok");
   } else {
-    upFail(`${dicom.length - failed}/${dicom.length} uploaded · ${failed} failed`);
-    toast(`Upload finished — ${dicom.length - failed}/${dicom.length} uploaded, ${failed} failed`, "err");
+    // Name the reason. "0/1 uploaded · 1 failed" is unactionable, and it is
+    // exactly how a rejected request (403 CSRF, 413 too large, 415 wrong
+    // content type) used to read as a dead button.
+    const why = lastError ? ` — ${lastError}` : "";
+    upFail(`${dicom.length - failed}/${dicom.length} uploaded · ${failed} failed${why}`);
+    toast(`Upload failed — ${dicom.length - failed}/${dicom.length} stored${why}`, "err");
   }
   loadStudies(); loadStats();
 }
 
 /* ---------------- wire up ---------------- */
 function bind() {
+  bindStudyActions($("study-list"));
+  bindStudyActions($("rwl-list"));
+  bindModalityControls();
+
   /* ---- browser back/forward button ---- */
   window.addEventListener("popstate", (e) => {
     const view = e.state?.view || location.hash.replace("#", "") || "dashboard";
@@ -4248,19 +5475,29 @@ function bind() {
   $("pg-next").addEventListener("click", () => { state.page++; loadStudies(); });
 
   $("btn-worklist").addEventListener("click", openSchedule);
-  $("wl-add").addEventListener("click", addStep);
+  $("wl-add")?.addEventListener("click", addStep);
   $("cp-add")?.addEventListener("click", addProtocol);
   $("cp-test")?.addEventListener("click", testProtocolMatch);
-  $("wl-filter").addEventListener("change", loadWorklist);
-  $("commit-filter").addEventListener("change", loadCommitments);
+  $("wl-filter")?.addEventListener("change", loadWorklist);
+  $("commit-filter")?.addEventListener("change", loadCommitments);
+  $("btn-wf-refresh")?.addEventListener("click", () => {
+    loadWorklist(); loadPerformed(); loadCommitments();
+  });
+  $("commit-list")?.addEventListener("click", (event) => {
+    if (event.target.closest("[data-retry-commitments]")) loadCommitments();
+  });
 
   $("btn-nodes").addEventListener("click", openNodes);
   $("node-add").addEventListener("click", addNode);
+  $("node-sort").addEventListener("change", sortNodeList);
+  $("transfer-refresh").addEventListener("click", loadTransfers);
+  $("transfer-clear-history").addEventListener("click", clearTransferHistory);
   $("forward-close").addEventListener("click", () => { $("forward-modal").hidden = true; state.forwardStudy = null; });
   $("find-close").addEventListener("click", () => { $("find-modal").hidden = true; state.findNode = null; });
   $("find-run").addEventListener("click", runFind);
-  $("pull-close").addEventListener("click", () => { $("pull-modal").hidden = true; state.pullNode = null; });
-  $("pull-run").addEventListener("click", runPull);
+  $("find-select-visible").addEventListener("click", selectVisibleRemoteStudies);
+  $("find-clear-selection").addEventListener("click", clearRemoteStudySelection);
+  $("find-queue-selected").addEventListener("click", queueSelectedStudies);
   $("up-close").addEventListener("click", () => { $("upload-modal").hidden = true; state.uploadNode = null; });
   $("up-run").addEventListener("click", runWebUpload);
 
@@ -4308,19 +5545,42 @@ function bind() {
     c.addEventListener("click", () => {
       RWL.state = c.dataset.rstate;
       RWL.page = 1;
-      [...document.querySelectorAll("#rwl-chips .chip-btn")].forEach((x) =>
-        x.classList.toggle("active", x === c));
+      [...document.querySelectorAll("#rwl-chips .chip-btn")].forEach((x) => {
+        x.classList.toggle("active", x === c);
+        x.setAttribute("aria-pressed", String(x === c));
+      });
       loadReadingTasks();
     }));
   const rwlMine = $("btn-rwl-assign");
   if (rwlMine) rwlMine.addEventListener("click", () => {
     RWL.mine = !RWL.mine;
     rwlMine.classList.toggle("active", RWL.mine);
+    rwlMine.setAttribute("aria-pressed", String(RWL.mine));
     RWL.page = 1;
     loadReadingTasks();
   });
   const rwlRefresh = $("btn-rwl-refresh");
   if (rwlRefresh) rwlRefresh.addEventListener("click", () => { loadReadingCounts(); loadReadingTasks(); });
+  $("rwl-limit")?.addEventListener("change", (event) => {
+    const selectedLimit = Number(event.currentTarget.value);
+    if (![10, 25, 50, 100].includes(selectedLimit)) return;
+    RWL.limit = selectedLimit;
+    RWL.page = 1;
+    loadReadingTasks();
+  });
+  $("rwl-pg-prev")?.addEventListener("click", () => {
+    if (RWL.page <= 1) return;
+    RWL.page -= 1;
+    loadReadingTasks();
+  });
+  $("rwl-pg-next")?.addEventListener("click", () => {
+    if (RWL.page >= Math.ceil(RWL.total / RWL.limit)) return;
+    RWL.page += 1;
+    loadReadingTasks();
+  });
+  $("rwl-list")?.addEventListener("click", (event) => {
+    if (event.target.closest("[data-rwl-retry]")) loadReadingTasks();
+  });
 
   // admin console
   [...document.querySelectorAll("#admin-tabs button")].forEach((b) =>
@@ -4347,8 +5607,6 @@ function bind() {
     drive.value = event.target.value;
     drive.dispatchEvent(new Event("input"));
   });
-
-
 
   // database tab (static elements — bind once)
   $("db-backend")?.addEventListener("change", syncDbForm);
@@ -4416,6 +5674,7 @@ function bind() {
   $("user-modal-cancel").addEventListener("click", () => { $("user-modal").hidden = true; _userModalAction = null; });
   $("user-modal-ok").addEventListener("click", async () => { if (_userModalAction) await _userModalAction(); });
 
+  $("lic-fp-input")?.addEventListener("click", (event) => event.currentTarget.select());
   if ($("lic-btn-copy-fp")) {
     $("lic-btn-copy-fp").addEventListener("click", () => {
       if (_adminServerFp) {
@@ -4436,9 +5695,12 @@ function bind() {
       if (!inp?.files || !inp.files[0]) { toast("Select a .lic file first", "err"); return; }
       const fd = new FormData();
       fd.append("file", inp.files[0]);
+      const licHeaders = state.token ? { "Authorization": `Bearer ${state.token}` } : {};
+      const licCsrf = csrfToken();
+      if (licCsrf) licHeaders["X-CSRF-Token"] = licCsrf;
       const res = await fetch("/api/v1/license/upload", {
         method: "POST",
-        headers: state.token ? { "Authorization": `Bearer ${state.token}` } : {},
+        headers: licHeaders,
         body: fd
       });
       const data = await res.json().catch(() => ({}));
@@ -4450,9 +5712,32 @@ function bind() {
       }
     });
   }
+  if ($("lic-btn-activate-online")) {
+    $("lic-btn-activate-online").addEventListener("click", async () => {
+      const key = $("lic-activation-key")?.value.trim();
+      const email = $("lic-activation-email")?.value.trim() || null;
+      const portalUrl = $("lic-portal-url")?.value.trim() || null;
+      if (!key) { toast("Enter an activation key first", "err"); return; }
+      const res = await api("/api/v1/license/activate-online", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activation_key: key, customer_email: email, portal_url: portalUrl }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        toast(data.message || "License activated online", "ok");
+        $("lic-activation-key").value = "";
+        loadLicensePanel();
+      } else {
+        toast(data.detail || data.message || `Online activation failed (${res.status})`, "err");
+      }
+    });
+  }
 
   $("btn-login").addEventListener("click", () => {
     if (state.token) {
+      stopDimseQueuePolling();
+      clearDimseQueueData("Sign in as an administrator to view the queue.");
       state.token = null; localStorage.removeItem("paxs_token");
       // Clear the HttpOnly session cookie too — otherwise the server-side
       // auth gate still considers this browser signed in and reloads the
@@ -4469,6 +5754,7 @@ function bind() {
     $("login-modal").hidden = true;
   });
   $("tab-login").addEventListener("click", () => setAuthMode("login"));
+  $("tab-ldap").addEventListener("click", () => setAuthMode("ldap"));
   $("tab-register").addEventListener("click", () => setAuthMode("register"));
   $("auth-submit").addEventListener("click", doAuth);
   $("auth-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") doAuth(); });
@@ -4493,13 +5779,15 @@ function bind() {
     const url = $("share-url").dataset.url;
     if (url) { navigator.clipboard?.writeText(url).then(() => toast("URL copied", "ok")); }
   });
-  $("confirm-cancel").addEventListener("click", () => { $("confirm-modal").hidden = true; state.deleting = null; });
-  $("confirm-ok").addEventListener("click", async () => {
+  $("confirm-cancel").addEventListener("click", () => { $("confirm-modal").hidden = true; state.deleting = null; });  $("confirm-ok").addEventListener("click", async () => {
     if (!state.deleting) return;
     const res = await api(`/api/v1/studies/${encodeURIComponent(state.deleting.uid)}`, { method: "DELETE" });
     $("confirm-modal").hidden = true;
     if (res.ok) { toast("Study deleted", "ok"); loadStudies(); loadStats(); }
-    else toast(`Delete failed (${res.status})`, "err");
+    else {
+      const body = await res.json().catch(() => ({}));
+      toast(deleteFailureText(res.status, body), "err");
+    }
     state.deleting = null;
   });
 
@@ -4529,6 +5817,8 @@ function enterGate() {
   // Nothing opens until login succeeds: blur the app behind an opaque gate
   // and keep the login card front and center (no backdrop/ESC dismissal).
   state.gated = true;
+  stopDimseQueuePolling();
+  clearDimseQueueData("Sign in as an administrator to view the queue.");
   document.body.classList.add("auth-gate");
   document.body.classList.remove("preboot");
   openLogin();

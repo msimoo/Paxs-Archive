@@ -103,7 +103,7 @@ def get_storage_backend(name: str | None = None) -> StorageBackend:
     """Return a named or environment backend within the configured cache cap."""
     cache_key = name or _ENV_KEY
     with _LOCK:
-        maximum = getattr(settings, "STORAGE_BACKEND_CACHE_MAX_ENTRIES", 128)
+        maximum = settings.STORAGE_BACKEND_CACHE_MAX_ENTRIES
         _trim_cache_locked(maximum)
         if maximum == 0:
             return _build_named_backend(name) if name else _build_env_backend()

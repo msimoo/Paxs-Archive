@@ -13,18 +13,24 @@ Powers the Admin → **DB Pool** panel (read-replica / connection-pool view):
 * **EXPLAIN analyzer** — ``explain_query`` runs the plan for the hottest
   archive queries (portable ``EXPLAIN QUERY PLAN`` on SQLite).
 
-This module deliberately imports nothing from ``app`` (except config) so that
-``app/db/session.py`` can install the hooks without a circular import.
+This module avoids importing the session facade, so ``app/db/session.py`` can
+install its hooks and pool instrumentation without a circular import.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from typing import Any
 
+log = logging.getLogger("paxs.db.perf")
+
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import QueuePool
+
+from app.core.observability import record_db_pool_checkout
 
 # --------------------------------------------------------------------------- #
 # slow-query ring buffer + hook state
@@ -33,6 +39,17 @@ from sqlalchemy.engine import Engine
 SLOW_QUERIES: deque[dict[str, Any]] = deque(maxlen=200)
 _slow_enabled = False
 _slow_threshold_ms = 500.0
+
+
+class ObservedQueuePool(QueuePool):
+    """QueuePool variant that times connection acquisition without changing it."""
+
+    def _do_get(self) -> Any:
+        started = time.perf_counter()
+        try:
+            return super()._do_get()
+        finally:
+            record_db_pool_checkout(time.perf_counter() - started)
 
 
 def set_slow_query(enabled: bool, threshold_ms: float) -> None:
@@ -102,12 +119,15 @@ def pool_snapshot(pool: Any) -> dict[str, Any]:
         checked = int(pool.checkedout())
         size = int(pool.size())
         overflow = max(int(pool.overflow()), 0)
-    except Exception:  # pragma: no cover - NullPool / exotic pools
-        pass
+    except (AttributeError, TypeError, NotImplementedError) as exc:  # NullPool / exotic pools expose no counters
+        # Zeroed counters are the documented sentinel for an unpooled engine;
+        # the type keeps a genuinely broken pool from looking merely unpooled.
+        log.debug("pool_snapshot_counters_unavailable error_type=%s", type(exc).__name__)
     max_overflow = int(getattr(pool, "_max_overflow", 0) or 0)
     try:  # the internal queue's maxsize is the effective pool cap
         pool_size = int(getattr(getattr(pool, "_pool", None), "maxsize", 0) or 0)
-    except Exception:  # pragma: no cover
+    except (AttributeError, TypeError, NotImplementedError) as exc:  # private attribute, absent on other pool classes
+        log.debug("pool_snapshot_cap_unavailable error_type=%s", type(exc).__name__)
         pool_size = 0
     return {
         "class": name,

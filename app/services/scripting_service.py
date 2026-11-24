@@ -26,11 +26,24 @@ Handlers receive a :class:`ScriptContext`:
 
 Dispatch semantics
 ------------------
-``fire(event, **data)`` spawns one daemon thread that walks every enabled
-script subscribed to the event and calls its handler. Exceptions are caught
-per script and logged — a crashing script never breaks the caller or its
+``fire(event, **data)`` enqueues the dispatch on the shared **bounded**
+background pool (:mod:`app.core.concurrency`, C-5) — one task that walks every
+enabled script subscribed to the event and calls its handler. Exceptions are
+caught per script and logged — a crashing script never breaks the caller or its
 siblings. Scripts can be enabled/disabled via a ``.disabled`` marker file
 next to them (``{name}.disabled``) or the Admin → Scripts panel.
+
+When the pool's backlog is full the dispatch is dropped (with a debug log)
+rather than spawning an unbounded thread per event: a chained script storm must
+degrade by shedding events, not by exhausting the process's threads.
+
+A chain is additionally bounded on two axes (C-5), because the pool bounds
+*concurrency* but not *volume* — a script that fires from inside a handler would
+otherwise keep the pool saturated forever: ``SCRIPTS_MAX_CHAIN_DEPTH`` caps the
+number of ``ctx.fire`` hops in one chain (default 5, ``0`` disables chaining),
+and ``SCRIPTS_MAX_CHAIN_PER_SECOND`` caps chained dispatches per rolling second
+process-wide (default 50, ``0`` disables chaining). Both drops are logged and
+counted by :func:`chain_stats`.
 
 Security note: scripts are *trusted admin code* — they run in-process with
 the same privileges as the server (this mirrors Orthanc Lua / Conquest
@@ -39,16 +52,21 @@ macros). They should not be written by untrusted users.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import logging
 import re
 import threading
+import time
 import urllib.request
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
+from heapq import nsmallest
 from pathlib import Path
 from typing import Any
 
+from app.core.concurrency import submit_background
 from app.core.config import settings
 
 log = logging.getLogger("paxs.scripts")
@@ -61,17 +79,13 @@ def scripts_dir() -> Path:
     return Path(settings.SCRIPTS_DIR or "scripts")
 
 
-def _script_files() -> list[Path]:
-    """All loadable ``*.py`` files (skips names starting with ``_``)."""
+def _script_files(limit: int | None = None) -> list[Path]:
+    """Return at most ``limit`` sorted loadable script paths."""
     d = scripts_dir()
     if not d.is_dir():
         return []
-    out = []
-    for p in sorted(d.glob("*.py")):
-        if p.name.startswith("_"):
-            continue
-        out.append(p)
-    return out
+    paths = (path for path in d.glob("*.py") if not path.name.startswith("_"))
+    return sorted(paths) if limit is None else nsmallest(max(0, limit), paths)
 
 
 def is_enabled(path: Path) -> bool:
@@ -88,7 +102,8 @@ def set_enabled(name: str, enabled: bool) -> bool:
         marker.unlink(missing_ok=True)
     else:
         marker.touch()
-    _cache.pop(name, None)
+    with _CACHE_LOCK:
+        _cache.pop(name, None)
     return True
 
 
@@ -101,71 +116,252 @@ def _snake_case(name: str) -> str:
 # --------------------------------------------------------------------------- #
 # Module loading (importlib + hot reload)
 # --------------------------------------------------------------------------- #
-_cache: dict[str, tuple[float, Any]] = {}
+# C-5: every mutation of the module cache is guarded. Dispatch runs on the
+# bounded background pool, so two events can call _load for the same script
+# concurrently — without the lock, one thread could exec_module into the cache
+# while another reads a half-registered module (or two threads both execute the
+# module, tearing its module-level state).
+_cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+_CACHE_LOCK = threading.Lock()
+_REGISTRY_LOCK = threading.Lock()
+
+
+def script_limits() -> tuple[int, int]:
+    """Return configured script-count and source-byte limits, honoring zero."""
+    return (
+        max(0, int(settings.SCRIPTS_MAX_COUNT)),
+        max(0, int(settings.SCRIPTS_MAX_SOURCE_BYTES)),
+    )
+
+
+def create_script(name: str, source: str) -> str | None:
+    """Create a script atomically within configured count and byte limits."""
+    max_count, max_source_bytes = script_limits()
+    encoded = source.encode("utf-8")
+    if not max_source_bytes or len(encoded) > max_source_bytes:
+        return "source_limit"
+    path = scripts_dir() / f"{name}.py"
+    with _REGISTRY_LOCK:
+        if path.exists():
+            return "exists"
+        if not max_count or len(_script_files(max_count)) >= max_count:
+            return "registry_full"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8", newline="") as script_file:
+            script_file.write(source)
+        with _CACHE_LOCK:
+            _cache.pop(name, None)
+    return None
 
 
 def _load(name: str, path: Path) -> Any | None:
-    """Load (or hot-reload) a script module by mtime. Returns None on error."""
-    cached = _cache.get(name)
+    """Load (or hot-reload) a script module by mtime. Returns None on error.
+
+    Thread-safe (C-5): the cache check, the import and the cache write all
+    happen under ``_CACHE_LOCK``. Holding the lock across ``exec_module`` is
+    deliberate — script modules are small admin files, and serialising them is
+    what makes the cache coherent for the concurrent dispatchers that share it.
+    """
+    with _CACHE_LOCK:
+        cached = _cache.get(name)
+        try:
+            mtime = path.stat().st_mtime
+            max_count, max_source_bytes = script_limits()
+            if not max_count:
+                _cache.pop(name, None)
+                return None
+            if not max_source_bytes or path.stat().st_size > max_source_bytes:
+                log.warning("script %s rejected: source size limit exceeded", name)
+                _cache.pop(name, None)
+                return None
+        except OSError:
+            _cache.pop(name, None)
+            return None
+        if cached is not None and cached[0] == mtime:
+            _cache.move_to_end(name)
+            return cached[1]
+        spec = importlib.util.spec_from_file_location(f"paxs_script_{name}", path)
+        if spec is None or spec.loader is None:
+            _cache.pop(name, None)
+            return None
+        try:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            # Loading one optional script must not expose its source path or exception text.
+            log.error("script_load_failed error_type=%s", type(exc).__name__)
+            _cache.pop(name, None)
+            return None
+        _cache.pop(name, None)
+        while len(_cache) >= max_count:
+            _cache.popitem(last=False)
+        _cache[name] = (mtime, module)
+        log.info("script %s loaded (mtime %s)", name, mtime)
+        return module
+
+
+def _assigned_literal(tree: ast.Module, name: str) -> Any | None:
+    """Read a simple module-level literal assignment without executing code."""
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            targets = [statement.target]
+            value = statement.value
+        else:
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            try:
+                return ast.literal_eval(value) if value is not None else None
+            except (ValueError, TypeError, SyntaxError):
+                return None
+    return None
+
+
+def parse_script_metadata(path: Path) -> dict:
+    """Inspect script metadata with AST only; never imports or executes it."""
+    name = path.stem
+    mtime = None
     try:
         mtime = path.stat().st_mtime
-    except OSError:
-        _cache.pop(name, None)
-        return None
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
-    spec = importlib.util.spec_from_file_location(f"paxs_script_{name}", path)
-    if spec is None or spec.loader is None:
-        _cache.pop(name, None)
-        return None
-    try:
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    except Exception:
-        log.exception("script %s failed to load", name)
-        _cache.pop(name, None)
-        return None
-    _cache[name] = (mtime, module)
-    log.info("script %s loaded (mtime %s)", name, mtime)
-    return module
+        modified = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+        _max_count, max_source_bytes = script_limits()
+        if not max_source_bytes or path.stat().st_size > max_source_bytes:
+            raise ValueError("script exceeds configured source limit")
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=path.name)
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as exc:
+        # A script with a syntax error (or a race with its deletion) is listed
+        # without metadata rather than omitted; type only, the path is a
+        # filesystem location and never belongs in a log line (N-2).
+        log.debug("script_metadata_unavailable error_type=%s", type(exc).__name__)
+        modified = None
+        tree = None
+
+    events = _assigned_literal(tree, "EVENTS") if tree is not None else None
+    if not isinstance(events, (list, tuple)) or not all(isinstance(item, str) for item in events):
+        events = None
+    description = _assigned_literal(tree, "DESCRIPTION") if tree is not None else None
+    if not isinstance(description, str) and tree is not None:
+        description = ast.get_docstring(tree)
+    author = _assigned_literal(tree, "AUTHOR") if tree is not None else None
+    if not isinstance(author, str):
+        author = None
+    handlers = [
+        node.name for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and (node.name == "handle" or node.name.startswith("on_"))
+    ] if tree is not None else []
+    with _CACHE_LOCK:
+        cached = _cache.get(name)
+        loaded = bool(cached and mtime is not None and cached[0] == mtime)
+
+    return {
+        "name": name,
+        "path": str(path),
+        "description": description,
+        "author": author,
+        "enabled": is_enabled(path),
+        "loaded": loaded,
+        "valid": tree is not None,
+        "events": list(events) if events is not None else None,
+        "handlers": handlers,
+        "modified": modified,
+    }
 
 
 def list_scripts() -> list[dict]:
-    """Registry of scripts with status metadata (name, events, enabled, mtime)."""
-    out: list[dict] = []
-    for path in _script_files():
-        name = path.stem
-        module = _load(name, path)
-        events = getattr(module, "EVENTS", None) if module else None
-        handlers: list[str] = []
-        if module:
-            if callable(getattr(module, "handle", None)):
-                handlers.append("handle")
-            for attr in dir(module):
-                if attr.startswith("on_") and callable(getattr(module, attr)):
-                    handlers.append(attr)
-        try:
-            mtime = path.stat().st_mtime
-            modified = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
-        except OSError:
-            modified = None
-        out.append({
-            "name": name,
-            "path": str(path),
-            "enabled": is_enabled(path),
-            "loaded": module is not None,
-            "events": list(events) if isinstance(events, (list, tuple)) else None,
-            "handlers": handlers,
-            "modified": modified,
-        })
-    return out
+    """List scripts and static metadata without importing their modules."""
+    max_count, _max_source_bytes = script_limits()
+    if not max_count:
+        return []
+    return [parse_script_metadata(path) for path in _script_files(max_count)]
 
 
 def reload_scripts() -> int:
     """Drop the module cache (next dispatch re-imports from disk)."""
-    n = len(_cache)
-    _cache.clear()
+    with _CACHE_LOCK:
+        n = len(_cache)
+        _cache.clear()
     return n
+
+
+# --------------------------------------------------------------------------- #
+# Chained-event budget (C-5)
+# --------------------------------------------------------------------------- #
+# `ctx.fire()` lets a script re-dispatch an event, which is how scripts chain.
+# The bounded pool caps *concurrency*, but not *volume*: a script that fires
+# from inside a handler — especially one that fires an event its own handler
+# subscribes to — keeps producing work forever, and the pool stays permanently
+# saturated. Warm-on-open and every other background task then sit behind a
+# script storm that never ends.
+#
+# Two independent caps, because they catch different storms:
+#   * depth — a single chain cannot exceed `SCRIPTS_MAX_CHAIN_DEPTH` hops;
+#   * rate  — chained dispatches process-wide cannot exceed
+#             `SCRIPTS_MAX_CHAIN_PER_SECOND` per rolling second.
+#
+# The depth is passed **explicitly** through the dispatch rather than held in a
+# thread-local: each hop runs on whichever pool worker picks the task up, so a
+# thread-local would read 0 on the next thread and the cap would never trip.
+_CHAIN_WINDOW_SECONDS = 1.0
+_chain_lock = threading.Lock()
+_chain_window: deque[float] = deque()
+_chain_dropped_depth = 0
+_chain_dropped_rate = 0
+
+
+def _chain_depth_limit() -> int:
+    """Configured chain depth (``0`` = chaining disabled, honoured literally)."""
+    try:
+        return max(0, int(getattr(settings, "SCRIPTS_MAX_CHAIN_DEPTH", 5)))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _chain_rate_limit() -> int:
+    """Configured chained dispatches per second (``0`` = unlimited)."""
+    try:
+        return max(0, int(getattr(settings, "SCRIPTS_MAX_CHAIN_PER_SECOND", 50)))
+    except (TypeError, ValueError):
+        return 50
+
+
+def _chain_budget_available(limit: int) -> bool:
+    """Take one slot from the rolling one-second chained-dispatch window."""
+    if limit <= 0:
+        return False  # zero disables chained dispatch rather than removing its cap
+    now = time.monotonic()
+    with _chain_lock:
+        while _chain_window and now - _chain_window[0] > _CHAIN_WINDOW_SECONDS:
+            _chain_window.popleft()
+        if len(_chain_window) >= limit:
+            return False
+        _chain_window.append(now)
+        return True
+
+
+def chain_stats() -> dict:
+    """Chained-dispatch counters (observability + regression tests)."""
+    with _chain_lock:
+        in_window = len(_chain_window)
+        return {
+            "depth_limit": _chain_depth_limit(),
+            "rate_limit_per_second": _chain_rate_limit(),
+            "window_len": in_window,
+            "dropped_depth": _chain_dropped_depth,
+            "dropped_rate": _chain_dropped_rate,
+        }
+
+
+def reset_chain_budget() -> None:
+    """Clear the rolling window and the drop counters (tests / config reload)."""
+    global _chain_dropped_depth, _chain_dropped_rate
+    with _chain_lock:
+        _chain_window.clear()
+        _chain_dropped_depth = 0
+        _chain_dropped_rate = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -174,11 +370,22 @@ def reload_scripts() -> int:
 class ScriptContext:
     """What a script handler receives — logger, payload, PAXS helpers."""
 
-    def __init__(self, name: str, event: str, payload: dict) -> None:
+    def __init__(
+        self,
+        name: str,
+        event: str,
+        payload: dict[str, Any],
+        chain_depth: int = 0,
+        script_paths: tuple[Path, ...] | None = None,
+    ) -> None:
         self._name = name
         self.log = logging.getLogger(f"paxs.scripts.{name}")
         self.event = event
         self.payload = payload
+        #: How many `ctx.fire` hops deep this dispatch is (C-5). A handler that
+        #: fires passes `chain_depth + 1` to the next hop.
+        self.chain_depth = chain_depth
+        self._script_paths = script_paths
 
     # -- read-only archive helpers -------------------------------------- #
     def study(self, study_uid: str) -> dict | None:
@@ -248,11 +455,18 @@ class ScriptContext:
                 for i in rows
             ]
 
-    def read_bytes(self, key: str) -> bytes:
-        """Object bytes from the storage backend (heavy — use sparingly)."""
+    def read_bytes(self, key: str, backend_name: str | None = None) -> bytes:
+        """Object bytes from the storage backend (heavy — use sparingly).
+
+        D-6: ``backend_name`` selects the store that actually holds the object.
+        A study can live on a non-default backend (``instances.storage_backend``,
+        from replication or tiering), and reading it from the env default finds
+        nothing — the script saw a spurious miss on an object that exists. Pass
+        the ``storage_backend`` that :meth:`instances` reports for the row.
+        """
         from app.services import storage_service
 
-        return storage_service.read_bytes(key)
+        return storage_service.read_bytes(key, backend_name=backend_name)
 
     # -- outbound helper ------------------------------------------------- #
     def http_post(self, url: str, payload: dict, timeout: float = 8.0) -> int:
@@ -266,14 +480,21 @@ class ScriptContext:
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return int(resp.status)
-        except Exception:
-            self.log.warning("http_post to %s failed", url, exc_info=True)
+        except Exception as exc:
+            # URLs and request failures can contain PHI or credentials; scripts remain non-fatal.
+            self.log.warning("script_http_post_failed error_type=%s", type(exc).__name__)
             return 0
 
     # -- chaining --------------------------------------------------------- #
-    def fire(self, event: str, **data) -> None:
-        """Re-dispatch an event to *other* scripts (chains)."""
-        fire(event, **data)
+    def fire(self, event: str, **data: Any) -> None:
+        """Re-dispatch an event to *other* scripts (chains).
+
+        Counts one hop against the chain budget (C-5): the child dispatch runs
+        at ``chain_depth + 1``, so a self-feeding chain stops at
+        ``SCRIPTS_MAX_CHAIN_DEPTH`` instead of occupying the background pool
+        forever.
+        """
+        _queue_event(event, data, self.chain_depth + 1, self._script_paths)
 
 
 def _dispatch_one(module: Any, event: str, ctx: ScriptContext) -> None:
@@ -290,36 +511,97 @@ def _dispatch_one(module: Any, event: str, ctx: ScriptContext) -> None:
         on_handler(ctx)
 
 
-def _run(event: str, payload: dict) -> None:
-    for path in _script_files():
+def _run(
+    event: str,
+    payload: dict[str, Any],
+    chain_depth: int,
+    script_paths: tuple[Path, ...],
+) -> None:
+    """Run only the bounded script snapshot captured when this event queued."""
+    if not settings.SCRIPTS_ENABLED:
+        return
+    max_count, _max_source_bytes = script_limits()
+    if not max_count:
+        return
+    for path in script_paths[:max_count]:
         name = path.stem
         if not is_enabled(path):
             continue
         module = _load(name, path)
         if module is None:
             continue
-        ctx = ScriptContext(name, event, payload)
+        ctx = ScriptContext(
+            name, event, payload, chain_depth=chain_depth, script_paths=script_paths
+        )
         try:
             _dispatch_one(module, event, ctx)
-        except Exception:
-            log.exception("script %s crashed on event %s", name, event)
+        except Exception as exc:
+            # A script failure must not stop sibling scripts or disclose its event payload.
+            log.error("script_execution_failed error_type=%s", type(exc).__name__)
 
 
-def fire(event: str, **data) -> None:
-    """Dispatch an event to every subscribed script (non-blocking)."""
+def _chain_dispatch_allowed(event: str, chain_depth: int) -> bool:
+    """Apply the depth and rolling-rate caps to one queued script hop."""
+    global _chain_dropped_depth, _chain_dropped_rate
+    if chain_depth > _chain_depth_limit():
+        with _chain_lock:
+            _chain_dropped_depth += 1
+        log.warning(
+            "script_chain_dropped reason=depth depth=%d max_depth=%d",
+            chain_depth,
+            _chain_depth_limit(),
+        )
+        return False
+    if chain_depth > 0 and not _chain_budget_available(_chain_rate_limit()):
+        with _chain_lock:
+            _chain_dropped_rate += 1
+        log.warning(
+            "script_chain_dropped reason=rate limit_per_second=%d",
+            _chain_rate_limit(),
+        )
+        return False
+    return True
+
+
+def _queue_event(
+    event: str,
+    data: dict[str, Any],
+    chain_depth: int,
+    script_paths: tuple[Path, ...] | None = None,
+) -> None:
+    """Queue an event against a stable, entry-bounded script path snapshot."""
     if not settings.SCRIPTS_ENABLED:
         return
-    if not _script_files():
+    max_count, _max_source_bytes = script_limits()
+    if not max_count:
+        return
+    paths = script_paths if script_paths is not None else tuple(_script_files(max_count))
+    paths = paths[:max_count]
+    if not paths or not _chain_dispatch_allowed(event, chain_depth):
         return
     payload = {
         "event": event,
         "occurred_at": datetime.now(timezone.utc).isoformat(),
         **data,
     }
-    threading.Thread(
-        target=_run, args=(event, payload),
-        daemon=True, name=f"script-{event[:12]}",
-    ).start()
+    if not submit_background(_run, event, payload, chain_depth, paths):
+        log.debug("script_dispatch_dropped reason=background_pool_saturated")
+
+
+def fire(event: str, *, _chain_depth: int = 0, **data: Any) -> None:
+    """Dispatch an event to every subscribed script (non-blocking, bounded).
+
+    C-5: the dispatch runs on the shared bounded background pool rather than a
+    raw thread per event. If the pool's backlog is saturated the event is
+    dropped and logged — shedding an event is the correct backpressure for a
+    chained-script storm; spawning a thread per event would exhaust the process.
+
+    ``_chain_depth`` is the private hop counter for :meth:`ScriptContext.fire`
+    (keyword-only, so it can never collide with a payload key). A *chained*
+    dispatch is additionally bounded by depth and by rate, because the pool only
+    bounds concurrency: an unbounded chain would keep it saturated forever.
+    """
+    _queue_event(event, data, _chain_depth)
 
 
 def run_script_now(name: str, event: str, payload: dict) -> dict:
@@ -327,6 +609,10 @@ def run_script_now(name: str, event: str, payload: dict) -> dict:
     path = scripts_dir() / f"{name}.py"
     if not path.is_file():
         return {"ok": False, "error": f"script {name!r} not found"}
+    max_count, _max_source_bytes = script_limits()
+    script_paths = tuple(_script_files(max_count)) if max_count else ()
+    if not max_count or path not in script_paths:
+        return {"ok": False, "error": "script registry capacity exceeded"}
     if not is_enabled(path):
         return {"ok": False, "error": f"script {name!r} is disabled"}
     module = _load(name, path)
@@ -337,7 +623,7 @@ def run_script_now(name: str, event: str, payload: dict) -> dict:
         "occurred_at": datetime.now(timezone.utc).isoformat(),
         **payload,
     }
-    ctx = ScriptContext(name, event, full_payload)
+    ctx = ScriptContext(name, event, full_payload, script_paths=script_paths)
     try:
         _dispatch_one(module, event, ctx)
         return {"ok": True, "name": name, "event": event}

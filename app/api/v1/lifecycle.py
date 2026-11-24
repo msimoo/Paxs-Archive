@@ -10,10 +10,18 @@
   POST   /api/v1/lifecycle/studies/{uid}/restore — Restore one study (hot tier)
   POST   /api/v1/lifecycle/studies/{uid}/purge    — Permanently delete a study
   GET    /api/v1/lifecycle/studies            — List studies by lifecycle state
+  GET    /api/v1/lifecycle/orphaned-objects   — Objects whose deletion failed (A-15)
+  POST   /api/v1/lifecycle/orphaned-objects/retry — Retry those deletions (A-15)
 
-Rule writes and the destructive purge are gated: purge requires
-`require_destructive_role` (ADMIN / RADIOLOGIST); the rest require a signed-in
-user. File operations run through `asyncio.to_thread` (sync backend session).
+Rule writes and the destructive purge are gated: the purge and every rule write
+require ``require_admin`` (stricter than the destructive-role set, which also
+admits RADIOLOGIST); the read endpoints require a signed-in user. File operations
+run through `asyncio.to_thread` (sync backend session).
+
+A purge is all-or-nothing (A-14/A-15): if any object cannot be unlinked the study
+metadata is deliberately **kept**, the failures are queued in
+``orphaned_objects``, and the endpoint answers 409 — the study still exists, so
+404 would be a lie and 200 would hide an operator's work item.
 """
 
 from __future__ import annotations
@@ -25,15 +33,14 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
     get_current_user,
     require_admin,
-    require_destructive_role,
+    tenant_scope,
 )
-from app.db.models import Patient, Study, StudyLifecycleRule, User
+from app.db.models import StudyLifecycleRule, User
 from app.db.session import get_db
 from app.services import lifecycle_service
 
@@ -90,9 +97,9 @@ async def create_rule(body: CreateLifecycleRuleRequest,
         await db.refresh(rule)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    except Exception as exc:
-        log.exception("Failed to create lifecycle rule %s", body.name)
-        raise HTTPException(400, f"Failed to create rule: {exc}") from exc
+    except Exception as exc:  # persistence failures may contain PHI or storage details
+        log.error("lifecycle_rule_create_failed error_type=%s", type(exc).__name__)
+        raise HTTPException(400, "Failed to create rule") from None
     return JSONResponse(_rule_to_dict(rule), status_code=201)
 
 
@@ -185,11 +192,35 @@ async def restore_one(study_uid: str, db: AsyncSession = Depends(get_db),
 async def purge_one(study_uid: str, db: AsyncSession = Depends(get_db),
                     user: User = Depends(require_admin)):
     result = await asyncio.to_thread(
-        lifecycle_service.purge_study, study_uid, f"api:{user.username}"
+        lifecycle_service.purge_study, study_uid, f"api:{user.username}",
+        allow_signed_report=True,
     )
     if not result["ok"]:
+        if result.get("state") == "PURGING":
+            # A-14/A-15: not every object could be unlinked, so the metadata was
+            # deliberately kept and the failures queued. 409 — the study is still
+            # here and an operator has a work item; 404 would be a lie.
+            raise HTTPException(409, result.get("error", "Purge refused"))
         raise HTTPException(404, result.get("error", "Study not found"))
     return JSONResponse({"study_uid": study_uid, **result})
+
+
+@router.get("/orphaned-objects", response_class=JSONResponse)
+async def list_orphaned_objects(include_resolved: bool = Query(default=False),
+                                user: User = Depends(require_admin)):
+    """A-15: objects whose deletion failed, awaiting an operator's retry."""
+    rows = await asyncio.to_thread(
+        lifecycle_service.list_orphaned_objects, include_resolved
+    )
+    return JSONResponse({"count": len(rows), "objects": rows})
+
+
+@router.post("/orphaned-objects/retry", response_class=JSONResponse)
+async def retry_orphaned_objects(user: User = Depends(require_admin)):
+    """A-15: re-attempt every outstanding failed deletion."""
+    return JSONResponse(
+        await asyncio.to_thread(lifecycle_service.retry_orphaned_deletions)
+    )
 
 
 @router.get("/studies", response_class=JSONResponse)
@@ -198,15 +229,10 @@ async def list_studies(state: str = Query(default="ARCHIVED"),
                        user: User = Depends(get_current_user)):
     """List studies by lifecycle state (default: the cold tier)."""
     state = (state or "ARCHIVED").upper()
-    rows = (
-        await db.execute(
-            select(Study, Patient.patient_id, Patient.patient_name)
-            .join(Patient, Study.patient_id == Patient.id)
-            .where(Study.lifecycle_state == state)
-            .order_by(Study.study_date.desc(), Study.id.desc())
-            .limit(200)
-        )
-    ).all()
+    tenant_id, include_all = tenant_scope(user)
+    rows = await lifecycle_service.list_studies_by_lifecycle_state(
+        db, state, tenant_id, include_all
+    )
     return JSONResponse([
         {
             "study_uid": s.study_instance_uid,

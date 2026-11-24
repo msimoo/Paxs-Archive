@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 from contextvars import ContextVar
 from datetime import datetime, timezone
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.core.roles import DESTRUCTIVE_ROLES
+from app.core.csrf import csrf_violation
+from app.core.roles import DESTRUCTIVE_ROLES, may_delete_studies
 from app.core.security import decode_token, hash_refresh_token
 from app.db.models import Instance, Series, Session, Study, User
 from app.db.session import AsyncSessionLocal
 from app.services import query_service, tenant_service
+
+log = logging.getLogger("paxs.api.deps")
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -22,6 +26,19 @@ bearer_scheme = HTTPBearer(auto_error=False)
 def _utcnow() -> datetime:
     """Naive UTC, matching how session timestamps are stored."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+async def require_csrf(request: Request) -> None:
+    """Reject a cookie-authenticated state change without a valid CSRF token.
+
+    Defence-in-depth companion to ``CsrfProtectionMiddleware`` (B-19 / FS-10):
+    routers that want the check to be locally explicit — and to keep it even if
+    the global middleware is switched off — attach this dependency. Safe methods
+    and bearer-token API clients pass through unchanged; a missing or mismatched
+    token is a **403**.
+    """
+    if csrf_violation(request.scope):
+        raise HTTPException(status_code=403, detail="CSRF token missing or invalid")
 
 
 async def get_current_user_from_cookie(request: Request) -> User | None:
@@ -135,6 +152,28 @@ async def require_admin(user: User = Depends(get_current_user_any)) -> User:
     return user
 
 
+def assert_can_delete_studies(user: User) -> None:
+    """403 unless the caller may permanently delete a study.
+
+    **Call this after the study has been resolved inside the caller's tenant
+    scope**, not as a route dependency. The ordering is load-bearing (N-1): a
+    dependency runs before the handler, so it would answer 403 for a study the
+    caller cannot see, and a 403 on an existing foreign UID discloses that the
+    UID exists. Resolving scope first keeps every cross-tenant probe at 404 —
+    which is exactly the ordering ``test_tenant_a_cannot_delete_tenant_b_study``
+    pins for a RADIOLOGIST caller.
+
+    ``DESTRUCTIVE_ROLES`` still gates the route (it admits ADMIN and
+    RADIOLOGIST), so a PHYSICIAN is refused at the dependency before any lookup
+    happens; this check narrows the surviving RADIOLOGIST to ADMIN-only.
+    """
+    if not may_delete_studies(user.role):
+        raise HTTPException(
+            status_code=403,
+            detail="Only an administrator can delete studies",
+        )
+
+
 # --------------------------------------------------------------------------- #
 # C03 — PHI access control and patient share tokens
 # --------------------------------------------------------------------------- #
@@ -143,7 +182,8 @@ async def require_admin(user: User = Depends(get_current_user_any)) -> User:
 # carried by:
 #   * the paxs_share cookie, set when the share viewer page is served, so the
 #     bundled (third-party) viewer needs no changes;
-#   * ?share=<token> or the X-PAXS-Share-Token header for API clients.
+#   * the X-PAXS-Share-Token header for API clients. Query tokens are accepted
+#     only by the one-time link exchange endpoint.
 # A share token only ever grants READ access to the single study it names.
 SHARE_TOKEN_QUERY_PARAM = "share"
 SHARE_TOKEN_HEADER = "X-PAXS-Share-Token"
@@ -156,7 +196,7 @@ def share_cookie_max_age(expires_at) -> int:
 
     try:
         remaining = int((expires_at - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds())
-    except Exception:  # noqa: BLE001 - naive/aware mismatch or missing value
+    except (TypeError, AttributeError, ValueError):  # naive/aware mismatch or missing value
         return 3600
     return max(60, min(remaining, 86400))
 
@@ -170,11 +210,7 @@ async def get_share_scope(request: Request) -> str | None:
     """
     from app.services.sharing_service import get_share
 
-    token = (
-        request.query_params.get(SHARE_TOKEN_QUERY_PARAM)
-        or request.headers.get(SHARE_TOKEN_HEADER)
-        or request.cookies.get(SHARE_COOKIE_NAME)
-    )
+    token = request.headers.get(SHARE_TOKEN_HEADER) or request.cookies.get(SHARE_COOKIE_NAME)
     if not token:
         return None
     async with AsyncSessionLocal() as session:
@@ -184,43 +220,32 @@ async def get_share_scope(request: Request) -> str | None:
     return share.study_instance_uid
 
 
-async def share_cookie_ttl(token: str) -> int | None:
-    """Cookie lifetime (seconds) for a valid share token, or None when invalid.
-
-    Used when the share viewer page is served, so the bundled viewer's later
-    DICOMweb/volume reads carry the token automatically.
-    """
-    from app.services.sharing_service import get_share
-
-    if not token:
-        return None
-    async with AsyncSessionLocal() as session:
-        share = await get_share(session, token)
-    if share is None:
-        return None
-    return share_cookie_max_age(share.expires_at)
+def set_share_cookie(response: Response, token: str, expires_at) -> None:
+    """Set the study-scoped share credential without permitting HTTP transport."""
+    response.set_cookie(
+        SHARE_COOKIE_NAME,
+        token,
+        max_age=share_cookie_max_age(expires_at),
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
 
 
-async def _study_uid_for_series(series_uid: str) -> str | None:
+async def _study_uid_for_series(series_uid: str, study_scope: str | None = None) -> str | None:
     """Owning study of a series (used to scope share access to volume data)."""
     from app.db.models import Series, Study
 
     async with AsyncSessionLocal() as session:
-        return (
-            await session.execute(
-                select(Study.study_instance_uid)
-                .join(Series, Series.study_id == Study.id)
-                .where(Series.series_instance_uid == series_uid)
-            )
-        ).scalar_one_or_none()
-
-
-async def _share_grants(request: Request, study_uid: str | None) -> bool:
-    """True when the caller's share token covers ``study_uid``."""
-    if not study_uid:
-        return False
-    scope = await get_share_scope(request)
-    return scope is not None and scope == study_uid
+        stmt = (
+            select(Study.study_instance_uid)
+            .join(Series, Series.study_id == Study.id)
+            .where(Series.series_instance_uid == series_uid)
+        )
+        if study_scope is not None:
+            stmt = stmt.where(Study.study_instance_uid == study_scope)
+        return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def require_dicomweb_read(
@@ -232,8 +257,8 @@ async def require_dicomweb_read(
 
     Two questions are answered here, for every DICOMweb route at once:
 
-    * **Authentication (C03)** — ``DICOMWEB_PUBLIC=true`` allows anonymous
-      access (legacy LAN mode); ``false`` requires a bearer token or session
+    * **Authentication (C03)** — ``DICOMWEB_PUBLIC_READ=true`` allows
+      anonymous QIDO/WADO access; ``false`` requires a bearer token or session
       cookie, unless a patient share token authorises exactly this study.
     * **Tenant isolation (C04)** — when the route names a study, an
       authenticated caller must be able to see it, and a share-scoped caller
@@ -245,10 +270,24 @@ async def require_dicomweb_read(
     Returns the authenticated user, or ``None`` when access came from a share
     token (callers must then keep the response scoped to that study).
     """
-    user = await get_optional_user(request, credentials)
+    from app.services import dicomweb_auth_cache as auth_memo
+
+    # S2: a frame burst presents the same token hundreds of times; reuse a
+    # recent successful lookup (see dicomweb_auth_cache for the safety rules).
+    cookie_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    identity_key = None
+    if credentials is not None or cookie_token:
+        identity_key = auth_memo.token_key(
+            "id", f"{credentials.credentials if credentials else ''}\n{cookie_token or ''}"
+        )
+    user = auth_memo.get_identity(identity_key) if identity_key else None
+    if user is None:
+        user = await get_optional_user(request, credentials)
+        if user is not None and identity_key:
+            auth_memo.put_identity(identity_key, user)
     share_scope: str | None = None
 
-    if user is None and not settings.DICOMWEB_PUBLIC:
+    if user is None and not settings.DICOMWEB_PUBLIC_READ:
         scope = await get_share_scope(request)
         if scope is not None and (study_uid is None or study_uid == scope):
             # Study-scoped routes must match exactly; collection/search routes
@@ -261,13 +300,52 @@ async def require_dicomweb_read(
                 detail="Authentication required: DICOMweb is not public on this server",
             )
 
-    if study_uid and not (user is None and settings.DICOMWEB_PUBLIC):
-        async with AsyncSessionLocal() as session:
-            await require_study_access(session, study_uid, user, share_scope=share_scope)
+    if study_uid and not (user is None and settings.DICOMWEB_PUBLIC_READ):
+        access_key = (user.id, tenant_scope(user), study_uid) if user is not None else None
+        if access_key is None or not auth_memo.has_study_access(access_key):
+            async with AsyncSessionLocal() as session:
+                await require_study_access(session, study_uid, user, share_scope=share_scope)
+            if access_key is not None:
+                auth_memo.put_study_access(access_key)
 
     # Publish the resolved scope for the shared resolution helpers.
     _request_scope.set(read_scope(user, share_scope=share_scope))
+    # C-02: and the single study a share token authorizes, so routes that name
+    # objects without a study path segment (WADO-URI) can pin their lookup to
+    # it instead of running archive-wide.
+    _request_share_study.set(share_scope)
+    if study_uid:
+        await _audit_study_view(request, study_uid, user, share_scope)
     return user
+
+
+async def _audit_study_view(request: Request, study_uid: str, user: User | None,
+                            share_scope: str | None) -> None:
+    """H-05: record who opened a study — once per actor/study/5 min, never per frame.
+
+    Runs in the router-level read guard so every study-scoped DICOMweb read
+    (metadata, frames, rendered, WADO-RS) is covered by construction. An audit
+    failure is logged and never fails the read.
+    """
+    from app.api.ratelimit import _client_key
+    from app.services.audit_service import record_study_view
+
+    if user is not None:
+        actor_key = f"user:{user.id}"
+    elif share_scope is not None:
+        actor_key = "share"
+    else:
+        actor_key = "anonymous"
+    client_ip = _client_key(request)
+    try:
+        async with AsyncSessionLocal() as session:
+            await record_study_view(
+                session, actor_key=f"{actor_key}@{client_ip}" if user is None else actor_key,
+                study_uid=study_uid,
+                user_id=getattr(user, "id", None), client_ip=client_ip,
+            )
+    except Exception as exc:  # noqa: BLE001 - audit is best effort; the read must still answer
+        log.error("study_view_audit_failed error_type=%s", type(exc).__name__)
 
 
 async def require_dicomweb_write(
@@ -276,19 +354,17 @@ async def require_dicomweb_write(
 ) -> User | None:
     """Authorise a DICOMweb WRITE (STOW-RS).
 
-    Share tokens never grant write access, so private mode always requires a
-    real identity here.
+    Share tokens never grant write access. Anonymous writes are allowed only
+    when the separate ``DICOMWEB_PUBLIC_WRITE`` switch is explicitly enabled.
     """
-    if settings.DICOMWEB_PUBLIC:
-        return await get_optional_user(request, credentials)
-
     user = await get_optional_user(request, credentials)
-    if user is None:
+    if user is None and not settings.DICOMWEB_PUBLIC_WRITE:
         raise HTTPException(
             status_code=401,
-            detail="Authentication required: DICOMweb is not public on this server",
+            detail="Authentication required: public DICOMweb writes are disabled",
         )
     _request_scope.set(read_scope(user))
+    _request_share_study.set(None)
     return user
 
 
@@ -307,9 +383,12 @@ async def require_series_read(
     if user is not None:
         return user
     if series_uid:
-        study_uid = await _study_uid_for_series(series_uid)
-        if await _share_grants(request, study_uid):
+        share_scope = await get_share_scope(request)
+        study_uid = await _study_uid_for_series(series_uid, study_scope=share_scope)
+        if share_scope is not None and study_uid == share_scope:
             return None
+        if share_scope is not None:
+            raise HTTPException(status_code=404, detail="Series not found")
     raise HTTPException(status_code=401, detail="Not authenticated")
 
 
@@ -351,7 +430,18 @@ async def require_dicomweb_access(
 # *this* object". A cross-tenant object is reported as 404, not 403, so an
 # institution cannot probe for the existence of another institution's studies.
 def tenant_scope(user: User | None) -> tuple[int | None, bool]:
-    """(tenant_id, include_all) for the caller — see tenant_service."""
+    """The caller's tenant **scope** — ``(tenant_id, include_all)``.
+
+    This is the *resolver*, not a predicate: it answers "which tenant is this
+    caller allowed to see", and its result is fed to
+    :func:`app.services.query_service.tenant_predicate` /
+    :func:`~app.services.query_service.apply_study_tenant_scope`, which is the
+    single place the predicate itself is implemented (FA-1). Do not build a
+    tenant comparison by hand from this tuple — call the predicate.
+
+    Delegates to :func:`app.services.tenant_service.scope_from_user`, the one
+    definition of the role -> scope mapping.
+    """
     return tenant_service.scope_from_user(user)
 
 
@@ -365,7 +455,7 @@ def read_scope(user: User | None, *, share_scope: str | None = None) -> tuple[in
     * anonymous otherwise         -> the legacy unscoped data only
     """
     if user is None:
-        if share_scope is not None or settings.DICOMWEB_PUBLIC:
+        if share_scope is not None or settings.DICOMWEB_PUBLIC_READ:
             return None, True
     return tenant_scope(user)
 
@@ -378,6 +468,16 @@ def read_scope(user: User | None, *, share_scope: str | None = None) -> tuple[in
 _request_scope: ContextVar[tuple[int | None, bool]] = ContextVar(
     "paxs_request_scope", default=(None, False)
 )
+# C-02: the study UID a share-token caller is confined to (None = not a share
+# caller). Published by the same router-level guard as `_request_scope`.
+_request_share_study: ContextVar[str | None] = ContextVar(
+    "paxs_request_share_study", default=None
+)
+
+
+def current_share_study() -> str | None:
+    """Study UID the current request's share token is confined to, or None."""
+    return _request_share_study.get()
 
 
 def current_scope() -> tuple[int | None, bool]:
@@ -388,10 +488,16 @@ def current_scope() -> tuple[int | None, bool]:
 async def require_study_access(db: AsyncSession, study_uid: str, user: User | None,
                                *, share_scope: str | None = None) -> Study:
     """The study when the caller may see it, else 404 (C04)."""
-    if user is None and share_scope is not None and share_scope == study_uid:
+    if user is None and share_scope is not None:
         # A share token is a *fallback identity* for someone with no account,
         # never a widening of an authenticated user's access: it authorises
         # exactly this study, so the tenant filter does not apply.
+        #
+        # C-02: a mismatch is a 404 *here*. It used to fall through to the
+        # anonymous legacy scope below, i.e. every NULL-tenant study, so a link
+        # for one patient could read another patient's instance by SOP UID.
+        if share_scope != study_uid:
+            raise HTTPException(404, "Study not found")
         study = (
             await db.execute(select(Study).where(Study.study_instance_uid == study_uid))
         ).scalar_one_or_none()

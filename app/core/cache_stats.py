@@ -28,7 +28,7 @@ import threading
 # Cache identities. Kept as a tuple so /metrics can emit a stable series set
 # (a cache with no traffic still reports 0 rather than vanishing between scrapes,
 # which would break rate() and alerting).
-CACHES: tuple[str, ...] = ("volume", "frame")
+CACHES: tuple[str, ...] = ("volume", "frame", "ai", "bundle")
 
 COUNTERS: tuple[str, ...] = ("hits", "misses", "inserts", "evictions")
 GAUGES: tuple[str, ...] = ("bytes", "entries")

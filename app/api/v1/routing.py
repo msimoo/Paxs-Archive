@@ -94,9 +94,9 @@ async def create_routing_rule(
         # Fetch with joined relationship
         refreshed = await routing_service.get_rule(db, rule.id)
         return JSONResponse(_rule_to_dict(refreshed or rule), status_code=201)
-    except Exception as exc:
-        log.exception("Failed to create routing rule %s", req.name)
-        raise HTTPException(400, f"Failed to create routing rule: {exc}") from exc
+    except Exception as exc:  # unexpected persistence errors may contain PHI or paths
+        log.error("routing_rule_create_failed error_type=%s", type(exc).__name__)
+        raise HTTPException(400, "Failed to create routing rule") from None
 
 
 @router.get("/rules", response_class=JSONResponse)
@@ -164,7 +164,10 @@ async def evaluate_study_routing(
     user: User = Depends(require_destructive_role),
 ):
     """Manually evaluate auto-routing rules for a study and enqueue dispatch."""
-    count = await routing_service.evaluate_and_route_study(study_uid)
+    is_admin = user.role.upper() == "ADMIN"
+    count = await routing_service.evaluate_and_route_study(
+        study_uid, tenant_id=user.tenant_id, include_all=is_admin
+    )
     return JSONResponse(
         {"message": f"Evaluated rules for study {study_uid}", "matched_rules_count": count}
     )
@@ -178,7 +181,10 @@ async def list_routing_queue(
     user: User = Depends(get_current_user),
 ):
     """List Smart Router send-queue items (optionally by status)."""
-    items = await asyncio.to_thread(routing_service.list_queue, status, limit)
+    is_admin = user.role.upper() == "ADMIN"
+    items = await asyncio.to_thread(
+        routing_service.list_queue, status, limit, user.tenant_id, is_admin
+    )
     return JSONResponse(items)
 
 
@@ -189,7 +195,10 @@ async def retry_routing_queue_item(
     user: User = Depends(require_destructive_role),
 ):
     """Re-queue a FAILED Smart Router dispatch for immediate retry."""
-    res = await asyncio.to_thread(routing_service.retry_queue_item, queue_id)
+    is_admin = user.role.upper() == "ADMIN"
+    res = await asyncio.to_thread(
+        routing_service.retry_queue_item, queue_id, user.tenant_id, is_admin
+    )
     if not res.get("ok"):
         raise HTTPException(400, res.get("reason", "Retry failed"))
     return JSONResponse({"message": "Queue item re-queued", "item": res["item"]})
@@ -200,14 +209,7 @@ async def run_routing_queue(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_destructive_role),
 ):
-    """Trigger a Smart Router queue sweep immediately (background thread)."""
-    import threading
-
-    def _run() -> None:
-        try:
-            routing_service.process_queue_batch()
-        except Exception:
-            log.exception("Manual routing sweep failed")
-
-    threading.Thread(target=_run, daemon=True).start()
+    """Trigger or coalesce with the active bounded Smart Router queue sweep."""
+    if not routing_service.start_manual_queue_sweep():
+        raise HTTPException(503, "Routing queue sweep could not be scheduled")
     return JSONResponse({"message": "Routing queue sweep started"})

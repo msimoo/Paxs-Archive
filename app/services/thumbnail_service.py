@@ -11,6 +11,8 @@ from __future__ import annotations
 import io
 import logging
 
+from PIL import Image
+
 from app.services import storage_service
 from app.services.imaging import dataset_to_image
 
@@ -28,11 +30,27 @@ def generate_thumbnail(src_key: str, dst_key: str, size: int = DEFAULT_SIZE,
         img = dataset_to_image(ds, max_size=size)
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        storage_service.save_bytes(dst_key, buf.getvalue(), backend_name=backend_name)
+        storage_service.persist_bytes(dst_key, buf.getvalue(),
+                                      backend_name=backend_name)
         return True
     except Exception as exc:
         # WARNING (not debug): a failed thumbnail usually means a missing pixel
         # decode plugin (e.g. pylibjpeg not installed) or an unreadable file —
-        # surface the reason in the server log so it is diagnosable.
-        log.warning("Thumbnail failed for %s (backend=%s): %s", src_key, backend_name, exc)
+        # surface the exception class without logging a storage path or PHI.
+        log.warning(
+            "Thumbnail generation failed (backend=%s error_type=%s)",
+            backend_name,
+            type(exc).__name__,
+        )
         return False
+
+
+def empty_thumbnail_png() -> bytes:
+    """Return a transparent pixel for clients that require an image response.
+
+    This preserves the thumbnail endpoint's image/png contract when pixel data
+    cannot be decoded, without substituting a fabricated clinical image.
+    """
+    buf = io.BytesIO()
+    Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(buf, format="PNG")
+    return buf.getvalue()

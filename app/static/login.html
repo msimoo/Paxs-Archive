@@ -138,6 +138,7 @@
 
     <div class="tabs" role="tablist">
       <button id="tab-login" class="active" role="tab" aria-selected="true">Sign in</button>
+      <button id="tab-ldap" role="tab" aria-selected="false">LDAP / AD</button>
       <button id="tab-register" role="tab" aria-selected="false">Create account</button>
     </div>
 
@@ -191,15 +192,17 @@
   function setMode(m) {
     mode = m;
     $("tab-login").classList.toggle("active", m === "login");
+    $("tab-ldap").classList.toggle("active", m === "ldap");
     $("tab-register").classList.toggle("active", m === "register");
     $("tab-login").setAttribute("aria-selected", m === "login" ? "true" : "false");
+    $("tab-ldap").setAttribute("aria-selected", m === "ldap" ? "true" : "false");
     $("tab-register").setAttribute("aria-selected", m === "register" ? "true" : "false");
     $("fullname-field").hidden = m !== "register";
-    $("submit-label").textContent = m === "login" ? "Sign in" : "Create account";
-    $("password").autocomplete = m === "login" ? "current-password" : "new-password";
-    $("hint").textContent = m === "login"
-      ? "No account? Ask an administrator to create one for you."
-      : "First account on a fresh install becomes the ADMIN. Self-registration can never create ADMINs once one exists.";
+    $("submit-label").textContent = m === "ldap" ? "Sign in with LDAP" : (m === "login" ? "Sign in" : "Create account");
+    $("password").autocomplete = m === "register" ? "new-password" : "current-password";
+    $("hint").textContent = m === "ldap"
+      ? "Use your hospital LDAP / Active Directory account."
+      : (m === "login" ? "No account? Ask an administrator to create one for you." : "First account on a fresh install becomes the ADMIN. Self-registration can never create ADMINs once one exists.");
     clearErr();
   }
 
@@ -207,6 +210,7 @@
   var next = new URLSearchParams(location.search).get("next") || "";
 
   $("tab-login").addEventListener("click", function () { setMode("login"); });
+  $("tab-ldap").addEventListener("click", function () { setMode("ldap"); });
   $("tab-register").addEventListener("click", function () { setMode("register"); });
 
   $("auth-form").addEventListener("submit", async function (ev) {
@@ -216,7 +220,7 @@
     var password = $("password").value;
     if (!username || !password) { showErr("Username and password are required"); return; }
 
-    var body = mode === "login"
+    var body = mode === "login" || mode === "ldap"
       ? { username: username, password: password }
       : { username: username, password: password, full_name: $("fullname").value.trim() || null };
 
@@ -225,7 +229,7 @@
     btn.disabled = true;
     $("submit-label").textContent = "Please wait…";
     try {
-      var url = "/api/v1/auth/" + (mode === "login" ? "login" : "register");
+      var url = mode === "ldap" ? "/api/v1/ldap/login" : "/api/v1/auth/" + (mode === "login" ? "login" : "register");
       if (next) url += "?next=" + encodeURIComponent(next);
       var res = await fetch(url, {
         method: "POST",

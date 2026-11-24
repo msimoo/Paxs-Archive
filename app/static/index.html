@@ -4,8 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PAXS Archive</title>
-  <link rel="icon" href="/static/logo/logo.ico" />
-  <link rel="stylesheet" href="/static/styles.css?v=33" />
+  <link rel="icon" type="image/png" href="/viewer/assets/logo.png" />
+  <link rel="stylesheet" href="/static/styles.css?v=52" />
+  <link rel="stylesheet" href="/static/workflow.css?v=2" />
+  <link rel="stylesheet" href="/static/transfer.css?v=1" />
   <script>
     /* Apply the persisted theme before first paint (dark reading-room is the default). */
     (function () {
@@ -34,14 +36,18 @@
           <svg class="ico-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>
           <svg class="ico-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
         </button>
-        <button class="btn" id="btn-refresh" title="Refresh">
+        <button class="icon-btn" id="btn-refresh" title="Refresh archive data" aria-label="Refresh archive data">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
-          Refresh
         </button>
         <a class="btn ghost viewer-btn" id="btn-studies-ui" href="/studies-ui" title="Open Upgraded PACS Study List — modern React + Tailwind + shadcn/ui workstation">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 21V9"/></svg>
-          Study List UI ⚡
+          Workstation
         </a>
+        <details class="header-tools">
+          <summary class="icon-btn" aria-label="More archive tools" title="More tools">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+          </summary>
+          <div class="header-tools-menu" aria-label="More archive tools">
         <a class="btn ghost viewer-btn" id="btn-viewer" href="/viewer" hidden title="Open PaxsViewer — DICOMweb study browser for this archive">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 8.5h18M8 4v16"/></svg>
           Viewer
@@ -51,53 +57,151 @@
           Settings &amp; Branding
         </a>
         <button class="btn ghost" id="btn-login">Login</button>
-        <a class="btn ghost" id="btn-logout" href="/logout" title="Sign out of PAXS Archive" style="color:#f87171;border-color:rgba(248,113,113,0.35);margin-left:4px">
+        <a class="btn ghost" id="btn-logout" href="/logout" title="Sign out of PAXS Archive">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
           Logout
         </a>
+          </div>
+        </details>
       </div>
     </header>
 
     <!-- primary navigation -->
     <nav class="mainnav" id="mainnav" aria-label="Sections">
       <button class="nav-tab active" data-view="dashboard" title="Archive overview &amp; feature modules">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+        <svg class="nav-ic" width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="paxs-nav-s-dashboard" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#2dd4bf"/></linearGradient>
+            <linearGradient id="paxs-nav-f-dashboard" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee" stop-opacity=".34"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".07"/></linearGradient>
+          </defs>
+          <g stroke="url(#paxs-nav-s-dashboard)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3.2" y="3.2" width="7.4" height="9.2" rx="1.9" fill="url(#paxs-nav-f-dashboard)"/>
+      <rect x="13.4" y="3.2" width="7.4" height="5.4" rx="1.9" fill="url(#paxs-nav-f-dashboard)"/>
+      <rect x="13.4" y="11.4" width="7.4" height="9.4" rx="1.9" fill="url(#paxs-nav-f-dashboard)"/>
+      <rect x="3.2" y="15.2" width="7.4" height="5.6" rx="1.9" fill="url(#paxs-nav-f-dashboard)"/>
+          </g>
+        </svg>
         Dashboard
       </button>
       <button class="nav-tab" data-view="studies" title="Browse the patient study list">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <svg class="nav-ic" width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="paxs-nav-s-studies" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#38bdf8"/><stop offset="1" stop-color="#22d3ee"/></linearGradient>
+            <linearGradient id="paxs-nav-f-studies" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#38bdf8" stop-opacity=".34"/><stop offset="1" stop-color="#22d3ee" stop-opacity=".07"/></linearGradient>
+          </defs>
+          <g stroke="url(#paxs-nav-s-studies)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3.2 3.8 7.2l8.2 4 8.2-4L12 3.2Z" fill="url(#paxs-nav-f-studies)"/>
+      <path d="m4.5 11.4 7.5 3.6 7.5-3.6"/>
+      <path d="m4.5 15.4 7.5 3.6 7.5-3.6"/>
+          </g>
+        </svg>
         Studies
       </button>
       <button class="nav-tab" data-view="reading" title="Radiologist reading worklist — Unread · Stat · Dictated">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+        <svg class="nav-ic" width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="paxs-nav-s-reading" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#a78bfa"/><stop offset="1" stop-color="#f472b6"/></linearGradient>
+            <linearGradient id="paxs-nav-f-reading" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#a78bfa" stop-opacity=".34"/><stop offset="1" stop-color="#f472b6" stop-opacity=".07"/></linearGradient>
+          </defs>
+          <g stroke="url(#paxs-nav-s-reading)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 6.5v13.4"/>
+      <path d="M12 6.5C10.3 4.9 8 4.1 5.2 4.1H3.2v13.6h2c2.8 0 5.1.8 6.8 2.4 1.7-1.6 4-2.4 6.8-2.4h2V4.1h-2c-2.8 0-5.1.8-6.8 2.4Z" fill="url(#paxs-nav-f-reading)"/>
+          </g>
+        </svg>
         Reading
       </button>
       <button class="nav-tab" data-view="workflow" title="Modality Worklist · MPPS · Storage Commitment">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M8 2v4M16 2v4M3 9h18"/><path d="m9 15 2 2 4-4"/></svg>
+        <svg class="nav-ic" width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="paxs-nav-s-workflow" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#fbbf24"/><stop offset="1" stop-color="#fb923c"/></linearGradient>
+            <linearGradient id="paxs-nav-f-workflow" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#fbbf24" stop-opacity=".34"/><stop offset="1" stop-color="#fb923c" stop-opacity=".07"/></linearGradient>
+          </defs>
+          <g stroke="url(#paxs-nav-s-workflow)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3.2" y="5" width="17.6" height="15.2" rx="2.5" fill="url(#paxs-nav-f-workflow)"/>
+      <path d="M3.2 9.9h17.6M8 3.2v3.6M16 3.2v3.6"/>
+      <path d="m8.8 15 2.2 2.2 4.2-4.2"/>
+          </g>
+        </svg>
         Workflow
       </button>
       <button class="nav-tab" data-view="nodes" title="Registered DICOM nodes">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6v6H9zM15 9l3 3-3 3M9 15H6a3 3 0 0 1 0-6h3"/></svg>
+        <svg class="nav-ic" width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="paxs-nav-s-nodes" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#2dd4bf"/><stop offset="1" stop-color="#22d3ee"/></linearGradient>
+            <linearGradient id="paxs-nav-f-nodes" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#2dd4bf" stop-opacity=".34"/><stop offset="1" stop-color="#22d3ee" stop-opacity=".07"/></linearGradient>
+          </defs>
+          <g stroke="url(#paxs-nav-s-nodes)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="6" cy="7" r="2.4" fill="url(#paxs-nav-f-nodes)"/>
+      <circle cx="18" cy="7" r="2.4" fill="url(#paxs-nav-f-nodes)"/>
+      <circle cx="12" cy="17.6" r="2.4" fill="url(#paxs-nav-f-nodes)"/>
+      <path d="M8.1 8.4 10.5 15.4M15.9 8.4 13.5 15.4M8.4 7h7.2"/>
+          </g>
+        </svg>
         Nodes
       </button>
       <button class="nav-tab" data-view="admin" title="Admin console — services, routing, storage, audit">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+        <svg class="nav-ic" width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="paxs-nav-s-admin" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#fb7185"/><stop offset="1" stop-color="#f472b6"/></linearGradient>
+            <linearGradient id="paxs-nav-f-admin" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#fb7185" stop-opacity=".34"/><stop offset="1" stop-color="#f472b6" stop-opacity=".07"/></linearGradient>
+          </defs>
+          <g stroke="url(#paxs-nav-s-admin)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3.1" fill="url(#paxs-nav-f-admin)"/>
+      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34 1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87 1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1Z"/>
+          </g>
+        </svg>
         Admin
       </button>
       <button class="nav-tab" data-view="settings" title="System · DICOM · Modality · Storage · Security settings">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1.08 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <svg class="nav-ic" width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="paxs-nav-s-settings" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#34d399"/><stop offset="1" stop-color="#22d3ee"/></linearGradient>
+            <linearGradient id="paxs-nav-f-settings" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#34d399" stop-opacity=".34"/><stop offset="1" stop-color="#22d3ee" stop-opacity=".07"/></linearGradient>
+          </defs>
+          <g stroke="url(#paxs-nav-s-settings)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 7.4h4.3M12.7 7.4h7.3M4 16.6h7.3M15.7 16.6h4.3"/>
+      <circle cx="10.4" cy="7.4" r="2.1" fill="url(#paxs-nav-f-settings)"/>
+      <circle cx="13.6" cy="16.6" r="2.1" fill="url(#paxs-nav-f-settings)"/>
+          </g>
+        </svg>
         Settings
       </button>
     </nav>
 
     <!-- ================= VIEW: DASHBOARD ================= -->
     <section class="view active" id="view-dashboard">
+      <section class="dashboard-hero" aria-label="Archive overview">
+        <div class="dashboard-hero-copy">
+          <div class="eyebrow"><span class="eyebrow-dot"></span> IMAGING OPERATIONS</div>
+          <h2>Your archive, <span>in focus.</span></h2>
+          <p>A live view of your imaging archive and the tools that keep care moving.</p>
+          <a class="hero-action" href="/studies-ui">
+            Open study workspace
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </a>
+        </div>
+        <div class="hero-art" aria-hidden="true">
+          <div class="hero-orbit orbit-one"></div><div class="hero-orbit orbit-two"></div>
+          <div class="hero-core"><svg viewBox="0 0 64 64" fill="none"><path d="M32 8v48M8 32h48M15 15l34 34M49 15 15 49" stroke="currentColor" stroke-width="1.2" opacity=".35"/><circle cx="32" cy="32" r="15" stroke="currentColor" stroke-width="1.4"/><circle cx="32" cy="32" r="5" fill="currentColor"/><path d="M32 17v10m0 10v10M17 32h10m10 0h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+          <span class="hero-spark spark-a"></span><span class="hero-spark spark-b"></span><span class="hero-spark spark-c"></span>
+        </div>
+        <div class="hero-foot"><span>ARCHIVE STATUS</span><span class="hero-live"><i></i> LIVE OVERVIEW</span></div>
+      </section>
       <section class="stats" id="stats" aria-label="Archive statistics">
         <div class="stat"><div class="stat-ico">🧑‍⚕️</div><div class="num" id="st-patients">–</div><div class="lbl">Patients</div></div>
         <div class="stat"><div class="stat-ico">🩻</div><div class="num" id="st-studies">–</div><div class="lbl">Studies</div></div>
         <div class="stat"><div class="stat-ico">🗂️</div><div class="num" id="st-series">–</div><div class="lbl">Series</div></div>
         <div class="stat"><div class="stat-ico">🖼️</div><div class="num" id="st-instances">–</div><div class="lbl">Instances</div></div>
         <div class="stat"><div class="stat-ico">💾</div><div class="num" id="st-storage">–</div><div class="lbl">Storage</div></div>
+      </section>
+
+      <section class="triage" id="triage" hidden aria-label="Emergency triage">
+        <div class="triage-head">
+          <span class="triage-pulse" aria-hidden="true">◉</span>
+          <b>Emergency triage</b>
+          <span class="triage-count" id="triage-count"></span>
+        </div>
+        <div id="triage-list"></div>
       </section>
 
       <section class="features" id="features" aria-label="Feature modules">
@@ -207,14 +311,6 @@
         </button>
       </section>
 
-      <section class="triage" id="triage" hidden aria-label="Emergency triage">
-        <div class="triage-head">
-          <span class="triage-pulse" aria-hidden="true">◉</span>
-          <b>Emergency triage</b>
-          <span class="triage-count" id="triage-count"></span>
-        </div>
-        <div id="triage-list"></div>
-      </section>
     </section>
 
     <!-- ================= VIEW: STUDIES ================= -->
@@ -225,7 +321,7 @@
           <p class="sub">Every study in the archive — search, filter by modality or date, and open in the viewer.</p>
         </div>
         <div class="view-head-actions">
-          <a class="btn" href="/studies-ui" target="_blank" title="Launch the new standalone React + Tailwind + shadcn/ui PACS Workstation UI" style="background: linear-gradient(135deg, var(--accent), var(--teal)); color: #04121a; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
+          <a class="btn" href="/studies-ui" title="Launch the new standalone React + Tailwind + shadcn/ui PACS Workstation UI" style="background: linear-gradient(135deg, var(--accent), var(--teal)); color: #04121a; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
             Launch Workstation UI ⚡
           </a>
@@ -242,7 +338,7 @@
         <button class="chip-btn active" data-state="" title="All studies">All <b id="cnt-total">0</b></button>
         <button class="chip-btn" data-state="ONLINE" title="Hot storage (local backend)">Online <b id="cnt-online">0</b></button>
         <button class="chip-btn" data-state="ARCHIVED" title="Cold storage (archived tier)">Archived <b id="cnt-archived">0</b></button>
-        <button class="chip-btn" data-critical="1" title="Flagged by AI emergency triage">🚨 Critical <b id="cnt-critical">0</b></button>
+        <button class="chip-btn" data-critical="1" title="Urgency flags can include experimental heuristic triage; they are not diagnoses">🚨 Critical <b id="cnt-critical">0</b></button>
         <button class="chip-btn" data-reported="1" title="Studies with a finalized radiology report">📄 Reported <b id="cnt-reported">0</b></button>
         <button class="chip-btn" data-oru="1" title="Finalized reports delivered to the EMR (HL7 ORU^R01)">➤ EMR <b id="cnt-oru">0</b></button>
         <button class="chip-btn" data-his="1" title="Studies for patients registered by the hospital HIS (HL7 ADT)">🏥 HIS <b id="cnt-his">0</b></button>
@@ -298,24 +394,57 @@
 
     <!-- ================= VIEW: READING WORKLIST ================= -->
     <section class="view" id="view-reading">
-      <div class="view-head">
-        <div>
-          <h2>Reading worklist</h2>
-          <p class="sub">Radiologist task lists built on the archive — studies with images but no report (Unread), drafted reports awaiting finalization (Dictated), and the urgent STAT pile (manual flag · pending critical result · HIGH triage).</p>
+      <header class="view-hero reading-hero">
+        <div class="view-hero-copy">
+          <span class="view-eyebrow"><i aria-hidden="true"></i>Radiology reading room</span>
+          <h2>Reading desk</h2>
+          <p class="sub">A focused queue for studies ready to interpret, urgent findings that need attention, and reports waiting for sign-off.</p>
+          <div class="reading-flow" aria-label="Reading workflow">
+            <span><b>01</b> Review images</span><i aria-hidden="true"></i>
+            <span><b>02</b> Finalize report</span><i aria-hidden="true"></i>
+            <span><b>03</b> Mark read</span>
+          </div>
         </div>
-        <div class="view-head-actions">
-          <button class="btn ghost" id="btn-rwl-assign" title="Filter to studies assigned to me">👤 Mine</button>
+        <div class="reading-hero-art" aria-hidden="true">
+          <div class="reading-scan scan-outer"></div><div class="reading-scan scan-inner"></div>
+          <div class="reading-scan-core"><span></span><i></i><b></b></div>
+          <span class="reading-orbit-dot"></span>
+        </div>
+        <div class="reading-hero-actions">
+          <button class="btn ghost" id="btn-rwl-assign" title="Filter to studies assigned to me" aria-pressed="false">👤 Mine</button>
           <button class="btn" id="btn-rwl-refresh" title="Refresh the reading worklist">⟳ Refresh</button>
         </div>
-      </div>
+      </header>
 
-      <div class="status-chips" id="rwl-chips" aria-label="Filter reading tasks by state">
-        <button class="chip-btn active" data-rstate="UNREAD" title="Studies with images, no report, not read">📖 Unread <b id="rwl-cnt-unread">0</b></button>
-        <button class="chip-btn" data-rstate="STAT" title="Urgent: manual flag · pending critical result · HIGH triage">🚨 Stat <b id="rwl-cnt-stat">0</b></button>
-        <button class="chip-btn" data-rstate="DICTATED" title="Reports drafted, awaiting finalization">🎙️ Dictated <b id="rwl-cnt-dictated">0</b></button>
-        <button class="chip-btn" data-rstate="READ" title="Finalized reports (or explicitly marked read)">✅ Read <b id="rwl-cnt-read">0</b></button>
-      </div>
+      <section class="reading-queues" id="rwl-chips" aria-label="Filter reading tasks by state">
+        <button class="chip-btn active" data-rstate="UNREAD" aria-pressed="true" title="Studies with images, no report, not read">
+          <span class="queue-copy"><span class="queue-label">Unread</span><span class="queue-description">Images ready for review</span></span><b id="rwl-cnt-unread">0</b>
+        </button>
+        <button class="chip-btn queue-stat" data-rstate="STAT" aria-pressed="false" title="Urgent: manual flag · pending critical result · HIGH triage">
+          <span class="queue-copy"><span class="queue-label">STAT</span><span class="queue-description">Urgent clinical follow-up</span></span><b id="rwl-cnt-stat">0</b>
+        </button>
+        <button class="chip-btn" data-rstate="DICTATED" aria-pressed="false" title="Reports drafted, awaiting finalization">
+          <span class="queue-copy"><span class="queue-label">Dictated</span><span class="queue-description">Drafts awaiting sign-off</span></span><b id="rwl-cnt-dictated">0</b>
+        </button>
+        <button class="chip-btn" data-rstate="READ" aria-pressed="false" title="Finalized reports (or explicitly marked read)">
+          <span class="queue-copy"><span class="queue-label">Read</span><span class="queue-description">Finalized or reviewed</span></span><b id="rwl-cnt-read">0</b>
+        </button>
+      </section>
 
+      <div class="reading-list-heading">
+        <div><span class="reading-list-kicker">WORKLIST</span><h3>Studies to review</h3></div>
+        <div class="reading-list-tools">
+          <p>Select a queue above. Open a study, assign a reader, or update its reading state.</p>
+          <label for="rwl-limit">Rows per page
+            <select id="rwl-limit" aria-label="Reading studies per page">
+              <option value="10" selected>10</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+        </div>
+      </div>
       <div class="list-head" id="rwl-list-head">
         <div></div>
         <div>Patient</div>
@@ -326,121 +455,558 @@
         <div style="text-align:right">Actions</div>
       </div>
       <div id="rwl-list" aria-live="polite"><p class="sub" style="padding:18px">Loading…</p></div>
+      <div class="pager reading-pager" id="rwl-pager" hidden>
+        <button class="btn sm" id="rwl-pg-prev" disabled>← Prev</button>
+        <span id="rwl-pg-info" aria-live="polite"></span>
+        <button class="btn sm" id="rwl-pg-next" disabled>Next →</button>
+      </div>
     </section>
 
     <!-- ================= VIEW: WORKFLOW ================= -->
     <section class="view" id="view-workflow">
-      <div class="view-head">
-        <div>
+      <!-- Workflow console: modality worklist (MWL) -> performed exams (MPPS)
+           -> storage commitments, plus statistical analytics and a DICOM
+           data-quality audit. Rendered by /static/workflow-console.js. -->
+      <header class="wfx-head">
+        <div class="wfx-head-copy">
+          <span class="view-eyebrow"><i aria-hidden="true"></i>Clinical pipeline · IHE SWF</span>
           <h2>Workflow</h2>
-          <p class="sub">Scheduled procedure steps served to modalities via C-FIND (MWL, SOP 1.2.840.10008.5.1.4.31). Steps open automatically from HIS orders (HL7 ADT admissions + ORM imaging orders) and close when images arrive.</p>
+          <p class="sub">Orders become exams, exams become verified archive copies. Modalities pull this worklist over DICOM (C-FIND), report progress via MPPS and confirm storage via Storage Commitment — every hand-off is measured below.</p>
         </div>
-      </div>
-
-      <div class="card">
-        <h3>Modality Worklist <span class="mwl-tag">MWL</span></h3>
-        <div class="field-row">
-          <div class="field"><label>MRN</label><input id="wl-mrn" placeholder="MRN123456" /></div>
-          <div class="field"><label>Patient name (new)</label><input id="wl-name" placeholder="Optional if MRN exists" /></div>
-          <div class="field"><label>Modality</label><input id="wl-modality" placeholder="CT / MR / CR…" /></div>
-          <div class="field"><label>Station AE</label><input id="wl-station" placeholder="CT1" /></div>
-          <div class="field"><label>Start date</label><input id="wl-date" type="date" /></div>
-          <div class="field"><label>Accession</label><input id="wl-accession" placeholder="ACC…" /></div>
-          <button class="btn" id="wl-add" style="align-self:flex-end">+ Schedule</button>
+        <div class="wfx-head-visual" aria-hidden="true">
+          <canvas id="workflow-flow" class="view-hero-canvas"></canvas>
+          <span class="view-hero-caption">mwl → mpps → commit</span>
         </div>
-        <div class="field-row" style="margin-top:8px">
-          <div class="field" style="flex:1"><label>Description</label><input id="wl-desc" placeholder="CT CHEST W CONTRAST" /></div>
-          <div class="field"><label>Filter</label>
-            <select id="wl-filter" style="padding:8px">
-              <option value="">All</option>
-              <option value="SCHEDULED">Scheduled</option>
-              <option value="COMPLETED">Completed</option>
-              <option value="CANCELED">Canceled</option>
-            </select>
+        <div class="wfx-head-actions">
+          <div class="wfx-actions-row">
+            <button class="btn primary" id="wfx-new" type="button" title="Schedule a new procedure (N)">
+              <span aria-hidden="true">＋</span> New order
+            </button>
+            <button class="btn ghost" id="wfx-refresh" type="button" title="Refresh everything (R)">⟳ Refresh</button>
+            <div class="wfx-menu" id="wfx-export-menu">
+              <button class="btn ghost" id="wfx-export" type="button" aria-haspopup="menu" aria-expanded="false" title="Export data or a report">⭳ Export ▾</button>
+              <div class="wfx-menu-list" role="menu" hidden>
+                <button type="button" role="menuitem" data-export="csv">CSV — current tab</button>
+                <button type="button" role="menuitem" data-export="json">JSON — full dataset</button>
+                <button type="button" role="menuitem" data-export="stats">CSV — statistics summary</button>
+                <button type="button" role="menuitem" data-export="print">Print analytics report</button>
+              </div>
+            </div>
+          </div>
+          <div class="wfx-actions-row wfx-actions-meta">
+            <label class="wfx-auto" title="Refresh the lists automatically">
+              <span>Auto</span>
+              <select id="wfx-auto">
+                <option value="0">Off</option>
+                <option value="15">15 s</option>
+                <option value="30">30 s</option>
+                <option value="60">60 s</option>
+                <option value="300">5 min</option>
+              </select>
+            </label>
+            <span class="wfx-updated" id="wfx-updated" aria-live="polite">—</span>
           </div>
         </div>
-        <div class="node-list" id="worklist-list"><p class="sub">Loading…</p></div>
+      </header>
+
+      <!-- Pipeline: stage counts with conversion rates and confidence intervals. -->
+      <div class="wfx-pipeline" id="wfx-pipeline" role="group" aria-label="Pipeline conversion"></div>
+
+      <!-- KPI tiles: each one is also a filter shortcut. -->
+      <div class="wfx-kpis" id="wfx-kpis" role="group" aria-label="Workflow at a glance">
+        <button type="button" class="wfx-kpi" data-kpi="today" data-tone="info"><span class="wfx-kpi-l">Scheduled today</span><span class="wfx-kpi-n">—</span><span class="wfx-kpi-s"></span></button>
+        <button type="button" class="wfx-kpi" data-kpi="overdue" data-tone="danger"><span class="wfx-kpi-l">Overdue</span><span class="wfx-kpi-n">—</span><span class="wfx-kpi-s"></span></button>
+        <button type="button" class="wfx-kpi" data-kpi="progress" data-tone="warn"><span class="wfx-kpi-l">In progress</span><span class="wfx-kpi-n">—</span><span class="wfx-kpi-s"></span></button>
+        <button type="button" class="wfx-kpi" data-kpi="donetoday" data-tone="ok"><span class="wfx-kpi-l">Completed today</span><span class="wfx-kpi-n">—</span><span class="wfx-kpi-s"></span></button>
+        <button type="button" class="wfx-kpi" data-kpi="tat" data-tone="info"><span class="wfx-kpi-l">Median exam time</span><span class="wfx-kpi-n">—</span><span class="wfx-kpi-s"></span></button>
+        <button type="button" class="wfx-kpi" data-kpi="ontime" data-tone="ok"><span class="wfx-kpi-l">On-time start</span><span class="wfx-kpi-n">—</span><span class="wfx-kpi-s"></span></button>
+        <button type="button" class="wfx-kpi" data-kpi="pending" data-tone="warn"><span class="wfx-kpi-l">Commit success</span><span class="wfx-kpi-n">—</span><span class="wfx-kpi-s"></span></button>
+        <button type="button" class="wfx-kpi" data-kpi="quality" data-tone="info"><span class="wfx-kpi-l">Data quality</span><span class="wfx-kpi-n">—</span><span class="wfx-kpi-s"></span></button>
       </div>
 
-      <div class="card">
-        <h3>Performed <span class="mwl-tag" style="background:rgba(52,211,153,.14);color:#34d399;border-color:rgba(52,211,153,.35)">MPPS</span></h3>
-        <p class="sub">Exams the modalities report themselves via N-CREATE / N-SET (SOP 1.2.840.10008.3.1.2.3.3) — live exam state, no waiting for images.</p>
-        <div class="node-list" id="mpps-list"><p class="sub">Loading…</p></div>
-      </div>
+      <div class="card wfx-panel">
+        <div class="wfx-tabs" role="tablist" aria-label="Workflow stages">
+          <button type="button" role="tab" class="wfx-tab" data-tab="mwl" aria-selected="true">
+            <span class="wfx-tab-step">01</span><span class="wfx-tab-t">Worklist <small>C-FIND · MWL</small></span><b class="wfx-tab-n" data-tabn="mwl">—</b>
+          </button>
+          <button type="button" role="tab" class="wfx-tab" data-tab="mpps" aria-selected="false">
+            <span class="wfx-tab-step">02</span><span class="wfx-tab-t">Performed <small>N-CREATE · MPPS</small></span><b class="wfx-tab-n" data-tabn="mpps">—</b>
+          </button>
+          <button type="button" role="tab" class="wfx-tab" data-tab="commit" aria-selected="false">
+            <span class="wfx-tab-step">03</span><span class="wfx-tab-t">Commitments <small>N-ACTION · STGCMT</small></span><b class="wfx-tab-n" data-tabn="commit">—</b>
+          </button>
+          <button type="button" role="tab" class="wfx-tab" data-tab="stats" aria-selected="false">
+            <span class="wfx-tab-step">04</span><span class="wfx-tab-t">Analytics <small>SPC · DISTRIBUTIONS</small></span><b class="wfx-tab-n" data-tabn="stats">σ</b>
+          </button>
+          <button type="button" role="tab" class="wfx-tab" data-tab="dq" aria-selected="false">
+            <span class="wfx-tab-step">05</span><span class="wfx-tab-t">Data quality <small>DICOM VR · AUDIT</small></span><b class="wfx-tab-n" data-tabn="dq">—</b>
+          </button>
+          <span class="wfx-keys" title="Keyboard shortcuts"><kbd>N</kbd> new · <kbd>R</kbd> refresh · <kbd>/</kbd> search · <kbd>1</kbd>–<kbd>5</kbd> tabs</span>
+        </div>
 
-      <div class="card">
-        <h3>Commitments <span class="mwl-tag" style="background:rgba(251,191,36,.14);color:#fbbf24;border-color:rgba(251,191,36,.35)">STORAGE</span></h3>
-        <p class="sub">Guarantees modalities asked for via N-ACTION (SOP 1.2.840.10008.1.20.1) — every referenced instance is verified against the storage backend and the verdict arrives as an N-EVENT-REPORT.</p>
-        <div class="field-row" style="margin-top:8px">
-          <div class="field" style="flex:1"></div>
-          <div class="field"><label>Filter</label>
-            <select id="commit-filter" style="padding:8px">
-              <option value="">All</option>
-              <option value="PENDING">Pending</option>
-              <option value="COMPLETED">Committed</option>
-              <option value="FAILED">Failed</option>
-            </select>
+        <!-- ===== Worklist ===== -->
+        <div class="wfx-pane" data-pane="mwl" role="tabpanel">
+          <div class="wfx-toolbar">
+            <label class="wfx-search"><span aria-hidden="true">⌕</span>
+              <input id="wfx-q" type="search" placeholder="Search patient, MRN, accession, procedure  ( / )" autocomplete="off" spellcheck="false" />
+            </label>
+            <div class="wfx-seg" id="wfx-status" role="radiogroup" aria-label="Status">
+              <button type="button" data-v="" aria-pressed="true">All <i data-sc=""></i></button>
+              <button type="button" data-v="SCHEDULED" aria-pressed="false">Scheduled <i data-sc="SCHEDULED"></i></button>
+              <button type="button" data-v="IN PROGRESS" aria-pressed="false">In progress <i data-sc="IN PROGRESS"></i></button>
+              <button type="button" data-v="COMPLETED" aria-pressed="false">Completed <i data-sc="COMPLETED"></i></button>
+              <button type="button" data-v="CANCELED" aria-pressed="false">Canceled <i data-sc="CANCELED"></i></button>
+            </div>
+            <div class="wfx-seg wfx-mode" id="wfx-mode" role="radiogroup" aria-label="Layout">
+              <button type="button" data-v="table" aria-pressed="true" title="Table">☰ Table</button>
+              <button type="button" data-v="board" aria-pressed="false" title="Kanban board by status">▥ Board</button>
+              <button type="button" data-v="timeline" aria-pressed="false" title="Day timeline by station">▤ Timeline</button>
+            </div>
+          </div>
+          <div class="wfx-toolbar wfx-toolbar-2">
+            <label class="wfx-field"><span>Modality</span><select id="wfx-mod"><option value="">All</option></select></label>
+            <label class="wfx-field"><span>Station</span><select id="wfx-station"><option value="">All</option></select></label>
+            <label class="wfx-field"><span>Source</span>
+              <select id="wfx-source"><option value="">All</option><option value="his">HIS (HL7)</option><option value="manual">Manual</option></select>
+            </label>
+            <div class="wfx-chips" id="wfx-range" role="radiogroup" aria-label="Date">
+              <button type="button" data-v="all" aria-pressed="true">All dates</button>
+              <button type="button" data-v="today" aria-pressed="false">Today</button>
+              <button type="button" data-v="tomorrow" aria-pressed="false">Tomorrow</button>
+              <button type="button" data-v="week" aria-pressed="false">Next 7 days</button>
+              <button type="button" data-v="past7" aria-pressed="false">Last 7 days</button>
+              <button type="button" data-v="overdue" aria-pressed="false">Overdue</button>
+              <button type="button" data-v="custom" aria-pressed="false">Custom…</button>
+            </div>
+            <span class="wfx-custom" id="wfx-custom" hidden>
+              <input type="date" id="wfx-from" aria-label="From date" /> – <input type="date" id="wfx-to" aria-label="To date" />
+            </span>
+          </div>
+          <div class="wfx-toolbar wfx-toolbar-3">
+            <label class="wfx-field"><span>Sort</span>
+              <select id="wfx-sort">
+                <option value="date-asc">Date ↑ (soonest)</option>
+                <option value="date-desc">Date ↓ (latest)</option>
+                <option value="patient">Patient A–Z</option>
+                <option value="modality">Modality</option>
+                <option value="station">Station</option>
+                <option value="status">Status</option>
+                <option value="wait">Waiting time ↓</option>
+              </select>
+            </label>
+            <label class="wfx-field"><span>Rows</span>
+              <select id="wfx-pagesize"><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="0">All</option></select>
+            </label>
+            <label class="wfx-check"><input type="checkbox" id="wfx-group" checked /> Group by day</label>
+            <label class="wfx-check"><input type="checkbox" id="wfx-dense" /> Compact</label>
+            <div class="wfx-menu" id="wfx-cols-menu">
+              <button type="button" class="btn ghost sm" aria-haspopup="true" aria-expanded="false">▦ Columns</button>
+              <div class="wfx-menu-list wfx-cols" hidden></div>
+            </div>
+            <div class="wfx-menu" id="wfx-views-menu">
+              <button type="button" class="btn ghost sm" aria-haspopup="true" aria-expanded="false">★ Saved views</button>
+              <div class="wfx-menu-list wfx-views" hidden></div>
+            </div>
+            <button type="button" class="btn ghost sm" id="wfx-clear">Clear filters</button>
+            <span class="wfx-count" id="wfx-count" aria-live="polite"></span>
+          </div>
+
+          <div class="wfx-bulk" id="wfx-bulk" hidden>
+            <span id="wfx-bulk-n">0 selected</span>
+            <button type="button" class="btn sm" data-bulk="IN PROGRESS">▶ Start</button>
+            <button type="button" class="btn sm" data-bulk="COMPLETED">✓ Complete</button>
+            <button type="button" class="btn sm" data-bulk="SCHEDULED">↺ Reopen</button>
+            <button type="button" class="btn sm" data-bulk="SHIFT">⇢ +1 day</button>
+            <button type="button" class="btn sm danger" data-bulk="CANCELED">✕ Cancel</button>
+            <button type="button" class="btn sm danger" data-bulk="DELETE" data-admin-only>🗑 Delete</button>
+            <button type="button" class="btn ghost sm" data-bulk="EXPORT">⭳ Export selected</button>
+            <button type="button" class="btn ghost sm" data-bulk="NONE">Clear selection</button>
+          </div>
+
+          <div class="wfx-table" id="wfx-mwl" role="table" aria-label="Scheduled procedure steps">
+            <p class="sub wfx-empty">Loading worklist…</p>
+          </div>
+          <div class="wfx-pager" id="wfx-pager" hidden></div>
+        </div>
+
+        <!-- ===== Performed (MPPS) ===== -->
+        <div class="wfx-pane" data-pane="mpps" role="tabpanel" hidden>
+          <div class="wfx-toolbar">
+            <label class="wfx-search"><span aria-hidden="true">⌕</span>
+              <input id="wfx-mpps-q" type="search" placeholder="Search patient, MRN, station or description" autocomplete="off" spellcheck="false" />
+            </label>
+            <div class="wfx-seg" id="wfx-mpps-status" role="radiogroup" aria-label="Status">
+              <button type="button" data-v="" aria-pressed="true">All</button>
+              <button type="button" data-v="IN PROGRESS" aria-pressed="false">In progress</button>
+              <button type="button" data-v="COMPLETED" aria-pressed="false">Completed</button>
+              <button type="button" data-v="DISCONTINUED" aria-pressed="false">Discontinued</button>
+            </div>
+            <label class="wfx-field"><span>Link</span>
+              <select id="wfx-mpps-link"><option value="">All</option><option value="linked">Linked to order</option><option value="orphan">Unscheduled</option></select>
+            </label>
+            <label class="wfx-field"><span>Modality</span><select id="wfx-mpps-mod"><option value="">All</option></select></label>
+          </div>
+          <div class="wfx-table" id="wfx-mpps" role="table" aria-label="Performed procedure steps">
+            <p class="sub wfx-empty">Loading performed exams…</p>
           </div>
         </div>
-        <div class="node-list" id="commit-list"><p class="sub">Loading…</p></div>
+
+        <!-- ===== Commitments ===== -->
+        <div class="wfx-pane" data-pane="commit" role="tabpanel" hidden>
+          <div class="wfx-toolbar">
+            <label class="wfx-search"><span aria-hidden="true">⌕</span>
+              <input id="wfx-commit-q" type="search" placeholder="Search AE title or transaction UID" autocomplete="off" spellcheck="false" />
+            </label>
+            <div class="wfx-seg" id="wfx-commit-status" role="radiogroup" aria-label="Status">
+              <button type="button" data-v="" aria-pressed="true">All</button>
+              <button type="button" data-v="PENDING" aria-pressed="false">Pending</button>
+              <button type="button" data-v="COMPLETED" aria-pressed="false">Committed</button>
+              <button type="button" data-v="FAILED" aria-pressed="false">Failed</button>
+            </div>
+            <label class="wfx-field"><span>AE</span><select id="wfx-commit-ae"><option value="">All</option></select></label>
+          </div>
+          <div class="wfx-commit-summary" id="wfx-commit-summary"></div>
+          <div class="wfx-table" id="wfx-commit" role="table" aria-label="Storage commitment requests">
+            <p class="sub wfx-empty">Loading commitments…</p>
+          </div>
+        </div>
+
+        <!-- ===== Analytics ===== -->
+        <div class="wfx-pane" data-pane="stats" role="tabpanel" hidden>
+          <div class="wfx-toolbar wfx-stats-controls" id="wfx-stats-controls">
+            <label class="wfx-field"><span>Window</span>
+              <select id="wfx-s-window"><option value="7">7 days</option><option value="14">14 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="0">All data</option></select>
+            </label>
+            <label class="wfx-field"><span>Metric</span>
+              <select id="wfx-s-metric">
+                <option value="duration">Exam duration (MPPS end − start)</option>
+                <option value="delay">Start delay (performed − scheduled)</option>
+                <option value="lead">Booking lead (scheduled − ordered)</option>
+                <option value="commit">Commit latency (report − request)</option>
+              </select>
+            </label>
+            <label class="wfx-field"><span>Group</span>
+              <select id="wfx-s-group"><option value="modality">Modality</option><option value="station">Station</option></select>
+            </label>
+            <label class="wfx-field"><span>Bins</span>
+              <select id="wfx-s-bins"><option value="fd">Freedman–Diaconis</option><option value="sturges">Sturges</option><option value="scott">Scott</option><option value="10">10</option><option value="20">20</option><option value="40">40</option></select>
+            </label>
+            <label class="wfx-field"><span>Confidence</span>
+              <select id="wfx-s-conf"><option value="0.90">90 %</option><option value="0.95">95 %</option><option value="0.99">99 %</option></select>
+            </label>
+            <label class="wfx-field"><span>Control limits</span>
+              <select id="wfx-s-sigma"><option value="2">± 2σ</option><option value="2.5">± 2.5σ</option><option value="3">± 3σ</option></select>
+            </label>
+            <label class="wfx-field"><span>On-time ±</span>
+              <select id="wfx-s-tol"><option value="5">5 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">60 min</option></select>
+            </label>
+            <label class="wfx-check"><input type="checkbox" id="wfx-s-kde" checked /> KDE overlay</label>
+            <label class="wfx-check"><input type="checkbox" id="wfx-s-outliers" /> Exclude Tukey outliers</label>
+            <label class="wfx-check"><input type="checkbox" id="wfx-s-log" /> Log scale</label>
+          </div>
+          <div class="wfx-stats-grid" id="wfx-stats">
+            <p class="sub wfx-empty">Loading analytics…</p>
+          </div>
+        </div>
+
+        <!-- ===== Data quality ===== -->
+        <div class="wfx-pane" data-pane="dq" role="tabpanel" hidden>
+          <div class="wfx-toolbar">
+            <div class="wfx-seg" id="wfx-dq-sev" role="radiogroup" aria-label="Severity">
+              <button type="button" data-v="" aria-pressed="true">All</button>
+              <button type="button" data-v="error" aria-pressed="false">Errors</button>
+              <button type="button" data-v="warn" aria-pressed="false">Warnings</button>
+              <button type="button" data-v="info" aria-pressed="false">Info</button>
+            </div>
+            <label class="wfx-field"><span>Stale after</span>
+              <select id="wfx-dq-stale"><option value="2">2 h</option><option value="4">4 h</option><option value="8">8 h</option><option value="24">24 h</option></select>
+            </label>
+            <label class="wfx-field"><span>Commit timeout</span>
+              <select id="wfx-dq-ctimeout"><option value="5">5 min</option><option value="15">15 min</option><option value="60">60 min</option></select>
+            </label>
+            <label class="wfx-field"><span>Scope</span>
+              <select id="wfx-dq-scope"><option value="">All records</option><option value="mwl">Worklist</option><option value="mpps">MPPS</option><option value="commit">Commitments</option></select>
+            </label>
+          </div>
+          <div class="wfx-dq" id="wfx-dq"><p class="sub wfx-empty">Auditing…</p></div>
+        </div>
       </div>
+
+      <details class="wf-guide" id="wf-guide">
+        <summary>
+          <span class="wf-guide-icon" aria-hidden="true">i</span>
+          <span class="wf-guide-copy"><b>How does this workflow work — and how is it measured?</b><small>Follow an imaging order from the modality worklist through acquisition to archive verification, and see the statistics used.</small></span>
+          <span class="wf-guide-hint">Show <i aria-hidden="true">＋</i></span>
+        </summary>
+        <div class="wf-guide-steps">
+          <article><span>01 · SCHEDULE</span><b>Create or receive an order</b><p>Use <b>New order</b> or let the HIS send one (HL7 ORM/ADT). Modalities retrieve scheduled steps with DICOM Modality Worklist (C-FIND), filtered by their station AE title and modality.</p></article>
+          <article><span>02 · ACQUIRE</span><b>Watch the exam progress</b><p>Modalities report started and completed exams through MPPS. Start or complete a step by hand when a modality cannot; image arrival also closes a scheduled step.</p></article>
+          <article><span>03 · VERIFY</span><b>Confirm archive commitment</b><p>A modality asks whether its images are safely stored. PAXS verifies every referenced instance and answers with an N-EVENT-REPORT. Failed requests show the missing instances.</p></article>
+          <article><span>04 · MEASURE</span><b>Statistics used</b><p>Proportions carry Wilson score intervals; means carry Student-t intervals. Daily volume is tracked on an individuals (I-MR) control chart with Western Electric rules; trend is an OLS fit with a prediction band. Histograms use Freedman–Diaconis bins and a Gaussian KDE (Silverman bandwidth); outliers are Tukey fences (1.5 × IQR). Queue health uses Little's law, L = λW.</p></article>
+          <article><span>05 · AUDIT</span><b>DICOM data quality</b><p>Each record is checked against DICOM value-representation limits (SH ≤ 16, AE ≤ 16, LO ≤ 64, PN components), Defined Terms for Modality (0008,0060), duplicate accessions, stale steps, unscheduled acquisitions and unanswered commitments.</p></article>
+        </div>
+      </details>
+
+      <!-- Drawer: new order / order details -->
+      <div class="wfx-scrim" id="wfx-scrim" hidden></div>
+      <aside class="wfx-drawer" id="wfx-drawer" aria-hidden="true" aria-labelledby="wfx-drawer-title" role="dialog">
+        <header class="wfx-drawer-head">
+          <div>
+            <span class="view-eyebrow" id="wfx-drawer-eyebrow"><i aria-hidden="true"></i>Modality worklist</span>
+            <h3 id="wfx-drawer-title">New order</h3>
+          </div>
+          <button type="button" class="icon-btn" id="wfx-drawer-close" title="Close (Esc)" aria-label="Close">✕</button>
+        </header>
+        <div class="wfx-drawer-body" id="wfx-drawer-body"></div>
+      </aside>
+
+      <datalist id="wfx-dl-modality">
+        <option value="CT"></option><option value="MR"></option><option value="CR"></option><option value="DX"></option>
+        <option value="US"></option><option value="MG"></option><option value="NM"></option><option value="PT"></option>
+        <option value="XA"></option><option value="RF"></option><option value="IO"></option><option value="PX"></option>
+        <option value="OT"></option>
+      </datalist>
+      <datalist id="wfx-dl-station"></datalist>
+      <datalist id="wfx-dl-desc"></datalist>
+      <datalist id="wfx-dl-phys"></datalist>
     </section>
 
     <!-- ================= VIEW: NODES ================= -->
     <section class="view" id="view-nodes">
-      <div class="view-head">
-        <div>
+      <header class="view-hero">
+        <div class="view-hero-copy">
+          <span class="view-eyebrow"><i aria-hidden="true"></i>Peer network</span>
           <h2>DICOM nodes</h2>
-          <p class="sub">Registered AE destinations — used to resolve C-MOVE requests and forwarding targets. Admin only.</p>
+          <p class="sub">Registered AE destinations — used to resolve C-MOVE requests and forwarding targets. Peers with a DICOMweb URL can also be queried and retrieved over HTTPS, with no DIMSE association at all.</p>
+          <div class="view-hero-chips" id="nd-chips">
+            <span class="view-chip" data-chip="nodes"><b>—</b> nodes</span>
+            <span class="view-chip" data-chip="web"><b>—</b> DICOMweb</span>
+            <span class="view-chip" data-chip="disabled"><b>—</b> disabled</span>
+          </div>
+        </div>
+        <div class="view-hero-visual" aria-hidden="true">
+          <canvas id="nodes-graph" class="view-hero-canvas"></canvas>
+          <span class="view-hero-caption">peer topology</span>
+        </div>
+      </header>
+
+      <div class="card node-roster">
+        <div class="wf-card-head">
+          <div class="wf-card-title">
+            <span class="wf-card-mark" aria-hidden="true"><svg class="rail-ic node-icon node-icon-accent" aria-hidden="true"><use href="#ic-server"/></svg></span>
+            <div>
+              <h3>Registered nodes <span class="node-count-badge" id="node-count">—</span></h3>
+              <p class="sub" id="node-dcmtk-status" role="status" hidden></p>
+            </div>
+          </div>
+          <label class="field wf-inline-field">
+            <span>Sort by</span>
+            <select id="node-sort">
+              <option value="title">AE title (A–Z)</option>
+              <option value="title-desc">AE title (Z–A)</option>
+              <option value="status">Enabled first</option>
+              <option value="transport">DICOMweb first</option>
+            </select>
+          </label>
+        </div>
+        <div class="node-list" id="node-list"><p class="sub">Loading…</p></div>
+      </div>
+
+      <div class="card node-register">
+        <div class="wf-card-head">
+          <div class="wf-card-title">
+            <span class="wf-card-mark" aria-hidden="true"><svg class="rail-ic node-icon node-icon-ok" aria-hidden="true"><use href="#ic-node-add"/></svg></span>
+            <div>
+              <h3>Register a node</h3>
+              <p class="sub">An AE title and a reachable host:port are enough for C-ECHO, C-FIND, C-GET and C-MOVE. The DICOMweb fields are optional.</p>
+            </div>
+          </div>
+        </div>
+        <div class="form-section">
+          <span class="form-section-label">DIMSE endpoint</span>
+          <div class="field-row">
+            <div class="field"><label for="node-ae">AE title</label><input id="node-ae" placeholder="ARCHIVE_A" /></div>
+            <div class="field"><label for="node-host">Host</label><input id="node-host" placeholder="10.0.0.5" /></div>
+            <div class="field" style="max-width:110px"><label for="node-port">Port</label><input id="node-port" type="number" value="104" min="1" max="65535" /></div>
+            <div class="field"><label for="node-desc">Description</label><input id="node-desc" placeholder="Remote archive" /></div>
+            <button class="btn" id="node-add" style="align-self:flex-end"><svg class="rail-ic node-icon node-icon-ok" aria-hidden="true"><use href="#ic-node-add"/></svg> Register node</button>
+          </div>
+        </div>
+        <details class="form-section">
+          <summary class="form-section-label"><svg class="rail-ic node-icon node-icon-accent" aria-hidden="true"><use href="#ic-link"/></svg> DICOMweb transport <em>optional</em></summary>
+          <div class="field-row">
+            <div class="field" style="flex:1.6"><label for="node-web">DICOMweb URL</label><input id="node-web" placeholder="https://peer.example/dicom-web — enables Web Query / Retrieve" /></div>
+            <div class="field"><label for="node-web-user">Web user</label><input id="node-web-user" placeholder="optional" /></div>
+            <div class="field"><label for="node-web-pass">Web password</label><input id="node-web-pass" type="password" placeholder="optional" /></div>
+          </div>
+          <p class="sub form-note">Query the peer with QIDO-RS and retrieve studies with WADO-RS over HTTPS — no DIMSE association needed. The server refuses loopback/private/link-local targets unless <code>DICOMWEB_CLIENT_ALLOW_PRIVATE=1</code>.</p>
+        </details>
+      </div>
+
+      <div class="card transfer-board" id="transfer-board">
+        <div class="transfer-board-head">
+          <div class="transfer-board-title">
+            <span class="transfer-board-mark" aria-hidden="true"><svg class="rail-ic node-icon node-icon-accent" aria-hidden="true"><use href="#ic-route"/></svg></span>
+            <div>
+              <h3>Transfer jobs <span class="node-count-badge" id="tx-total-badge">—</span></h3>
+              <p class="sub">Queued study sends and retrieves. Monitor throughput, inspect failures, retry or queue batch transfers directly.</p>
+            </div>
+          </div>
+          <div class="transfer-board-actions">
+            <button type="button" class="btn sm primary" id="tx-new" title="Queue a new send or retrieve job"><span aria-hidden="true">＋</span> New transfer</button>
+            <button type="button" class="transfer-live" id="tx-live" aria-pressed="true" title="Click to pause or resume automatic polling"><i aria-hidden="true"></i><span>live</span></button>
+            <label class="tx-poll" title="Auto-refresh interval">
+              <select id="tx-poll" aria-label="Transfer poll interval">
+                <option value="3">3 s</option>
+                <option value="5" selected>5 s</option>
+                <option value="15">15 s</option>
+                <option value="30">30 s</option>
+                <option value="0">Off</option>
+              </select>
+            </label>
+            <div class="tx-menu" id="tx-export-menu">
+              <button class="btn sm ghost" id="tx-export" type="button" aria-haspopup="menu" aria-expanded="false" title="Export transfer jobs">⭳ Export ▾</button>
+              <div class="tx-menu-list" role="menu" hidden>
+                <button type="button" role="menuitem" data-tx-export="csv">CSV — filtered jobs</button>
+                <button type="button" role="menuitem" data-tx-export="json">JSON — queue &amp; metrics</button>
+              </div>
+            </div>
+            <button class="btn sm ghost" id="transfer-refresh" type="button"><svg class="rail-ic node-icon node-icon-accent" aria-hidden="true"><use href="#ic-dbp-refresh"/></svg> Refresh</button>
+            <button class="btn sm ghost" id="transfer-clear-history" type="button" title="Remove up to 100 finished job records. Queued and running jobs and stored images are kept."><svg class="rail-ic node-icon node-icon-warn" aria-hidden="true"><use href="#ic-node-remove"/></svg> Clear finished</button>
+          </div>
+        </div>
+
+        <div class="tx-meta-bar">
+          <span class="tx-updated" id="tx-updated" aria-live="polite">—</span>
+          <div class="tx-node-strip" id="tx-node-strip" hidden></div>
+        </div>
+
+        <div class="transfer-stats tx-stats" id="transfer-stats" hidden></div>
+
+        <div class="tx-toolbar" id="tx-toolbar">
+          <label class="tx-search"><span aria-hidden="true">⌕</span>
+            <input id="tx-q" type="search" placeholder="Search job #id, peer AE, Study UID, error…" autocomplete="off" spellcheck="false" />
+          </label>
+          <div class="tx-seg" id="tx-status" role="radiogroup" aria-label="Status">
+            <button type="button" data-v="" aria-pressed="true">All <i data-txc=""></i></button>
+            <button type="button" data-v="PENDING" aria-pressed="false">Queued <i data-txc="PENDING"></i></button>
+            <button type="button" data-v="RUNNING" aria-pressed="false">Running <i data-txc="RUNNING"></i></button>
+            <button type="button" data-v="COMPLETED" aria-pressed="false">Done <i data-txc="COMPLETED"></i></button>
+            <button type="button" data-v="ISSUE" aria-pressed="false">Issues <i data-txc="ISSUE"></i></button>
+            <button type="button" data-v="CANCELLED" aria-pressed="false">Cancelled <i data-txc="CANCELLED"></i></button>
+          </div>
+          <label class="tx-field"><span>Dir</span>
+            <select id="tx-dir"><option value="">All</option><option value="SEND">↑ Send</option><option value="RETRIEVE">↓ Retrieve</option></select>
+          </label>
+          <label class="tx-field"><span>Transport</span>
+            <select id="tx-transport"><option value="">All</option><option value="DIMSE">DIMSE</option><option value="DICOMWEB">DICOMweb</option></select>
+          </label>
+          <label class="tx-field"><span>Node</span>
+            <select id="tx-node"><option value="">All peers</option></select>
+          </label>
+          <label class="tx-field"><span>Sort</span>
+            <select id="tx-sort">
+              <option value="newest">Newest ↓</option>
+              <option value="oldest">Oldest ↑</option>
+              <option value="status">Priority (active first)</option>
+              <option value="images">Images ↓</option>
+              <option value="duration">Duration ↓</option>
+            </select>
+          </label>
+          <label class="tx-field"><span>Fetch</span>
+            <select id="tx-limit"><option value="30">30</option><option value="50" selected>50</option><option value="100">100</option></select>
+          </label>
+          <div class="tx-seg tx-layout" id="tx-layout" role="radiogroup" aria-label="Layout">
+            <button type="button" data-v="cards" aria-pressed="true" title="Cards view">◫ Cards</button>
+            <button type="button" data-v="table" aria-pressed="false" title="Compact table view">☰ Table</button>
+          </div>
+          <button type="button" class="btn sm ghost" id="tx-clear-filters" hidden>Clear filters</button>
+        </div>
+
+        <div class="tx-bulk" id="tx-bulk" hidden>
+          <span id="tx-bulk-n">0 selected</span>
+          <button type="button" class="btn sm" data-tx-bulk="RETRY">↻ Retry failed/cancelled</button>
+          <button type="button" class="btn sm danger" data-tx-bulk="CANCEL">✕ Cancel queued</button>
+          <button type="button" class="btn sm ghost" data-tx-bulk="EXPORT">⭳ Export selected</button>
+          <button type="button" class="btn sm ghost" data-tx-bulk="NONE">Clear selection</button>
+        </div>
+
+        <div class="node-list transfer-list" id="transfer-list" aria-live="polite"><p class="sub">Loading transfer jobs…</p></div>
+        <div class="tx-footer" id="tx-footer" hidden>
+          <span id="tx-footer-count"></span>
+          <button type="button" class="btn sm ghost" id="tx-load-more" hidden>Load older jobs…</button>
         </div>
       </div>
 
-      <div class="card">
-        <h3>Register a node</h3>
-        <div class="field-row">
-          <div class="field"><label>AE title</label><input id="node-ae" placeholder="ARCHIVE_A" /></div>
-          <div class="field"><label>Host</label><input id="node-host" placeholder="10.0.0.5" /></div>
-          <div class="field" style="max-width:110px"><label>Port</label><input id="node-port" type="number" value="104" min="1" max="65535" /></div>
-          <div class="field"><label>Description</label><input id="node-desc" placeholder="Remote archive" /></div>
-          <button class="btn" id="node-add" style="align-self:flex-end">+ Add</button>
-        </div>
-        <div class="field-row">
-          <div class="field" style="flex:1.6"><label>DICOMweb URL (optional)</label><input id="node-web" placeholder="https://peer.example/dicom-web — enables Web Query / Retrieve" /></div>
-          <div class="field"><label>Web user</label><input id="node-web-user" placeholder="optional" /></div>
-          <div class="field"><label>Web password</label><input id="node-web-pass" type="password" placeholder="optional" /></div>
-        </div>
-        <p class="sub" style="margin-top:8px">DICOMweb transport: query the peer with QIDO-RS and retrieve studies with WADO-RS over HTTPS — no DIMSE association needed. The server refuses loopback/private/link-local targets unless <code>DICOMWEB_CLIENT_ALLOW_PRIVATE=1</code>.</p>
-        <div class="node-list" id="node-list"><p class="sub">Loading…</p></div>
-      </div>
+      <div class="tx-scrim" id="tx-scrim" hidden></div>
+      <aside class="tx-drawer" id="tx-drawer" aria-hidden="true" aria-labelledby="tx-drawer-title" role="dialog">
+        <header class="tx-drawer-head">
+          <div>
+            <span class="view-eyebrow" id="tx-drawer-eyebrow"><i aria-hidden="true"></i>Transfer jobs</span>
+            <h3 id="tx-drawer-title">Transfer job</h3>
+          </div>
+          <button type="button" class="icon-btn" id="tx-drawer-close" title="Close (Esc)" aria-label="Close">✕</button>
+        </header>
+        <div class="tx-drawer-body" id="tx-drawer-body"></div>
+      </aside>
     </section>
 
     <!-- ================= VIEW: ADMIN ================= -->
     <section class="view" id="view-admin">
-      <div class="view-head">
-        <div>
-          <h2>Admin console</h2>
-          <p class="sub">Every completed PAXS module, live from the running server.</p>
-        </div>
-      </div>
 
-      <div class="tabs" id="admin-tabs">
-        <button data-tab="sys" class="active">Overview</button>
-        <button data-tab="services">DICOM Services</button>
-        <button data-tab="router">Smart Router</button>
-        <button data-tab="critical">Critical Results</button>
-        <button data-tab="storage">Storage</button>
-        <button data-tab="migration">Migration</button>
-        <button data-tab="audit">Audit</button>
-        <button data-tab="auth-audit" title="Authentication audit trail — logins, lockouts, token refresh / theft, role changes">Auth Audit</button>
-        <button data-tab="scripts">Scripts</button>
-        <button data-tab="replication">Replication</button>
-        <button data-tab="protocols">Protocols</button>
-        <button data-tab="tenants">Tenants</button>
-        <button data-tab="users">Users</button>
-        <button data-tab="sessions" title="Active login sessions — who is signed in, from where, and per-session sign-out">Sessions</button>
-        <button data-tab="dbperf" title="Read-replica / connection-pool dashboard — pool stats, slow-query log, EXPLAIN analyzer">DB Pool</button>
-        <button data-tab="license" title="Hardware-bound server license, edition, validity, and feature activation">License 🛡️</button>
-      </div>
+      <header class="admin-hero">
+        <div class="admin-hero-copy">
+          <span class="admin-eyebrow"><i aria-hidden="true"></i>Control room</span>
+          <h2>Admin console</h2>
+          <p class="sub">Every completed PAXS module, live from the running server — DICOM services, routing, storage, access and audit in one place.</p>
+          <div class="admin-hero-chips">
+            <span class="admin-chip" id="admin-chip-dimse"><b>DIMSE</b> —</span>
+            <span class="admin-chip" id="admin-chip-modules"><b>—</b> modules</span>
+            <span class="admin-chip is-live" id="admin-chip-live"><i aria-hidden="true"></i>checking</span>
+          </div>
+        </div>
+        <div class="admin-hero-visual" aria-hidden="true">
+          <canvas id="admin-lattice" class="admin-lattice"></canvas>
+          <span class="admin-hero-caption">archive topology</span>
+        </div>
+      </header>
+
+      <div class="side-shell">
+        <nav class="side-rail" id="admin-tabs" aria-label="Admin console sections">
+          <div class="side-rail-group">
+            <span class="side-rail-label">Overview</span>
+            <button data-tab="sys" class="active"><svg class="rail-ic" aria-hidden="true"><use href="#ic-gauge"/></svg>Overview</button>
+            <button data-tab="license" title="Hardware-bound server license, edition, validity, and feature activation"><svg class="rail-ic" aria-hidden="true"><use href="#ic-shield"/></svg>License</button>
+          </div>
+          <div class="side-rail-group">
+            <span class="side-rail-label">DICOM</span>
+            <button data-tab="services" title="Live DICOM service matrix — every SCP/SCU the server advertises (Core DICOM 1–5)"><svg class="rail-ic" aria-hidden="true"><use href="#ic-server"/></svg>Services</button>
+            <button data-tab="protocols" title="Clinical Protocols Library — standardized names ↔ local RIS codes (#31)"><svg class="rail-ic" aria-hidden="true"><use href="#ic-tag"/></svg>Protocols</button>
+          </div>
+          <div class="side-rail-group">
+            <span class="side-rail-label">Data</span>
+            <button data-tab="storage" title="Storage backends &amp; lossy compression (B1/B4)"><svg class="rail-ic" aria-hidden="true"><use href="#ic-database"/></svg>Storage</button>
+            <button data-tab="migration" title="Migration tools"><svg class="rail-ic" aria-hidden="true"><use href="#ic-import"/></svg>Migration</button>
+            <button data-tab="replication" title="Disaster Recovery replication to off-site S3/Blob (49)"><svg class="rail-ic" aria-hidden="true"><use href="#ic-layers"/></svg>Replication</button>
+          </div>
+          <div class="side-rail-group">
+            <span class="side-rail-label">Access</span>
+            <button data-tab="users"><svg class="rail-ic" aria-hidden="true"><use href="#ic-users"/></svg>Users</button>
+            <button data-tab="tenants"><svg class="rail-ic" aria-hidden="true"><use href="#ic-building"/></svg>Tenants</button>
+            <button data-tab="sessions" title="Active login sessions — who is signed in, from where, and per-session sign-out"><svg class="rail-ic" aria-hidden="true"><use href="#ic-key"/></svg>Sessions</button>
+            <button data-tab="auth-audit" title="Authentication audit trail — logins, lockouts, token refresh / theft, role changes"><svg class="rail-ic" aria-hidden="true"><use href="#ic-fingerprint"/></svg>Auth audit</button>
+          </div>
+          <div class="side-rail-group">
+            <span class="side-rail-label">Operations</span>
+            <button data-tab="router" title="Auto-routing rules engine (C1)"><svg class="rail-ic" aria-hidden="true"><use href="#ic-route"/></svg>Smart router</button>
+            <button data-tab="critical" title="Critical results tracking"><svg class="rail-ic" aria-hidden="true"><use href="#ic-alert"/></svg>Critical results</button>
+            <button data-tab="audit" title="Tamper-evident audit trail (SHA-256)"><svg class="rail-ic" aria-hidden="true"><use href="#ic-list"/></svg>Audit</button>
+            <button data-tab="scripts" title="Lua / Python scripting — custom server scripts (43)"><svg class="rail-ic" aria-hidden="true"><use href="#ic-code"/></svg>Scripts</button>
+            <button data-tab="dbperf" title="Read-replica / connection-pool dashboard — pool stats, slow-query log, EXPLAIN analyzer"><svg class="rail-ic" aria-hidden="true"><use href="#ic-gauge"/></svg>DB pool</button>
+          </div>
+        </nav>
+
+        <div class="admin-stage">
 
       <div class="admin-panel" id="panel-sys">
         <div class="sys-grid" id="sys-grid"><p class="sub">Loading…</p></div>
@@ -452,7 +1018,7 @@
         <p class="sub" style="margin:0 0 8px">Unique 32-character hardware fingerprint bound to this server's CPU, motherboard, and NIC. Use this when requesting a license:</p>
         <div class="field-row" style="align-items:flex-end">
           <div class="field" style="flex:1"><label>Hardware Fingerprint</label><input id="lic-fp-input" readonly placeholder="Fetching hardware fingerprint…" style="font-family:var(--mono);color:var(--accent);font-weight:700;letter-spacing:1px;" /></div>
-          <button class="btn" id="lic-btn-copy-fp" onclick="copyLicenseFingerprint()">📋 Copy Fingerprint</button>
+          <button class="btn" id="lic-btn-copy-fp">📋 Copy Fingerprint</button>
         </div>
         <h4 style="margin-top:20px">Activate or Update License (.lic)</h4>
         <div class="field-row" style="align-items:flex-end">
@@ -460,15 +1026,132 @@
           <button class="btn" id="lic-btn-upload-file">Upload &amp; Activate</button>
           <button class="btn ghost" id="lic-btn-reload">⟳ Reload from disk</button>
         </div>
+        <h4 style="margin-top:18px">Online Activation</h4>
+        <div class="field-row" style="align-items:flex-end">
+          <div class="field" style="flex:1"><label>Product activation key</label><input id="lic-activation-key" autocomplete="off" placeholder="PAXS-…" /></div>
+          <div class="field" style="flex:1"><label>Customer email (optional)</label><input id="lic-activation-email" type="email" autocomplete="off" placeholder="admin@hospital.org" /></div>
+          <div class="field" style="flex:1"><label>Portal URL (optional)</label><input id="lic-portal-url" autocomplete="off" placeholder="http://127.0.0.1:8080" /></div>
+          <button class="btn" id="lic-btn-activate-online">Activate Online</button>
+        </div>
+        <p class="sub" style="margin:8px 0 0">Uses the configured PAXS licensing portal. The key is sent only to the server.</p>
         <h4 style="margin-top:18px">Licensed Clinical &amp; System Modules</h4>
         <div class="node-list" id="license-features-list"><p class="sub">Loading…</p></div>
       </div>
 
       <div class="admin-panel" id="panel-services" hidden>
-        <p class="sub" style="margin:0 0 12px">Live DIMSE capability matrix — the SOP classes the receiver advertises and the SCU helpers PAXS ships (Core DICOM milestones 1–5: C-STORE, C-FIND, C-GET, C-MOVE, C-ECHO, MWL, MPPS, Storage Commitment).</p>
-        <div class="svc-grid" id="services-grid"><p class="sub">Loading…</p></div>
-        <h4 style="margin-top:16px">Web &amp; integration layers</h4>
-        <div class="svc-grid" id="services-web"><p class="sub">Loading…</p></div>
+        <p class="sub" style="margin:0 0 12px">Live DIMSE capability matrix, receiver controls, native DCMTK engine diagnostics, and Web &amp; integration layer settings.</p>
+
+        <!-- 1. DICOM Services Matrix + Live Receiver Controls -->
+        <div class="svc-card" style="margin-bottom:14px;padding:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+            <div id="svc-dicom-live-pill" style="font-size:13px">Loading DICOM SCP status…</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button type="button" class="btn sm" id="svc-dicom-start">Start SCP</button>
+              <button type="button" class="btn sm ghost" id="svc-dicom-stop">Stop SCP</button>
+              <button type="button" class="btn sm" id="svc-dicom-restart">Restart SCP</button>
+            </div>
+          </div>
+          <div class="svc-grid" id="services-grid"><p class="sub">Loading…</p></div>
+          <details style="margin-top:12px">
+            <summary style="cursor:pointer;font-weight:600;font-size:13px">DICOM Receiver Settings (AE Title, Port, Associations, TLS, Allowlist)</summary>
+            <div class="field-row" style="margin-top:10px;flex-wrap:wrap">
+              <div class="field" style="max-width:160px"><label>AE Title</label><input id="svc-dicom-aet" placeholder="PAXS_SCP" /></div>
+              <div class="field" style="max-width:110px"><label>DIMSE Port</label><input id="svc-dicom-port" type="number" min="1" max="65535" /></div>
+              <div class="field" style="max-width:130px"><label>Max Associations</label><input id="svc-dicom-max-assoc" type="number" min="1" max="256" /></div>
+              <div class="field" style="max-width:180px"><label>MWL Default Station AE</label><input id="svc-mwl-aet" placeholder="Optional" /></div>
+              <div class="field" style="flex:1;min-width:200px"><label>Allowed Calling AEs (comma-separated)</label><input id="svc-dicom-allowed-aes" placeholder="Empty = allow all" /></div>
+            </div>
+            <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:8px">
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-dicom-enabled" /> Start receiver on boot</label>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-dicom-tls" /> Enable DICOM TLS (AES)</label>
+              <div style="margin-left:auto;display:flex;gap:8px">
+                <button type="button" class="btn sm ghost" id="svc-dicom-save">Save Settings</button>
+                <button type="button" class="btn sm" id="svc-dicom-save-restart">Save &amp; Restart SCP</button>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- 2. Native DCMTK Engine: Status, Config & Live Tools -->
+        <h4 style="margin:16px 0 8px">Native DCMTK Engine &amp; Diagnostic Tools</h4>
+        <div class="svc-card" style="margin-bottom:14px;padding:14px">
+          <div id="svc-dcmtk-banner" style="font-size:13px;margin-bottom:10px">Checking OFFIS DCMTK status…</div>
+          <div class="svc-grid" id="svc-dcmtk-tools" style="margin-bottom:12px"></div>
+
+          <div class="field-row" style="flex-wrap:wrap">
+            <div class="field" style="flex:1.6;min-width:220px"><label>DCMTK_BIN_DIR (absolute path to OFFIS bin)</label><input id="svc-dcmtk-dir" placeholder="C:\dcmtk\bin" /></div>
+            <div class="field" style="max-width:130px"><label>C-MOVE Port</label><input id="svc-dcmtk-move-port" type="number" min="0" max="65535" /></div>
+            <div class="field" style="max-width:140px"><label>C-MOVE AE Title</label><input id="svc-dcmtk-move-aet" placeholder="PAXS_MOVE" /></div>
+            <div class="field" style="flex:1.4;min-width:200px"><label>storescp.cfg Profile (optional)</label><input id="svc-dcmtk-move-profile" placeholder="Auto-detected beside DCMTK_BIN_DIR" /></div>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin:8px 0 12px;flex-wrap:wrap">
+            <button type="button" class="btn sm ghost" id="svc-dcmtk-detect">Auto-Detect DCMTK</button>
+            <button type="button" class="btn sm" id="svc-dcmtk-save">Save DCMTK Settings</button>
+          </div>
+
+          <div style="border-top:1px solid var(--hairline);padding-top:10px">
+            <div style="font-weight:600;font-size:12px;margin-bottom:6px">Live DIMSE / DCMTK Connectivity Tools (C-ECHO &amp; C-FIND)</div>
+            <div class="field-row" style="flex-wrap:wrap;align-items:flex-end">
+              <div class="field" style="max-width:150px"><label>Target Host</label><input id="svc-echo-host" placeholder="127.0.0.1" /></div>
+              <div class="field" style="max-width:95px"><label>Port</label><input id="svc-echo-port" type="number" min="1" max="65535" /></div>
+              <div class="field" style="max-width:130px"><label>Called AE</label><input id="svc-echo-aet" placeholder="PAXS_SCP" /></div>
+              <div class="field" style="max-width:130px"><label>Echo Engine</label>
+                <select id="svc-echo-engine">
+                  <option value="auto">Auto (DCMTK→pynetdicom)</option>
+                  <option value="dcmtk">DCMTK (echoscu)</option>
+                  <option value="pynetdicom">pynetdicom</option>
+                </select>
+              </div>
+              <div class="field" style="max-width:120px"><label>Find PatientID</label><input id="svc-find-pid" placeholder="Optional" /></div>
+              <div class="field" style="max-width:90px"><label>Modality</label><input id="svc-find-mod" placeholder="CT" /></div>
+              <button type="button" class="btn sm" id="svc-echo-run">Run C-ECHO</button>
+              <button type="button" class="btn sm ghost" id="svc-find-run">Run C-FIND</button>
+            </div>
+            <pre id="svc-dcmtk-output" hidden style="margin:10px 0 0;padding:10px;border-radius:8px;background:rgba(0,0,0,.28);border:1px solid var(--hairline);font-size:12px;white-space:pre-wrap;max-height:180px;overflow:auto"></pre>
+          </div>
+        </div>
+
+        <!-- 3. Web & Integration Layers: Matrix, HL7 Controls & Settings -->
+        <h4 style="margin:16px 0 8px">Web &amp; Integration Layers</h4>
+        <div class="svc-card" style="padding:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+            <div id="svc-hl7-live-pill" style="font-size:13px">Loading HL7 / Web layer status…</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button type="button" class="btn sm" id="svc-hl7-start">Start HL7</button>
+              <button type="button" class="btn sm ghost" id="svc-hl7-stop">Stop HL7</button>
+              <button type="button" class="btn sm" id="svc-hl7-restart">Restart HL7</button>
+              <button type="button" class="btn sm ghost" id="svc-emr-test">Test EMR TCP</button>
+            </div>
+          </div>
+          <div class="svc-grid" id="services-web"><p class="sub">Loading…</p></div>
+          <details style="margin-top:12px">
+            <summary style="cursor:pointer;font-weight:600;font-size:13px">Web &amp; Integration Settings (DICOMweb, HL7 MLLP/EMR, FHIR, Fusion, Accelerator, Webhooks)</summary>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px">
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-web-pub-read" /> DICOMweb Public Read</label>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-web-pub-write" /> DICOMweb Public Write</label>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-web-allow-priv" /> Web Client Allow Private IPs</label>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-web-fhir" /> FHIR R4 (/fhir)</label>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-web-fusion" /> Image Fusion</label>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-web-accel" /> Transfer Accelerator</label>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-web-hl7-on" /> HL7 MLLP Enabled</label>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-web-hl7-tls" /> HL7 TLS</label>
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="svc-web-emr-on" /> HL7 ORU → EMR</label>
+            </div>
+            <div class="field-row" style="margin-top:10px;flex-wrap:wrap">
+              <div class="field" style="max-width:140px"><label>HL7 Bind Host</label><input id="svc-web-hl7-host" /></div>
+              <div class="field" style="max-width:100px"><label>HL7 Port</label><input id="svc-web-hl7-port" type="number" /></div>
+              <div class="field" style="flex:1;min-width:180px"><label>HL7 Allowed Source IPs/CIDRs</label><input id="svc-web-hl7-ips" placeholder="Empty = loopback only" /></div>
+              <div class="field" style="max-width:140px"><label>EMR Host</label><input id="svc-web-emr-host" /></div>
+              <div class="field" style="max-width:95px"><label>EMR Port</label><input id="svc-web-emr-port" type="number" /></div>
+              <div class="field" style="max-width:110px"><label>EMR App</label><input id="svc-web-emr-app" /></div>
+              <div class="field" style="max-width:110px"><label>EMR Facility</label><input id="svc-web-emr-fac" /></div>
+            </div>
+            <div class="field-row" style="margin-top:8px;align-items:flex-end">
+              <div class="field" style="flex:1"><label>Webhook URLs (comma-separated)</label><input id="svc-web-webhooks" placeholder="https://ris.hospital.org/hooks/paxs" /></div>
+              <button type="button" class="btn sm" id="svc-web-save">Save Web &amp; Integration Settings</button>
+            </div>
+          </details>
+        </div>
       </div>
 
       <div class="admin-panel" id="panel-router" hidden>
@@ -601,6 +1284,7 @@
               <option value="RADIOLOGIST">RADIOLOGIST</option>
               <option value="PHYSICIAN" selected>PHYSICIAN</option>
               <option value="TECHNOLOGIST">TECHNOLOGIST</option>
+              <option value="REPORT_WRITER">Report Writer</option>
             </select>
           </div>
           <button class="btn" id="us-add" style="align-self:flex-end">+ Add user</button>
@@ -651,71 +1335,95 @@
       </div>
 
       <div class="admin-panel" id="panel-dbperf" hidden>
-        <p class="sub" style="margin:0 0 12px">Read-replica / connection-pool dashboard — live pool metrics, MySQL counters, the slow-query log and an EXPLAIN analyzer for the hottest archive queries.</p>
-
-        <div class="sys-grid" id="dbperf-pool" style="grid-template-columns:repeat(auto-fill,minmax(210px,1fr))"><p class="sub">Loading…</p></div>
+        <div id="dbperf-pool"><p class="sub">Loading…</p></div>
 
         <div class="card" style="margin-top:16px">
-          <h3>Read replica <span class="mwl-tag" style="background:rgba(34,211,238,.14);color:#22d3ee;border-color:rgba(34,211,238,.35)">RO</span></h3>
-          <p class="sub">Route the two hottest read endpoints (<code>/stats</code>, <code>/studies</code>) through a MySQL read replica — set <code>DB_READ_REPLICA_URL</code> in <code>.env</code> and restart. The toggle persists; reads fall back to the primary automatically if the replica is unreachable.</p>
-          <div class="sys-grid" id="dbperf-replica" style="grid-template-columns:repeat(auto-fill,minmax(210px,1fr))"><p class="sub">No replica configured — set <code>DB_READ_REPLICA_URL</code> in <code>.env</code> and restart.</p></div>
+          <h4><svg class="rail-ic" aria-hidden="true"><use href="#ic-route"/></svg>Read replica</h4>
+          <p class="sub">Route <code>/stats</code> and <code>/studies</code> to a PostgreSQL read replica. Reads fall back to the primary if the replica is unreachable.</p>
+          <div id="dbperf-replica"><p class="sub">Loading…</p></div>
         </div>
 
         <div class="card" style="margin-top:16px">
-          <div class="field-row" style="align-items:center">
-            <div>
-              <h3 style="margin:0">Slow-query log <span class="mwl-tag" style="background:rgba(251,191,36,.14);color:#fbbf24;border-color:rgba(251,191,36,.35)">≥ MS</span></h3>
-              <p class="sub" style="margin:4px 0 0">Statements at or above the threshold land in an in-memory ring (last 200). Reset the log by toggling it off/on.</p>
-            </div>
-            <div style="flex:1"></div>
-            <label class="field" style="max-width:150px">Threshold (ms)<input id="sq-threshold" type="number" value="500" min="1" step="50" /></label>
-            <label class="sw" title="Capture slow queries"><input type="checkbox" id="sq-enabled" /><i></i></label>
-            <button class="btn ghost" id="sq-refresh" title="Refresh the slow-query log">⟳</button>
+          <h4><svg class="rail-ic" aria-hidden="true"><use href="#ic-dbp-clock"/></svg>Slow-query log</h4>
+          <p class="sub">Captures the last 200 statements at or above the threshold. Turn capture off and on to clear the log.</p>
+          <div class="field-row" style="align-items:flex-end">
+            <div class="field" style="max-width:150px"><label for="sq-threshold">Threshold (ms)</label><input id="sq-threshold" type="number" value="500" min="1" step="50" /></div>
+            <label class="check"><input type="checkbox" id="sq-enabled" /> Capture slow queries</label>
+            <button class="btn ghost" id="sq-refresh" type="button"><svg class="rail-ic" aria-hidden="true"><use href="#ic-dbp-refresh"/></svg> Refresh log</button>
           </div>
           <div class="node-list" id="slow-query-list" style="margin-top:10px"><p class="sub">Slow-query log is off.</p></div>
         </div>
 
         <div class="card" style="margin-top:16px">
-          <h3>EXPLAIN analyzer <span class="mwl-tag" style="background:rgba(52,211,153,.14);color:#34d399;border-color:rgba(52,211,153,.35)">PLAN</span></h3>
-          <p class="sub">Run the query planner on the hottest archive paths (MySQL <code>EXPLAIN</code> / SQLite <code>EXPLAIN QUERY PLAN</code>) to spot missing indexes and full scans.</p>
+          <h4><svg class="rail-ic" aria-hidden="true"><use href="#ic-code"/></svg>EXPLAIN analyzer</h4>
+          <p class="sub">Run the query planner on the hottest archive paths (PostgreSQL <code>EXPLAIN</code>, run in a read-only transaction) to spot missing indexes and full scans.</p>
           <div class="field-row">
-            <div class="field" style="flex:1.4"><label>Hot query</label>
+            <div class="field" style="flex:1.4"><label for="xp-name">Hot query</label>
               <select id="xp-name"><option value="">— pick a hot query —</option></select>
             </div>
-            <button class="btn" id="xp-run" style="align-self:flex-end">Run EXPLAIN →</button>
+            <button class="btn" id="xp-run" style="align-self:flex-end">Run EXPLAIN</button>
           </div>
           <details style="margin-top:8px">
             <summary class="sub" style="cursor:pointer">Custom read-only SQL (advanced)</summary>
-            <input id="xp-sql" class="mono" style="width:100%;margin-top:6px" placeholder="SELECT studies.* FROM studies LIMIT 10" spellcheck="false" />
+            <input id="xp-sql" class="mono" aria-label="Custom read-only SQL" style="width:100%;margin-top:6px" placeholder="SELECT studies.* FROM studies LIMIT 10" spellcheck="false" />
           </details>
           <div id="xp-result" style="margin-top:12px"></div>
         </div>
       </div>
+        </div><!-- /.admin-stage -->
+      </div><!-- /.side-shell -->
     </section>
 
     <!-- ================= VIEW: SETTINGS ================= -->
     <section class="view" id="view-settings">
-      <div class="view-head">
-        <div>
+      <header class="view-hero">
+        <div class="view-hero-copy">
+          <span class="view-eyebrow"><i aria-hidden="true"></i>Server configuration</span>
           <h2>Settings</h2>
-          <p class="sub">Server configuration, DICOM receiver, modality registry, storage backend and security posture — live from the running server.</p>
+          <p class="sub">DICOM receiver, interop, storage, security and clinical behaviour — read live from the running server and persisted to <code>server_settings</code>.</p>
+          <div class="view-hero-chips" id="set-chips">
+            <span class="view-chip" data-chip="keys"><b>—</b> settings</span>
+            <span class="view-chip" data-chip="restart"><b>—</b> need restart</span>
+            <span class="view-chip" data-chip="edited"><b>—</b> edited</span>
+            <span class="view-chip" data-chip="access"><b>—</b> access</span>
+          </div>
         </div>
-      </div>
+        <div class="view-hero-visual" aria-hidden="true">
+          <canvas id="settings-lattice" class="view-hero-canvas"></canvas>
+          <span class="view-hero-caption">config layers</span>
+        </div>
+      </header>
 
-      <div class="tabs" id="settings-tabs">
-        <button data-stab="sys" class="active">System</button>
-        <button data-stab="dicom">DICOM</button>
-        <button data-stab="modality">Modality</button>
-        <button data-stab="interop">Interop</button>
-        <button data-stab="storage">Storage</button>
-        <button data-stab="compression">Compression</button>
-        <button data-stab="optical">CD/DVD Burning</button>
-        <button data-stab="security">Security</button>
-        <button data-stab="workflow">Workflow</button>
-        <button data-stab="viewer">Viewer</button>
-        <button data-stab="db">Database</button>
-        <button data-stab="redis">Redis</button>
-      </div>
+      <div class="side-shell">
+        <nav class="side-rail" id="settings-tabs" aria-label="Settings sections">
+          <div class="side-rail-group">
+            <span class="side-rail-label">Core</span>
+            <button data-stab="sys" class="active"><svg class="rail-ic" aria-hidden="true"><use href="#ic-gauge"/></svg>System</button>
+            <button data-stab="dicom"><svg class="rail-ic" aria-hidden="true"><use href="#ic-server"/></svg>DICOM</button>
+            <button data-stab="dimse-queue"><svg class="rail-ic" aria-hidden="true"><use href="#ic-inbox"/></svg>DIMSE Queue</button>
+            <button data-stab="interop"><svg class="rail-ic" aria-hidden="true"><use href="#ic-link"/></svg>Interop</button>
+          </div>
+          <div class="side-rail-group">
+            <span class="side-rail-label">Data</span>
+            <button data-stab="storage"><svg class="rail-ic" aria-hidden="true"><use href="#ic-layers"/></svg>Storage</button>
+            <button data-stab="compression"><svg class="rail-ic" aria-hidden="true"><use href="#ic-layers"/></svg>Compression</button>
+            <button data-stab="optical"><svg class="rail-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2"/></svg>CD/DVD Burning</button>
+            <button data-stab="db"><svg class="rail-ic" aria-hidden="true"><use href="#ic-database"/></svg>Database</button>
+            <button data-stab="redis"><svg class="rail-ic" aria-hidden="true"><use href="#ic-bolt"/></svg>Redis</button>
+          </div>
+          <div class="side-rail-group">
+            <span class="side-rail-label">Clinical</span>
+            <button data-stab="modality"><svg class="rail-ic" aria-hidden="true"><use href="#ic-tag"/></svg>Modality</button>
+            <button data-stab="workflow"><svg class="rail-ic" aria-hidden="true"><use href="#ic-checklist"/></svg>Workflow</button>
+            <button data-stab="viewer"><svg class="rail-ic" aria-hidden="true"><use href="#ic-monitor"/></svg>Viewer</button>
+          </div>
+          <div class="side-rail-group">
+            <span class="side-rail-label">Access</span>
+            <button data-stab="security"><svg class="rail-ic" aria-hidden="true"><use href="#ic-shield"/></svg>Security</button>
+          </div>
+        </nav>
+
+        <div class="settings-stage">
 
       <div class="settings-panel" id="spanel-sys">
         <div class="cfg-form" id="set-sys"><p class="sub">Loading…</p></div>
@@ -814,6 +1522,15 @@
       </div>
 
       <div class="settings-panel" id="spanel-optical" hidden>
+        <section class="cfg-dicomweb" aria-labelledby="client-media-title">
+          <div class="dw-head">
+            <div>
+              <b id="client-media-title">CD/DVD or USB on a workstation</b>
+              <span class="cfg-desc">Open the disc icon beside a study. Download an ISO for the workstation's disc burner or extract the USB package onto a flash drive.</span>
+            </div>
+            <a href="/studies-ui" class="btn sm ghost">Open study list</a>
+          </div>
+        </section>
         <div class="cfg-form" id="set-optical"><p class="sub">Loading…</p></div>
         <section class="cfg-dicomweb" aria-labelledby="disc-diagnostics-title">
           <div class="dw-head">
@@ -848,9 +1565,61 @@
         <div class="cfg-form" id="set-dicom"><p class="sub">Loading…</p></div>
       </div>
 
+      <div class="settings-panel" id="spanel-dimse-queue" hidden>
+        <div class="card dimse-queue-card">
+          <div class="dimse-queue-head">
+            <div>
+              <h3>Incoming DIMSE studies <span class="mwl-tag">LIVE</span></h3>
+              <p class="sub">Studies currently being received by the archive. Updates every 1.5 seconds while this tab is visible.</p>
+            </div>
+            <span class="dimse-queue-stamp" id="dimse-queue-stamp" aria-live="polite">Waiting…</span>
+          </div>
+          <div class="dimse-queue-table-wrap">
+            <table class="dimse-queue-table">
+              <thead>
+                <tr>
+                  <th>Patient</th><th>Study UID</th><th>Modality</th><th>Calling AE</th>
+                  <th>Instances</th><th>Received</th><th>Status</th><th>Updated</th>
+                </tr>
+              </thead>
+              <tbody id="dimse-queue-body">
+                <tr><td colspan="8" class="dimse-queue-message">Open this tab to load the queue.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <div class="settings-panel" id="spanel-modality" hidden>
-        <p class="sub" style="margin:0 0 12px">Modalities currently present in the archive — sourced from live study data. This is the registry used by the modality filter, worklist and routing rules.</p>
-        <div class="settings-grid" id="set-modality"><p class="sub">Loading…</p></div>
+        <div class="mod-head">
+          <div class="mod-head-copy">
+            <h3 class="mod-title">Modality registry</h3>
+            <p class="sub">
+              Every modality code discovered in live study data. This is the same registry the
+              study filter, the modality worklist and the auto-routing rules read from — a code
+              that is missing here cannot be filtered, scheduled or routed.
+            </p>
+          </div>
+          <div class="mod-head-actions">
+            <span class="mod-stamp" id="mod-stamp">—</span>
+            <button type="button" class="btn sm" id="mod-refresh" title="Re-read the registry from live study data">↻ Refresh</button>
+          </div>
+        </div>
+
+        <div class="mod-kpis" id="mod-kpis" aria-live="polite"></div>
+
+        <div class="mod-toolbar">
+          <label class="mod-search">
+            <span class="mod-search-ico" aria-hidden="true">⌕</span>
+            <input id="mod-filter" type="search" placeholder="Filter by code or name — CT, MR, ultrasound…" autocomplete="off" spellcheck="false" />
+          </label>
+          <div class="mod-sort" role="group" aria-label="Sort modalities">
+            <button type="button" data-msort="count" class="active" aria-pressed="true">Most series</button>
+            <button type="button" data-msort="name" aria-pressed="false">A–Z</button>
+          </div>
+        </div>
+
+        <div class="mod-body" id="set-modality"><p class="sub mod-loading">Reading the registry…</p></div>
       </div>
 
       <div class="settings-panel" id="spanel-interop" hidden>
@@ -871,10 +1640,13 @@
 
       <div class="settings-panel" id="spanel-viewer" hidden>
         <p class="sub" style="margin:0 0 12px">
-          Controls where DICOM decoding, MPR and 3D rendering run — <b>Server</b> (thin client),
-          <b>Client</b> (diagnostic workstation GPU) or <b>Hybrid</b> (auto-detected per session).
-          Per-role overrides win over the global mode. Changes apply immediately and persist in the
-          <code>server_settings</code> table.
+          Controls processing for PAXS Viewer <b>MPR/3D</b> — <b>Server</b> (thin client),
+          <b>Client</b> (workstation GPU) or <b>Hybrid</b> (auto-detected per viewer scope).
+          These settings do not route requests between archive servers or change ordinary 2D image
+          navigation. Per-role overrides win over the global mode. Saved values apply to the next
+          volume negotiation; an open MPR view is not pushed a live mode change. Session load is
+          process-local and based on recent user/series activity. Values persist in
+          <code>server_settings</code>.
         </p>
         <div class="cfg-form" id="set-viewer"><p class="sub">Loading…</p></div>
       </div>
@@ -884,23 +1656,21 @@
 
         <div class="card">
           <h3>Database engine <span class="mwl-tag" style="background:rgba(129,140,248,.14);color:#818cf8;border-color:rgba(129,140,248,.35)">CONFIG</span></h3>
-          <p class="sub">Choose the backend and connection details. Saving rewrites <code>DATABASE_URL</code> in the <code>.env</code> file and takes effect after the server restarts — the receiver, worker and API read it at boot.</p>
+          <p class="sub">PostgreSQL connection details. Saving rewrites <code>DATABASE_URL</code> in the <code>.env</code> file and takes effect after the server restarts — the receiver, worker and API read it at boot.</p>
           <div class="field-row">
             <div class="field" style="max-width:150px"><label>Engine</label>
               <select id="db-backend">
-                <option value="mysql">MySQL 8.0</option>
-                <option value="mysql">MySQL (default)</option>
-                <option value="sqlite">SQLite (local only)</option>
+                <option value="postgresql">PostgreSQL</option>
               </select>
             </div>
             <div class="field"><label>Host</label><input id="db-host" placeholder="127.0.0.1" spellcheck="false" /></div>
-            <div class="field" style="max-width:100px"><label>Port</label><input id="db-port" type="number" value="3306" min="1" max="65535" /></div>
+            <div class="field" style="max-width:100px"><label>Port</label><input id="db-port" type="number" value="5432" min="1" max="65535" /></div>
             <div class="field"><label>Username</label><input id="db-user" placeholder="paxs_user" spellcheck="false" /></div>
             <div class="field"><label>Password</label><input id="db-pass" type="password" placeholder="••••••••" autocomplete="new-password" /></div>
             <div class="field"><label>Database</label><input id="db-name" placeholder="paxs_db" spellcheck="false" /></div>
           </div>
           <div class="field-row" style="margin-top:10px">
-            <button class="btn ghost" id="db-test" title="Probe the MySQL server — no state is written">Test connection</button>
+            <button class="btn ghost" id="db-test" title="Probe the PostgreSQL server — no state is written">Test connection</button>
             <button class="btn" id="db-save" title="Persist to server_settings + .env (restart required)">Save configuration</button>
             <span class="sub" id="db-config-note" style="align-self:center"></span>
           </div>
@@ -908,7 +1678,7 @@
 
         <div class="card">
           <h3>Initialize database <span class="mwl-tag" style="background:rgba(52,211,153,.14);color:#34d399;border-color:rgba(52,211,153,.35)">NEW INSTALL</span></h3>
-          <p class="sub">Create the schema for a new installation (or bring an existing database up to date) by running every Alembic migration to head. For MySQL the database itself is created automatically if it does not exist.</p>
+          <p class="sub">Create the schema for a new installation (or bring an existing database up to date) by running every Alembic migration to head. The PostgreSQL database itself is created automatically if it does not exist (the role needs CREATEDB, or create it beforehand).</p>
           <div class="field-row">
             <label class="check" title="If the target database has no users yet, create an ADMIN account you can log in with right away">
               <input type="checkbox" id="db-seed" checked /> Seed an admin account if none exists
@@ -921,7 +1691,7 @@
 
         <div class="card">
           <h3>Backup <span class="mwl-tag" style="background:rgba(251,191,36,.14);color:#fbbf24;border-color:rgba(251,191,36,.35)">DUMP</span></h3>
-          <p class="sub">Snapshot the database to a downloadable dump file — SQLite uses the SQLite hot-backup engine, MySQL uses <code>mysqldump</code> (or a built-in SQL export). Files are kept in <code>./backups</code>.</p>
+          <p class="sub">Snapshot the database to a downloadable dump file — <code>pg_dump</code> custom format (restore with <code>pg_restore</code>), or a built-in SQL export when <code>pg_dump</code> is not on the PATH. Files are kept in <code>./backups</code>.</p>
           <div class="field-row">
             <button class="btn" id="db-backup">Create backup</button>
             <span class="sub" id="db-backup-note" style="align-self:center"></span>
@@ -1047,6 +1817,8 @@
         <button class="btn ghost" id="cfg-discard">Discard</button>
         <button class="btn primary" id="cfg-save">✓ Apply changes</button>
       </div>
+        </div><!-- /.settings-stage -->
+      </div><!-- /.side-shell -->
     </section>
   </div>
 
@@ -1065,9 +1837,9 @@
         <span class="foot-heart" aria-hidden="true">♥</span>
         <span>© 2026 <b class="foot-name">Mohamed O. Elsamani</b></span>
         <span class="foot-sep" aria-hidden="true"></span>
-        <a class="foot-link" href="https://elsamanii.rf.gd" target="_blank" rel="noopener">
+        <a class="foot-link" href="https://elsamani.gt.tc" target="_blank" rel="noopener">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>
-          elsamanii.rf.gd
+          elsamani.gt.tc
         </a>
         <span class="foot-sep" aria-hidden="true"></span>
         <button class="foot-link terms-link" id="btn-terms" type="button" title="Terms &amp; Conditions and Privacy Policy">
@@ -1165,6 +1937,8 @@
       <p class="sub" id="report-meta">Loading…</p>
       <div class="report-body" id="report-body"></div>
       <div class="modal-actions">
+        <a class="btn ghost" id="report-print-link" href="#" target="_blank" rel="noopener" hidden>🖨 Print</a>
+        <button class="btn primary" id="report-pdf-btn" type="button" hidden>⬇ Export PDF</button>
         <button class="btn ghost" id="report-close">Close</button>
       </div>
     </div>
@@ -1172,65 +1946,40 @@
 
   <!-- find modal (C-FIND SCU) -->
   <div class="modal-backdrop" id="find-modal" hidden>
-    <div class="modal wide">
-      <h3>Query node <span class="mwl-tag">C-FIND</span></h3>
-      <p class="sub" id="find-meta">Querying…</p>
-      <div class="field-row">
-        <div class="field" style="max-width:150px"><label>Level</label>
-          <select id="find-level" style="padding:8px">
-            <option value="STUDY">STUDY</option>
-            <option value="PATIENT">PATIENT</option>
-            <option value="SERIES">SERIES</option>
-            <option value="INSTANCE">INSTANCE</option>
-          </select>
+    <div class="modal transfer-search" role="dialog" aria-modal="true" aria-labelledby="find-modal-title">
+      <div class="transfer-search-head">
+        <div class="transfer-search-mark" aria-hidden="true">⌕</div>
+        <div class="cell-main">
+          <h3 id="find-modal-title">Find and retrieve studies</h3>
+          <p class="sub" id="find-meta">Choose any search criteria. Patient fields are optional.</p>
         </div>
-        <div class="field" style="flex:1"><label>Patient ID</label><input id="find-pid" placeholder="MRN* (empty = return field)" /></div>
-        <div class="field" style="flex:1"><label>Patient name</label><input id="find-name" placeholder="SMITH*" /></div>
-        <div class="field" style="flex:1"><label>Study date</label><input id="find-date" placeholder="20250101-20250131" /></div>
+        <span class="mwl-tag" id="find-transport-tag">C-FIND</span>
       </div>
-      <div class="field-row">
-        <div class="field" style="flex:1"><label>Accession</label><input id="find-acc" placeholder="ACC*" /></div>
-        <div class="field" style="flex:1"><label>Modality</label><input id="find-mod" placeholder="CT" /></div>
-        <div class="field" style="flex:1.4"><label>Study UID</label><input id="find-study" placeholder="1.2.840.…" /></div>
-        <button class="btn" id="find-run" style="align-self:flex-end">Run query ▶</button>
+      <div class="transfer-primary-filters">
+        <div class="field"><label for="find-pid">Patient ID <span>optional</span></label><input id="find-pid" placeholder="One patient, or use * for a pattern" autocomplete="off" /></div>
+        <div class="field"><label for="find-date-from">Study date range <span>optional</span></label><div class="transfer-date-range"><input id="find-date-from" type="date" aria-label="Study date from" /><span>to</span><input id="find-date-to" type="date" aria-label="Study date to" /></div></div>
       </div>
-      <div class="node-list" id="find-results"><p class="sub">Run a query — matches appear here.</p></div>
-      <div class="modal-actions">
-        <button class="btn ghost" id="find-close">Close</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- pull modal (C-GET SCU) -->
-  <div class="modal-backdrop" id="pull-modal" hidden>
-    <div class="modal wide">
-      <h3>Pull from node <span class="mwl-tag" style="background:rgba(129,140,248,.14);color:#818cf8;border-color:rgba(129,140,248,.35)">C-GET</span></h3>
-      <p class="sub" id="pull-meta">Pulling…</p>
-      <div class="field-row">
-        <div class="field" style="max-width:150px"><label>Level</label>
-          <select id="pull-level" style="padding:8px">
-            <option value="STUDY">STUDY</option>
-            <option value="PATIENT">PATIENT</option>
-            <option value="SERIES">SERIES</option>
-            <option value="INSTANCE">INSTANCE</option>
-          </select>
+      <details class="transfer-advanced-filters">
+        <summary>More filters</summary>
+        <div class="transfer-filter-grid">
+          <div class="field"><label for="find-name">Patient name <span>optional</span></label><input id="find-name" placeholder="e.g. Ahmed*" autocomplete="off" /></div>
+          <div class="field"><label for="find-mod">Modality <span>optional</span></label><select id="find-mod"><option value="">Any modality</option><option>CT</option><option>MR</option><option>US</option><option>CR</option><option>DX</option><option>MG</option><option>NM</option><option>PT</option><option>XA</option></select></div>
+          <div class="field"><label for="find-acc">Accession number <span>optional</span></label><input id="find-acc" placeholder="e.g. ACC123*" autocomplete="off" /></div>
+          <div class="field"><label for="find-study">Study Instance UID <span>optional</span></label><input id="find-study" placeholder="1.2.840.…" autocomplete="off" /></div>
         </div>
-        <div class="field" style="flex:1"><label>Patient ID</label><input id="pull-pid" placeholder="e.g. MRN12345" /></div>
-        <div class="field" style="flex:1.4"><label>Study UID</label><input id="pull-study" placeholder="1.2.840.…" /></div>
-        <div class="field" style="flex:1"><label>Series UID</label><input id="pull-series" placeholder="optional" /></div>
-        <div class="field" style="flex:1"><label>SOP UID</label><input id="pull-sop" placeholder="optional" /></div>
-        <button class="btn" id="pull-run" style="align-self:flex-end">Pull down ▼</button>
+      </details>
+      <div class="transfer-search-actions">
+        <p class="sub" id="find-results-summary">Enter at least one search criterion to protect the remote archive from an unfiltered query.</p>
+        <div class="actions"><button class="btn" id="find-run" type="button">Search studies <span aria-hidden="true">→</span></button><button class="btn transfer-retrieve-button" id="find-queue-selected" type="button" disabled>↓ Retrieve selected</button></div>
       </div>
-      <div class="field-row" style="margin-top:4px">
-        <label class="check" id="pull-archive-wrap" hidden title="Tier the pulled study straight to the cold .archive/ tier after ingest — lifecycle auto-tiering for WADO-RS pulls">
-          <input type="checkbox" id="pull-archive" />
-          <span>Tier to cold storage (auto-archive)</span>
-        </label>
-        <div style="flex:1"></div>
+      <div class="transfer-results-head">
+        <div><b>Remote studies</b><span class="sub" id="find-selection-count">0 selected</span></div>
+        <div class="actions"><button class="btn sm ghost" id="find-select-visible" type="button" disabled>Select up to 30</button><button class="btn sm ghost" id="find-clear-selection" type="button" disabled>Clear selection</button></div>
       </div>
-      <div class="node-list" id="pull-results"><p class="sub">Set a Study UID (or Series/SOP), then pull — instances are stored and indexed like a C-STORE.</p></div>
-      <div class="modal-actions">
-        <button class="btn ghost" id="pull-close">Close</button>
+      <div class="transfer-results" id="find-results" aria-live="polite"><div class="transfer-empty"><b>Search a remote archive</b><span>Try a patient ID, patient name, or date range. You can select several studies after the results load.</span></div></div>
+      <div class="transfer-search-footer">
+        <span class="sub" id="find-footer-selection">Retrieved images will be saved to configured storage and indexed in the archive database. Track job status in Transfer jobs.</span>
+        <div class="actions"><button class="btn ghost" id="find-close" type="button">Close</button></div>
       </div>
     </div>
   </div>
@@ -1295,6 +2044,7 @@
         <p class="sub" id="auth-subtitle">Sign in to manage the archive</p>
         <div class="tabs auth-tabs">
           <button id="tab-login" class="active">Sign in</button>
+          <button id="tab-ldap">LDAP / AD</button>
           <button id="tab-register">Create account</button>
         </div>
         <div class="field">
@@ -1337,6 +2087,64 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=43"></script>
+  <!-- Icon sprite: one <symbol> per rail glyph, referenced by <use> from both
+       the admin and settings rails. Lives outside the views so a hidden view
+       never takes the symbols with it. -->
+      <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+        <defs>
+          <linearGradient id="paxs-s-aqua" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#2dd4bf"/></linearGradient>
+          <linearGradient id="paxs-f-aqua" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee" stop-opacity=".34"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".07"/></linearGradient>
+          <linearGradient id="paxs-s-sky" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#38bdf8"/><stop offset="1" stop-color="#22d3ee"/></linearGradient>
+          <linearGradient id="paxs-f-sky" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#38bdf8" stop-opacity=".34"/><stop offset="1" stop-color="#22d3ee" stop-opacity=".07"/></linearGradient>
+          <linearGradient id="paxs-s-teal" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#2dd4bf"/><stop offset="1" stop-color="#22d3ee"/></linearGradient>
+          <linearGradient id="paxs-f-teal" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#2dd4bf" stop-opacity=".34"/><stop offset="1" stop-color="#22d3ee" stop-opacity=".07"/></linearGradient>
+          <linearGradient id="paxs-s-emerald" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#34d399"/><stop offset="1" stop-color="#22d3ee"/></linearGradient>
+          <linearGradient id="paxs-f-emerald" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#34d399" stop-opacity=".34"/><stop offset="1" stop-color="#22d3ee" stop-opacity=".07"/></linearGradient>
+          <linearGradient id="paxs-s-amber" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#fbbf24"/><stop offset="1" stop-color="#fb923c"/></linearGradient>
+          <linearGradient id="paxs-f-amber" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#fbbf24" stop-opacity=".34"/><stop offset="1" stop-color="#fb923c" stop-opacity=".07"/></linearGradient>
+          <linearGradient id="paxs-s-rose" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#fb7185"/><stop offset="1" stop-color="#f472b6"/></linearGradient>
+          <linearGradient id="paxs-f-rose" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#fb7185" stop-opacity=".34"/><stop offset="1" stop-color="#f472b6" stop-opacity=".07"/></linearGradient>
+          <linearGradient id="paxs-s-violet" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#a78bfa"/><stop offset="1" stop-color="#f472b6"/></linearGradient>
+          <linearGradient id="paxs-f-violet" x1="12" y1="3" x2="12" y2="21" gradientUnits="userSpaceOnUse"><stop stop-color="#a78bfa" stop-opacity=".34"/><stop offset="1" stop-color="#f472b6" stop-opacity=".07"/></linearGradient>
+          <symbol id="ic-dbp-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" stroke="url(#paxs-s-sky)" fill="url(#paxs-f-sky)"/><path d="M12 7.5V12l3 2" stroke="url(#paxs-s-sky)"/></symbol>
+          <symbol id="ic-dbp-refresh" viewBox="0 0 24 24"><path d="M20 5v5h-5M4 19v-5h5M19.7 10a8 8 0 0 0-13.5-4M4.3 14a8 8 0 0 0 13.5 4" stroke="url(#paxs-s-sky)"/></symbol>
+          <symbol id="ic-node-add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="url(#paxs-s-emerald)"/></symbol>
+          <symbol id="ic-node-ping" viewBox="0 0 24 24"><path d="M3 12h4l3-6 4 12 3-6h4" stroke="url(#paxs-s-emerald)"/></symbol>
+          <symbol id="ic-node-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5" stroke="url(#paxs-s-sky)" fill="url(#paxs-f-sky)"/><path d="m15 15 5 5" stroke="url(#paxs-s-sky)"/></symbol>
+          <symbol id="ic-node-download" viewBox="0 0 24 24"><path d="M12 4v11m-4-4 4 4 4-4M5 17v3h14v-3" stroke="url(#paxs-s-aqua)"/></symbol>
+          <symbol id="ic-node-upload" viewBox="0 0 24 24"><path d="M12 16V5m-4 4 4-4 4 4M5 17v3h14v-3" stroke="url(#paxs-s-emerald)"/></symbol>
+          <symbol id="ic-node-remove" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 10v7m4-7v7" stroke="url(#paxs-s-rose)"/></symbol>
+          <symbol id="ic-gauge" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" stroke="url(#paxs-s-aqua)" fill="url(#paxs-f-aqua)"/><path d="M12 12l3.6-3.2" stroke="url(#paxs-s-aqua)"/><path d="M12 3.5v2M20.5 12h-2M12 20.5v-2M3.5 12h2" stroke="url(#paxs-s-aqua)"/></symbol>
+          <symbol id="ic-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5.6c0 4-3 7.4-7 9.4-4-2-7-5.4-7-9.4V6z" stroke="url(#paxs-s-violet)" fill="url(#paxs-f-violet)"/><path d="M9.2 12l2 2 3.6-4" stroke="url(#paxs-s-violet)"/></symbol>
+          <symbol id="ic-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2" stroke="url(#paxs-s-sky)" fill="url(#paxs-f-sky)"/><rect x="3" y="13" width="18" height="7" rx="2" stroke="url(#paxs-s-sky)" fill="url(#paxs-f-sky)"/><path d="M7 7.5h.01M7 16.5h.01" stroke="url(#paxs-s-sky)"/></symbol>
+          <symbol id="ic-route" viewBox="0 0 24 24"><circle cx="6" cy="18" r="2.6" stroke="url(#paxs-s-teal)" fill="url(#paxs-f-teal)"/><circle cx="18" cy="6" r="2.6" stroke="url(#paxs-s-teal)" fill="url(#paxs-f-teal)"/><path d="M8.6 18H14a4 4 0 0 0 0-8H9.4" stroke="url(#paxs-s-teal)"/></symbol>
+          <symbol id="ic-alert" viewBox="0 0 24 24"><path d="M12 4l8.5 15H3.5z" stroke="url(#paxs-s-rose)" fill="url(#paxs-f-rose)"/><path d="M12 10v3.5M12 16.6h.01" stroke="url(#paxs-s-rose)"/></symbol>
+          <symbol id="ic-database" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.5" ry="2.8" stroke="url(#paxs-s-amber)" fill="url(#paxs-f-amber)"/><path d="M4.5 6v12c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8V6" stroke="url(#paxs-s-amber)"/><path d="M4.5 12c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8" stroke="url(#paxs-s-amber)"/></symbol>
+          <symbol id="ic-import" viewBox="0 0 24 24"><path d="M12 3.5v9.5m0 0l3.6-3.6M12 13l-3.6-3.6" stroke="url(#paxs-s-emerald)"/><path d="M4.5 16.5v2a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-2" stroke="url(#paxs-s-emerald)"/></symbol>
+          <symbol id="ic-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11" stroke="url(#paxs-s-sky)"/><path d="M4.5 6h.01M4.5 12h.01M4.5 18h.01" stroke="url(#paxs-s-sky)"/></symbol>
+          <symbol id="ic-code" viewBox="0 0 24 24"><path d="M9.5 8L5 12l4.5 4M14.5 8L19 12l-4.5 4" stroke="url(#paxs-s-violet)"/></symbol>
+          <symbol id="ic-tag" viewBox="0 0 24 24"><path d="M3.5 12.2V4.5H11l9 9-6.8 6.8z" stroke="url(#paxs-s-amber)" fill="url(#paxs-f-amber)"/><circle cx="7.6" cy="8.1" r="1.3" stroke="url(#paxs-s-amber)"/></symbol>
+          <symbol id="ic-layers" viewBox="0 0 24 24"><path d="M12 3.5l8.5 4.6-8.5 4.6L3.5 8.1z" stroke="url(#paxs-s-violet)" fill="url(#paxs-f-violet)"/><path d="M3.5 12.6l8.5 4.6 8.5-4.6" stroke="url(#paxs-s-violet)"/></symbol>
+          <symbol id="ic-users" viewBox="0 0 24 24"><circle cx="9" cy="8.2" r="3.2" stroke="url(#paxs-s-aqua)" fill="url(#paxs-f-aqua)"/><path d="M3.2 20c0-3.3 2.6-5.6 5.8-5.6s5.8 2.3 5.8 5.6" stroke="url(#paxs-s-aqua)"/><path d="M16.6 5.4a3.2 3.2 0 0 1 0 5.6" stroke="url(#paxs-s-aqua)"/><path d="M17.6 14.7c2 .7 3.2 2.4 3.2 4.6" stroke="url(#paxs-s-aqua)"/></symbol>
+          <symbol id="ic-key" viewBox="0 0 24 24"><circle cx="8" cy="12" r="4" stroke="url(#paxs-s-amber)" fill="url(#paxs-f-amber)"/><path d="M12 12h8.5M18 12v3M15.2 12v2.2" stroke="url(#paxs-s-amber)"/></symbol>
+          <symbol id="ic-link" viewBox="0 0 24 24"><path d="M10.2 13.8a4 4 0 0 0 5.7 0l2.4-2.4a4 4 0 0 0-5.7-5.7l-1.3 1.3" stroke="url(#paxs-s-teal)"/><path d="M13.8 10.2a4 4 0 0 0-5.7 0l-2.4 2.4a4 4 0 0 0 5.7 5.7l1.3-1.3" stroke="url(#paxs-s-teal)"/></symbol>
+          <symbol id="ic-bolt" viewBox="0 0 24 24"><path d="M13 3L5.5 13.5H11l-1 7.5L18 10.5h-5.5z" stroke="url(#paxs-s-amber)" fill="url(#paxs-f-amber)"/></symbol>
+          <symbol id="ic-inbox" viewBox="0 0 24 24"><path d="M3.5 13.4 6.1 5.4h11.8l2.6 8v4.2a2.1 2.1 0 0 1-2.1 2.1H5.6a2.1 2.1 0 0 1-2.1-2.1z" stroke="url(#paxs-s-sky)" fill="url(#paxs-f-sky)"/><path d="M3.5 13.4h4.3l1.1 2.2h6.2l1.1-2.2h4.3" stroke="url(#paxs-s-sky)"/></symbol>
+          <symbol id="ic-checklist" viewBox="0 0 24 24"><rect x="3.4" y="4.4" width="17.2" height="15.2" rx="2.5" stroke="url(#paxs-s-emerald)" fill="url(#paxs-f-emerald)"/><path d="M3.4 9.2h17.2" stroke="url(#paxs-s-emerald)"/><path d="m7.4 14 2 2 3.8-3.8" stroke="url(#paxs-s-emerald)"/><path d="M14.8 14.6h3.4" stroke="url(#paxs-s-emerald)"/></symbol>
+          <symbol id="ic-building" viewBox="0 0 24 24"><path d="M4.6 20.4V6.4a1.9 1.9 0 0 1 1.9-1.9h4.9a1.9 1.9 0 0 1 1.9 1.9v14" stroke="url(#paxs-s-teal)" fill="url(#paxs-f-teal)"/><path d="M13.3 20.4v-9.2h4.2a1.9 1.9 0 0 1 1.9 1.9v7.3M3 20.4h18" stroke="url(#paxs-s-teal)"/><path d="M7.4 8.2h3.4M7.4 11.6h3.4M7.4 15h3.4" stroke="url(#paxs-s-teal)"/></symbol>
+          <symbol id="ic-fingerprint" viewBox="0 0 24 24"><path d="M8 19.8a8.3 8.3 0 1 1 8 0" stroke="url(#paxs-s-violet)"/><path d="M9.7 16.7a5.1 5.1 0 1 1 4.6 0" stroke="url(#paxs-s-violet)"/><path d="M11.3 13.7a1.9 1.9 0 1 1 1.4 0" stroke="url(#paxs-s-violet)"/></symbol>
+          <symbol id="ic-monitor" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12" rx="2" stroke="url(#paxs-s-sky)" fill="url(#paxs-f-sky)"/><path d="M9 20h6M12 16.5V20" stroke="url(#paxs-s-sky)"/></symbol>
+        </defs>
+      </svg>
+
+  <script src="/static/paxs-report-addenda.js?v=1"></script>
+  <script src="/static/app.js?v=69"></script>
+  <script src="/static/paxs-accent.js?v=1" defer></script>
+  <script src="/static/admin-console.js?v=3" defer></script>
+  <script src="/static/ops-views.js?v=2" defer></script>
+  <script src="/static/workflow-console.js?v=2" defer></script>
+  <script src="/static/transfer-console.js?v=2" defer></script>
+  <script src="/static/services-console.js?v=1" defer></script>
+  <script src="/static/settings-console.js?v=1" defer></script>
 </body>
 </html>

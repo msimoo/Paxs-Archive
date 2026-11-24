@@ -16,6 +16,13 @@ Security — SSRF guard: ``validate_web_url`` enforces
     opts out with ``DICOMWEB_CLIENT_ALLOW_PRIVATE`` (test peers on 127.0.0.1).
   * an optional connection/read timeout caps every request.
 
+Security — bounded retrieve (B-14 / FP-11): a WADO-RS **pull** never buffers the
+response. ``wado_retrieve`` streams the body through
+:mod:`app.services.remote_wado_service`, which refuses a peer that declares an
+oversized ``Content-Length`` before reading anything, cuts the transfer off
+mid-flight the moment the cap is passed, and spools verified chunks to a temp
+file on disk. See that module for the cap semantics.
+
 The client runs sync (httpx) so the REST layer can wrap it in ``to_thread``
 exactly like the DIMSE SCU helpers.
 """
@@ -23,9 +30,13 @@ exactly like the DIMSE SCU helpers.
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import socket
+import tempfile
 import urllib.parse
+from collections.abc import Iterator
+from typing import BinaryIO
 
 import httpx
 
@@ -160,12 +171,23 @@ def qido_query(node, level: str = "STUDY", filters: dict | None = None) -> list[
             continue
         params[keyword] = str(value)
 
+    max_bytes = settings.DICOMWEB_QIDO_MAX_BYTES
+    if max_bytes < 0:
+        raise ValueError("DICOMWEB_QIDO_MAX_BYTES must be zero or greater")
+    body = bytearray()
     with _client(node) as client:
-        resp = client.get(path, params=params)
-    if resp.status_code != 200:
-        raise ConnectionError(f"QIDO-RS returned HTTP {resp.status_code}")
+        with client.stream("GET", path, params=params) as resp:
+            if resp.status_code != 200:
+                raise ConnectionError(f"QIDO-RS returned HTTP {resp.status_code}")
+            declared = resp.headers.get("Content-Length")
+            if declared and declared.isdigit() and max_bytes and int(declared) > max_bytes:
+                raise ConnectionError("QIDO-RS response exceeds configured byte limit")
+            for chunk in resp.iter_bytes():
+                if max_bytes and len(body) + len(chunk) > max_bytes:
+                    raise ConnectionError("QIDO-RS response exceeds configured byte limit")
+                body.extend(chunk)
 
-    data = resp.json()
+    data = json.loads(body)
     if isinstance(data, dict):
         data = data.get("datasets", data.get("results", []))
     return list(data) if isinstance(data, list) else []
@@ -226,7 +248,8 @@ def qido_to_match_rows(level: str, matches: list[dict]) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # WADO-RS (retrieve)
 # --------------------------------------------------------------------------- #
-def wado_retrieve(node, study_uid: str, tenant_id: int | None = None) -> dict:
+def wado_retrieve(node, study_uid: str, tenant_id: int | None = None,
+                  on_progress=None, include_all: bool = False) -> dict:
     """Retrieve every instance of a study via WADO-RS and ingest it locally.
 
     ``GET {web_url}/studies/{uid}`` with ``Accept: multipart/related;
@@ -234,54 +257,109 @@ def wado_retrieve(node, study_uid: str, tenant_id: int | None = None) -> dict:
     is saved + indexed through the normal pipeline (idempotent re-import),
     tagged with `tenant_id` (VNA) for new studies. Returns the same summary
     shape as ``pull_from_node_sync`` (per-instance results for auditing).
+
+    B-14/FP-11: the response is **streamed** (never ``resp.content``) and the
+    byte count is enforced while it arrives, so an oversized body is aborted
+    rather than buffered. ``DICOMWEB_CLIENT_MAX_BYTES`` is the whole-response
+    ceiling — a multi-instance study legitimately exceeds one instance — and
+    each part is additionally bounded by ``MAX_WADO_INSTANCE_BYTES``, which is
+    the per-instance cap.
     """
+    import asyncio
+
+    from app.services import remote_wado_service
+
     if not study_uid:
         raise ValueError("study_uid is required for WADO-RS retrieve")
 
-    validate_web_url(node.web_url)  # per-call re-check (DNS rebinding guard)
+    expected_total = 0
+    if on_progress is not None:
+        try:
+            qido_matches = qido_query(node, "STUDY", {"StudyInstanceUID": study_uid})
+            if qido_matches:
+                count_value = _qido_value(qido_matches[0], "NumberOfStudyRelatedInstances")
+                expected_total = int(count_value) if count_value and count_value.isdigit() else 0
+        except Exception as exc:
+            # The count is a UI estimate; WADO remains authoritative for retrieval.
+            log.info("QIDO progress estimate unavailable (error_type=%s)", type(exc).__name__)
+        on_progress(expected_total, 0, 0)
+
+    spooled = asyncio.run(
+        remote_wado_service.stream_wado_response(
+            node,
+            f"/studies/{urllib.parse.quote(study_uid, safe='')}",
+            max_bytes=settings.DICOMWEB_CLIENT_MAX_BYTES,
+            accept=remote_wado_service.MULTIPART_DICOM,
+        )
+    )
+    try:
+        return _ingest_spooled_study(
+            spooled, study_uid, tenant_id, on_progress, expected_total,
+            include_all=include_all,
+        )
+    finally:
+        # The spool holds PHI bytes: it is removed on every path, success or not.
+        spooled.close()
+
+
+def _ingest_spooled_study(spooled, study_uid: str, tenant_id: int | None,
+                          on_progress=None, total_items: int = 0,
+                          include_all: bool = False) -> dict:
+    """Split a spooled multipart study body and ingest every instance part.
+
+    The body is read from the temp file in chunks (see
+    ``remote_wado_service.iter_spooled_multipart_parts``) so a large study is
+    never reloaded into RAM just to be split; only one instance is resident at a
+    time, bounded by ``MAX_WADO_INSTANCE_BYTES``.
+    """
+    from app.services import remote_wado_service
+
     pulled = failed = 0
     results: list[dict] = []
-    headers = {**_headers(node), "Accept": 'multipart/related; type="application/dicom"'}
-    with httpx.Client(
-        base_url=node.web_url, headers=headers,
-        timeout=settings.DICOMWEB_CLIENT_TIMEOUT, follow_redirects=False,
-    ) as client:
-        resp = client.get(f"/studies/{urllib.parse.quote(study_uid, safe='')}")
-        if resp.status_code not in (200, 206):
-            raise ConnectionError(f"WADO-RS returned HTTP {resp.status_code}")
-        if len(resp.content) > settings.DICOMWEB_CLIENT_MAX_BYTES:
-            raise ConnectionError(
-                f"WADO-RS response exceeds DICOMWEB_CLIENT_MAX_BYTES "
-                f"({settings.DICOMWEB_CLIENT_MAX_BYTES})"
-            )
-
-        for part in _iter_multipart_parts(resp.content, resp.headers.get("content-type", "")):
-            ds = _dataset_from_bytes(part)
-            if ds is None:
-                failed += 1
-                results.append({"sop_uid": "", "study_uid": study_uid,
-                                "ok": False, "reason": "unparseable part"})
-                continue
-            item = {
-                "sop_uid": str(getattr(ds, "SOPInstanceUID", "")),
-                "study_uid": study_uid,
-                "ok": False,
-            }
-            try:
-                _ingest_dicomweb_dataset(ds, tenant_id)
-                item["ok"] = True
-                pulled += 1
-            except Exception as exc:
-                item["reason"] = str(exc)
-                failed += 1
-            results.append(item)
+    parts = remote_wado_service.iter_spooled_multipart_parts(
+        spooled.path,
+        spooled.content_type,
+        max_part_bytes=settings.MAX_WADO_INSTANCE_BYTES,
+    )
+    for part in parts:
+        ds = _dataset_from_bytes(part)
+        if ds is None:
+            failed += 1
+            results.append({"sop_uid": "", "study_uid": study_uid,
+                            "ok": False, "reason": "unparseable part"})
+            if on_progress is not None:
+                on_progress(total_items, pulled, failed)
+            continue
+        item = {
+            "sop_uid": str(getattr(ds, "SOPInstanceUID", "")),
+            "study_uid": study_uid,
+            "ok": False,
+        }
+        try:
+            _ingest_dicomweb_dataset(ds, tenant_id, include_all=include_all)
+            item["ok"] = True
+            pulled += 1
+        except (httpx.HTTPError, OSError, ValueError) as exc:  # one bad instance must not abort the pull
+            # Exception text can contain PHI, response fragments, or local paths.
+            log.warning("dicomweb_pull_instance_failed error_type=%s", type(exc).__name__)
+            item["reason"] = "Instance ingestion failed"
+            failed += 1
+        results.append(item)
+        if on_progress is not None:
+            on_progress(total_items, pulled, failed)
 
     return {"ok": failed == 0 and pulled > 0, "pulled": pulled, "failed": failed,
             "results": results}
 
 
 def _iter_multipart_parts(body: bytes, content_type: str):
-    """Split a multipart/related body into the raw bytes of each part."""
+    """Split an in-memory multipart/related body into the raw bytes of each part.
+
+    For a body already resident in RAM (tests, and callers that have their own
+    bound). A **retrieved** body goes through
+    ``remote_wado_service.iter_spooled_multipart_parts`` instead, which splits
+    the spooled file without loading it.
+    """
     import re
 
     m = re.search(r'boundary=(?:"([^"]+)"|([^;]+))', content_type or "")
@@ -319,8 +397,14 @@ def _dataset_from_bytes(data: bytes):
         return None
 
 
-def _ingest_dicomweb_dataset(ds, tenant_id: int | None = None) -> None:
-    """Save + index one WADO-RS-received instance (mirrors C-STORE ingest)."""
+def _ingest_dicomweb_dataset(ds, tenant_id: int | None = None,
+                             include_all: bool = False) -> None:
+    """Stage, index, and publish one WADO-RS-received instance.
+
+    The DB row commits before the staged object becomes canonical, matching the
+    C-STORE and DIMSE C-GET ingest paths so a failed index never publishes an
+    untracked DICOM object.
+    """
     import asyncio
 
     from app.dicom.parser import parse_metadata
@@ -332,78 +416,155 @@ def _ingest_dicomweb_dataset(ds, tenant_id: int | None = None) -> None:
     backend = storage_service.resolve_study_backend(
         str(getattr(ds, "StudyInstanceUID", "UNKNOWN"))
     )
-    path, sha256 = storage_service.save_dataset(ds, backend_name=backend)
     meta = parse_metadata(ds)
+    staged = storage_service.stage_dataset_with_quota(ds, tenant_id, backend)
+    try:
+        staged.verify()
+        async def _run() -> None:
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    await index_new_instance(
+                        session, meta, staged.key, staged.sha256,
+                        performed_by="dicomweb-pull", tenant_id=tenant_id,
+                        storage_backend=backend,
+                        read_path=staged.staged_path or staged.key,
+                        ds=ds,
+                        file_size_bytes=staged.bytes_written,
+                        include_all=include_all,
+                    )
 
-    async def _run() -> None:
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                await index_new_instance(
-                    session, meta, path, sha256,
-                    performed_by="dicomweb-pull", tenant_id=tenant_id,
-                    storage_backend=backend,
-                )
-
-    asyncio.run(_run())
+        asyncio.run(_run())
+        staged.promote()
+    except Exception:
+        staged.discard()
+        raise
 
 
 # --------------------------------------------------------------------------- #
 # STOW-RS (upload / forward)
 # --------------------------------------------------------------------------- #
-def _stow_failed_sops(resp: httpx.Response) -> set[str]:
-    """SOP UIDs the remote explicitly reported as failed in a STOW-RS body.
-
-    STOW-RS responses are ``application/dicom+json``; a partial failure lists
-    the rejected instances under ``FailedSOPSequence`` (keyword or tag-number
-    form). A 200/202 with an empty/absent body means every instance landed.
-    """
+def _stow_response_sops(resp: httpx.Response) -> tuple[set[str], set[str]]:
+    """Return success and failure SOP UIDs explicitly reported by STOW-RS."""
     if not resp.content:
-        return set()
+        return set(), set()
     try:
         payload = resp.json()
-    except Exception:
-        return set()
+    except ValueError:
+        return set(), set()
     if not isinstance(payload, dict):
-        return set()
-    failed: set[str] = set()
-    for key in ("FailedSOPSequence", "00081198"):
-        seq = payload.get(key)
-        if not isinstance(seq, list):
-            continue
-        for item in seq:
-            if not isinstance(item, dict):
+        return set(), set()
+    def read_sequence(keys: tuple[str, ...]) -> set[str]:
+        uids: set[str] = set()
+        for key in keys:
+            seq = payload.get(key)
+            if not isinstance(seq, list):
                 continue
-            sop = item.get("ReferencedSOPInstanceUID") or item.get("00081155")
-            if isinstance(sop, dict):  # tag-number form: {"Value": [...]}
-                values = sop.get("Value")
-                sop = values[0] if isinstance(values, list) and values else None
-            if sop:
-                failed.add(str(sop))
-    return failed
+            for item in seq:
+                if not isinstance(item, dict):
+                    continue
+                sop = item.get("ReferencedSOPInstanceUID") or item.get("00081155")
+                if isinstance(sop, dict):
+                    values = sop.get("Value")
+                    sop = values[0] if isinstance(values, list) and values else None
+                if sop:
+                    uids.add(str(sop))
+        return uids
+    return (read_sequence(("ReferencedSOPSequence", "00081199")),
+            read_sequence(("FailedSOPSequence", "00081198")))
 
 
 def _multipart_body_chunks(targets: list[dict], boundary: str,
                            chunk_size: int = 1024 * 1024,
-                           counter: list[int] | None = None):
-    """Yield a STOW-RS multipart/related body in chunks, one instance at a
-    time, so httpx can POST it with ``Transfer-Encoding: chunked`` (the
-    Transfer Accelerator's streamed ingest path — no temp file, no single
-    in-memory body copy). Each instance's bytes are read from the active
-    storage backend on demand; `counter`, when given, receives the total
-    payload byte count (exclusive of multipart framing)."""
+                           counter: list[int] | None = None) -> Iterator[bytes]:
+    """Yield multipart bytes from backend-native object streams in fixed chunks."""
     from app.services import storage_service
 
     total = 0
     for target in targets:
         yield f"--{boundary}\r\nContent-Type: application/dicom\r\n\r\n".encode()
-        data = storage_service.read_bytes(target["key"], backend_name=target.get("backend"))
-        total += len(data)
-        for i in range(0, len(data), chunk_size):
-            yield data[i:i + chunk_size]
+        stream = storage_service.read_stream(target["key"], backend_name=target.get("backend"))
+        try:
+            while True:
+                chunk = stream.read(chunk_size)
+                if not chunk:
+                    break
+                total += len(chunk)
+                yield chunk
+        finally:
+            stream.close()
         yield b"\r\n"
     yield f"--{boundary}--\r\n".encode()
     if counter is not None:
         counter.append(total)
+
+
+def _write_multipart_spool(targets: list[dict], boundary: str,
+                           output: BinaryIO, counter: list[int],
+                           chunk_size: int = 1024 * 1024) -> int:
+    """Write the ordinary STOW body to disk and return its exact framed size."""
+    from app.services import storage_service
+
+    for target in targets:
+        output.write(f"--{boundary}\r\nContent-Type: application/dicom\r\n\r\n".encode())
+        stream = storage_service.read_stream(target["key"], backend_name=target.get("backend"))
+        try:
+            while True:
+                chunk = stream.read(chunk_size)
+                if not chunk:
+                    break
+                output.write(chunk)
+                counter[0] += len(chunk)
+        finally:
+            stream.close()
+        output.write(b"\r\n")
+    output.write(f"--{boundary}--\r\n".encode())
+    return output.tell()
+
+
+def _validate_stow_object_sizes(targets: list[dict]) -> None:
+    """Reject an oversized upload before any instance bytes reach the peer."""
+    from app.services import storage_service
+
+    total = 0
+    for target in targets:
+        object_size = storage_service.size(target["key"], backend_name=target.get("backend"))
+        if settings.STOW_MAX_PART_BYTES and object_size > settings.STOW_MAX_PART_BYTES:
+            raise ValueError("STOW-RS instance exceeds configured part size limit")
+        total += object_size
+        if settings.STOW_MAX_TOTAL_BYTES and total > settings.STOW_MAX_TOTAL_BYTES:
+            raise ValueError("STOW-RS request exceeds configured total size limit")
+
+
+def _file_body_chunks(body_file: BinaryIO, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+    """Read a prepared multipart spool for httpx in bounded chunks."""
+    body_file.seek(0)
+    while True:
+        chunk = body_file.read(chunk_size)
+        if not chunk:
+            return
+        yield chunk
+
+
+def _post_stow(client: httpx.Client, content: Iterator[bytes], headers: dict,
+               content_length: int | None = None) -> httpx.Response:
+    """POST a streamed STOW body and cap the peer's JSON response size."""
+    if content_length is not None:
+        headers["Content-Length"] = str(content_length)
+    response_limit = settings.DICOMWEB_STOW_MAX_RESPONSE_BYTES
+    if response_limit < 0:
+        raise ValueError("DICOMWEB_STOW_MAX_RESPONSE_BYTES must be zero or greater")
+    with client.stream("POST", "/studies", content=content, headers=headers) as response:
+        payload = bytearray()
+        for chunk in response.iter_bytes():
+            if response_limit and len(payload) + len(chunk) > response_limit:
+                raise ConnectionError("STOW-RS response exceeds configured byte limit")
+            payload.extend(chunk)
+        return httpx.Response(
+            status_code=response.status_code,
+            headers=response.headers,
+            content=bytes(payload),
+            request=response.request,
+        )
 
 
 def stow_upload(node, targets: list[dict], stream: bool = False) -> dict:
@@ -411,61 +572,29 @@ def stow_upload(node, targets: list[dict], stream: bool = False) -> dict:
 
     `targets` is the :func:`app.dicom.sender.resolve_keys_sync` shape:
     ``[{"sop_uid", "key", "study_uid"}, ...]``. Each instance's bytes are
-    read from the active storage backend (S3 objects materialize in memory)
-    and POSTed as one ``multipart/related; type="application/dicom"`` part to
+    read from the active storage backend in bounded chunks and POSTed as one
+    ``multipart/related; type="application/dicom"`` part to
     ``{web_url}/studies`` — the REST twin of C-STORE forwarding.
 
-    ``stream=True`` (Transfer Accelerator) streams the body with chunked
-    transfer encoding straight from the backend — no temp file, no single
-    in-memory copy — so the receiver ingests parts as they arrive.
+    ``stream=True`` (Transfer Accelerator) streams body bytes from native
+    backend streams. The standard path spools multipart framing to disk and
+    streams that file with Content-Length. Neither path buffers full objects.
 
     Returns ``{"ok", "sent", "failed", "http_status", "results",
-    "streamed", "bytes"}`` with per-instance results for auditing; HTTP 409
-    (duplicates on the remote) is treated as success, and instances named in
-    the response's ``FailedSOPSequence`` are marked failed. Raises ValueError
+    "streamed", "bytes"}`` with per-instance results for auditing. Raises ValueError
     when the node is unsafe (SSRF guard re-check).
 
-    Memory (non-stream): the multipart body is written part-by-part into a
-    temp file (no list of per-part byte strings), so only one full body copy
-    is ever in RAM — same profile as the C-STORE forward path, which also
-    materializes on disk.
+    Both paths use bounded chunks for object reads and HTTP request writes; the
+    remote response is capped before JSON parsing.
     """
-    import os
-    import tempfile
     import uuid
-
-    from app.services import storage_service
 
     if not targets:
         raise ValueError("no instances to upload")
 
     validate_web_url(node.web_url)  # per-call re-check (DNS rebinding guard)
+    _validate_stow_object_sizes(targets)
     boundary = f"paxs-stow-{uuid.uuid4().hex[:16]}"
-
-    if stream:
-        counter: list[int] = []
-        content = _multipart_body_chunks(targets, boundary, counter=counter)
-        body_bytes = None
-    else:
-        counter = []
-        fd, tmp_path = tempfile.mkstemp(prefix="paxs-stow-", suffix=".mp")
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                for target in targets:
-                    fh.write(f"--{boundary}\r\nContent-Type: application/dicom\r\n\r\n".encode())
-                    data = storage_service.read_bytes(target["key"], backend_name=target.get("backend"))
-                    counter.append(len(data))
-                    fh.write(data)
-                    fh.write(b"\r\n")
-                fh.write(f"--{boundary}--\r\n".encode())
-            with open(tmp_path, "rb") as fh:
-                body_bytes = fh.read()
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-        content = body_bytes
 
     headers = {
         **_headers(node),
@@ -475,11 +604,22 @@ def stow_upload(node, targets: list[dict], stream: bool = False) -> dict:
         base_url=node.web_url, headers=headers,
         timeout=settings.DICOMWEB_CLIENT_TIMEOUT, follow_redirects=False,
     ) as client:
-        resp = client.post("/studies", content=content)
+        if stream:
+            counter: list[int] = []
+            content = _multipart_body_chunks(targets, boundary, counter=counter)
+            resp = _post_stow(client, content, headers)
+        else:
+            counter = [0]
+            with tempfile.TemporaryFile(mode="w+b") as body_file:
+                content_length = _write_multipart_spool(targets, boundary, body_file, counter)
+                resp = _post_stow(
+                    client, _file_body_chunks(body_file), headers,
+                    content_length=content_length,
+                )
 
-    ok_status = resp.status_code in (200, 202, 409)
+    ok_status = resp.status_code in (200, 202)
     reason = None if ok_status else f"STOW-RS returned HTTP {resp.status_code}"
-    failed_sops = _stow_failed_sops(resp) if ok_status else set()
+    succeeded_sops, failed_sops = _stow_response_sops(resp) if ok_status else (set(), set())
 
     sent = failed = 0
     results: list[dict] = []
@@ -489,7 +629,10 @@ def stow_upload(node, targets: list[dict], stream: bool = False) -> dict:
             "study_uid": target.get("study_uid"),
             "ok": False,
         }
-        if ok_status and target["sop_uid"] not in failed_sops:
+        succeeded = target["sop_uid"] in succeeded_sops
+        accepted_without_report = resp.status_code == 200 and not resp.content
+        if (ok_status and target["sop_uid"] not in failed_sops
+                and (succeeded or accepted_without_report)):
             item["ok"] = True
             sent += 1
         else:
@@ -504,6 +647,6 @@ def stow_upload(node, targets: list[dict], stream: bool = False) -> dict:
         "http_status": resp.status_code,
         "reason": reason,
         "streamed": bool(stream),
-        "bytes": sum(counter),
+        "bytes": counter[0] if counter else 0,
         "results": results,
     }

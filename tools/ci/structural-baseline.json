@@ -1,0 +1,9 @@
+{
+  "note": "The one-way floor for tools/ci/check_structural_ratchet.py over `app/`. A metric may only fall, and a fall must be recorded with --update-baseline so the reduction is reviewed instead of being spent silently. Recorded 2026-10-27 after reducing long functions to 206 and large modules to 6, and recording the type-hint improvement. `unexplained_noqa_comments` counts suppressions without a written reason; explained suppressions are validated by tests/test_structural_ratchet.py.",
+  "metrics": {
+    "functions_over_40_lines": 206,
+    "functions_incomplete_type_hints": 485,
+    "modules_over_800_lines": 6,
+    "unexplained_noqa_comments": 0
+  }
+}

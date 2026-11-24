@@ -148,22 +148,33 @@ def run_detectors_on_series(series: object, instance_rows: list) -> list[Finding
     for detector in DETECTORS:
         if modality and detector.MODALITIES and modality not in detector.MODALITIES:
             continue
-        ds_list: list = []
         try:
-            for inst in sampled:
-                try:
-                    ds_list.append(storage_service.read_dataset(
-                        inst.file_path, backend_name=getattr(inst, "storage_backend", None)
-                    ))
-                except Exception as exc:
-                    log.debug("Triage skip unreadable %s: %s", inst.file_path, exc)
+            ds_list = _read_detector_inputs(sampled)
             detected = detector.detect(ds_list)
-        except Exception:
-            log.exception("Detector %s failed on series %s",
-                          detector.name, getattr(series, "series_instance_uid", "?"))
+        except Exception as exc:
+            # Detector failures are isolated so other detectors and series continue.
+            log.error(
+                "triage_detector_failed series_uid=%s error_type=%s",
+                getattr(series, "series_instance_uid", "?"),
+                type(exc).__name__,
+            )
             continue
         for f in detected:
             f.detector = f.detector or detector.name
             f.series_instance_uid = getattr(series, "series_instance_uid", None)
             findings.append(f)
     return findings
+
+
+def _read_detector_inputs(instance_rows: list) -> list:
+    """Read sampled DICOM datasets, skipping failures without logging PHI."""
+    datasets = []
+    for instance in instance_rows:
+        try:
+            datasets.append(storage_service.read_dataset(
+                instance.file_path,
+                backend_name=getattr(instance, "storage_backend", None),
+            ))
+        except Exception as exc:
+            log.debug("triage_instance_read_failed error_type=%s", type(exc).__name__)
+    return datasets

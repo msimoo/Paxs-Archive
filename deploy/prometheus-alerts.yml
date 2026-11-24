@@ -1,0 +1,126 @@
+groups:
+  - name: paxs-workflows
+    rules:
+      - alert: PaxsNodeDown
+        expr: up{job="paxs-nodes"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PAXS node scrape is failing"
+      - alert: PaxsHttpServerErrorRate
+        expr: |
+          sum by (instance) (rate(paxs_http_request_duration_seconds_count{status_class="5xx"}[5m]))
+          / clamp_min(sum by (instance) (rate(paxs_http_request_duration_seconds_count[5m])), 0.001)
+          > 0.02
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PAXS HTTP 5xx rate exceeds 2%"
+      - alert: PaxsHttpLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, instance) (rate(paxs_http_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PAXS API p95 latency exceeds one second"
+      - alert: PaxsWorkerOldestPending
+        expr: paxs_worker_queue_oldest_pending_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Oldest PAXS compression job has waited over five minutes"
+      - alert: PaxsDicomDecodeFailures
+        expr: rate(paxs_dicom_decode_failures_total[10m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DICOM pixel decoding is failing repeatedly"
+      - alert: PaxsDimseFailures
+        expr: rate(paxs_dimse_operations_total{result="failure"}[10m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inbound DIMSE operations are failing repeatedly"
+      - alert: PaxsDbPoolWaitP95
+        expr: histogram_quantile(0.95, sum by (le, instance) (rate(paxs_db_pool_checkout_seconds_bucket[5m]))) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PAXS database connection acquisition p95 exceeds 500ms"
+      - alert: PaxsS3OperationLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, instance, operation) (
+              rate(paxs_storage_operation_duration_seconds_bucket{backend="s3",result="success"}[5m]))) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PAXS S3 operation p95 latency exceeds five seconds"
+      - alert: PaxsReplicaLag
+        expr: max(paxs_replica_lag_seconds) > 120
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PAXS read replica lag exceeds two minutes"
+      - alert: PaxsDecodeCacheThrashing
+        expr: |
+          paxs_cache_utilisation_ratio > 0.95
+          and on (instance, cache)
+          rate(paxs_cache_operations_total{result="miss"}[10m]) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PAXS decode cache is full and still missing"
+      - alert: PaxsDbDown
+        expr: paxs_db_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PAXS primary PostgreSQL database is unreachable"
+      - alert: PaxsEventLoopLagHigh
+        expr: paxs_event_loop_lag_seconds > 0.25
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PAXS async event loop scheduling delay exceeds 250ms"
+      - alert: PaxsBlockingIoRejected
+        expr: rate(paxs_blocking_io_rejected_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PAXS blocking I/O executor is rejecting requests with 503"
+      - alert: PaxsVolumeAssemblyWaitersHigh
+        expr: paxs_volume_assembly_waiters > 4
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Multiple MPR/3D volume assembly requests are queued waiting for memory budget"
+      - alert: PaxsRedisCircuitOpen
+        expr: paxs_redis_circuit_state == 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PAXS Redis circuit breaker is open (running on local L1 fallback)"
+      - alert: PaxsRoutingQueueFailures
+        expr: paxs_routing_queue_depth{state="failed"} > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PAXS Smart Router has failed outbound routing jobs"

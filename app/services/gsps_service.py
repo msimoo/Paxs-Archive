@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import PresentationState
+from app.services import query_service
 
 log = logging.getLogger("paxs.gsps")
 
@@ -224,8 +225,11 @@ async def index_presentation_state(
             select(PresentationState).where(PresentationState.sop_instance_uid == sop_uid)
         )
     ).scalar_one_or_none()
+    study_uid = meta.get("study_instance_uid") or ""
 
     if existing is not None:
+        if existing.study_instance_uid != study_uid:
+            raise ValueError("GSPS SOP UID belongs to another study")
         existing.file_path = file_path
         existing.window_center = str(content.window_center) if content.window_center is not None else None
         existing.window_width = str(content.window_width) if content.window_width is not None else None
@@ -240,7 +244,7 @@ async def index_presentation_state(
 
     ps = PresentationState(
         sop_instance_uid=sop_uid,
-        study_instance_uid=meta.get("study_instance_uid") or "",
+        study_instance_uid=study_uid,
         series_instance_uid=meta.get("series_instance_uid") or "",
         presentation_label=content.presentation_label,
         presentation_description=content.presentation_description,
@@ -264,6 +268,9 @@ async def find_for_instance(
     session: AsyncSession,
     sop_instance_uid: str,
     study_instance_uid: str | None = None,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
 ) -> list[PresentationState]:
     """Find all GSPS objects that reference a given image instance."""
     stmt = select(PresentationState).where(
@@ -271,6 +278,10 @@ async def find_for_instance(
     )
     if study_instance_uid:
         stmt = stmt.where(PresentationState.study_instance_uid == study_instance_uid)
+    stmt = query_service.apply_study_uid_tenant_scope(
+        stmt, PresentationState, PresentationState.study_instance_uid,
+        tenant_id, include_all,
+    )
     stmt = stmt.order_by(PresentationState.created_at.desc())
     return list((await session.execute(stmt)).scalars().all())
 
@@ -278,31 +289,37 @@ async def find_for_instance(
 async def get_by_uid(
     session: AsyncSession,
     sop_instance_uid: str,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
 ) -> PresentationState | None:
     """Retrieve a single GSPS by its SOP Instance UID."""
-    return (
-        await session.execute(
-            select(PresentationState).where(
-                PresentationState.sop_instance_uid == sop_instance_uid
-            )
-        )
-    ).scalar_one_or_none()
+    stmt = select(PresentationState).where(
+        PresentationState.sop_instance_uid == sop_instance_uid
+    )
+    stmt = query_service.apply_study_uid_tenant_scope(
+        stmt, PresentationState, PresentationState.study_instance_uid,
+        tenant_id, include_all,
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def list_for_study(
     session: AsyncSession,
     study_instance_uid: str,
+    *,
+    tenant_id: int | None = None,
+    include_all: bool = False,
 ) -> list[PresentationState]:
     """List all GSPS objects for a study."""
-    return list(
-        (
-            await session.execute(
-                select(PresentationState)
-                .where(PresentationState.study_instance_uid == study_instance_uid)
-                .order_by(PresentationState.created_at.desc())
-            )
-        ).scalars().all()
+    stmt = select(PresentationState).where(
+        PresentationState.study_instance_uid == study_instance_uid
+    ).order_by(PresentationState.created_at.desc())
+    stmt = query_service.apply_study_uid_tenant_scope(
+        stmt, PresentationState, PresentationState.study_instance_uid,
+        tenant_id, include_all,
     )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 # --------------------------------------------------------------------------- #
@@ -413,7 +430,10 @@ def _draw_text(draw: ImageDraw.Draw, t: TextObject, color: tuple) -> None:
         pos = (10, 10)  # Fallback
     try:
         font = ImageFont.truetype("arial", 14)
-    except (IOError, OSError):
+    except (IOError, OSError) as exc:
+        # "arial" does not exist on a Linux host; the bitmap default keeps the
+        # annotation legible, which is why this is a documented fallback.
+        log.debug("gsps_font_unavailable error_type=%s; using default", type(exc).__name__)
         font = ImageFont.load_default()
     draw.text(pos, t.text, fill=color, font=font)
 

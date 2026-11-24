@@ -1,0 +1,254 @@
+/**
+ * Client-side portable media helpers:
+ *   - Native desktop bridge detection (PAXS-Archive.exe via pywebview)
+ *   - Authenticated ISO / ZIP downloads (no blank error tabs)
+ *   - Direct USB / folder write in Chrome/Edge via File System Access API
+ *     (unpacks ZIP_STORED DICOMDIR packages cleanly without extra dependencies)
+ */
+
+import { apiFetch, appBasePath, appBaseUrl, type OpticalRecorder, type UsbDrive } from '@/lib/api';
+import type { Study } from '@/types/study';
+
+export interface LocalMediaInventory {
+  desktop: boolean;
+  platform: string;
+  recorders: OpticalRecorder[];
+  recorder_error: string | null;
+  usb_drives: UsbDrive[];
+}
+
+export interface LocalMediaJobStatus {
+  phase: 'queued' | 'downloading' | 'preparing' | 'writing' | 'verifying' | 'verified' | 'failed';
+  mode?: string;
+  drive?: string;
+  output_path?: string | null;
+  error: string | null;
+}
+
+export interface DesktopMediaBridge {
+  list_local_media: () => Promise<LocalMediaInventory>;
+  check_local_disc: (drive?: string) => Promise<{
+    ok: boolean;
+    drive?: string;
+    media_type?: string;
+    available_bytes?: number;
+    error?: string;
+  }>;
+  pick_local_folder: () => Promise<{ ok: boolean; path: string | null }>;
+  open_local_path: (path: string) => Promise<{ ok: boolean; error?: string }>;
+  start_local_media_export: (
+    jobId: string,
+    studyUid: string,
+    mode: 'disc' | 'usb' | 'folder',
+    target: string,
+    folderName: string,
+    volumeLabel: string,
+    originUrl: string,
+    token: string,
+    cookie: string,
+  ) => Promise<LocalMediaJobStatus>;
+  get_local_media_job: (jobId: string) => Promise<LocalMediaJobStatus>;
+}
+
+interface DirectoryPickerWindow extends Window {
+  pywebview?: { api?: Partial<DesktopMediaBridge> };
+  showDirectoryPicker?: (opts?: { mode?: 'read' | 'readwrite'; id?: string }) => Promise<FileSystemDirectoryHandle>;
+}
+
+export function getDesktopMediaBridge(): DesktopMediaBridge | null {
+  const api = (window as DirectoryPickerWindow).pywebview?.api;
+  if (
+    api &&
+    typeof api.list_local_media === 'function' &&
+    typeof api.start_local_media_export === 'function' &&
+    typeof api.get_local_media_job === 'function'
+  ) {
+    return api as DesktopMediaBridge;
+  }
+  return null;
+}
+
+export function supportsDirectUsbWrite(): boolean {
+  return typeof (window as DirectoryPickerWindow).showDirectoryPicker === 'function';
+}
+
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let val = bytes;
+  let idx = 0;
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024;
+    idx += 1;
+  }
+  return `${val >= 10 || idx === 0 ? val.toFixed(0) : val.toFixed(1)} ${units[idx]}`;
+}
+
+export function safeStudyFolderName(study: Study): string {
+  const base = (study.accession || study.patient_id || study.study_uid.slice(-12) || 'STUDY')
+    .replace(/[^A-Za-z0-9._-]+/g, '_')
+    .replace(/^[._-]+|[._-]+$/g, '')
+    .slice(0, 32);
+  const datePart = (study.study_date || '').replace(/[^0-9]/g, '').slice(0, 8);
+  return `PAXS_DICOM_${base || 'STUDY'}${datePart ? '_' + datePart : ''}`;
+}
+
+export function getDesktopAuthContext(): { originUrl: string; token: string; cookie: string } {
+  let token = '';
+  try {
+    token = window.localStorage.getItem('paxs_token') || '';
+  } catch {
+    token = '';
+  }
+  return {
+    originUrl: appBaseUrl(),
+    token,
+    cookie: document.cookie || '',
+  };
+}
+
+async function readErrorMessage(res: Response): Promise<string> {
+  const text = await res.text().catch(() => '');
+  if (text) {
+    try {
+      const parsed = JSON.parse(text) as { detail?: string; message?: string };
+      if (typeof parsed.detail === 'string' && parsed.detail.trim()) return parsed.detail.trim();
+      if (typeof parsed.message === 'string' && parsed.message.trim()) return parsed.message.trim();
+    } catch {
+      return text.slice(0, 200);
+    }
+  }
+  return `Export failed (HTTP ${res.status}).`;
+}
+
+export async function downloadStudyMedia(
+  studyUid: string,
+  format: 'iso' | 'zip',
+  study: Study,
+): Promise<{ filename: string; bytes: number }> {
+  const url = `${appBasePath()}/api/v1/export/dicomdir/client/${encodeURIComponent(studyUid)}/${format}`;
+  const res = await apiFetch(url);
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res));
+  }
+  const blob = await res.blob();
+  const filename = `${safeStudyFolderName(study)}.${format}`;
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 5000);
+  return { filename, bytes: blob.size };
+}
+
+interface StoredZipEntry {
+  name: string;
+  data: Uint8Array;
+}
+
+/**
+ * Parse a standard ZIP_STORED archive (as generated by client_media_service._write_zip)
+ * via its End-Of-Central-Directory & Central Directory headers.
+ */
+function parseStoredZip(buffer: ArrayBuffer): StoredZipEntry[] {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const len = bytes.length;
+  if (len < 22) throw new Error('Downloaded ZIP package is empty or corrupted.');
+
+  // Locate EOCD signature 0x06054b50 from the end (max 65KB comment).
+  const minOffset = Math.max(0, len - 65557);
+  let eocd = -1;
+  for (let pos = len - 22; pos >= minOffset; pos -= 1) {
+    if (view.getUint32(pos, true) === 0x06054b50) {
+      eocd = pos;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error('Could not read ZIP directory header.');
+
+  const totalEntries = view.getUint16(eocd + 10, true);
+  const cdOffset = view.getUint32(eocd + 16, true);
+  if (totalEntries === 0xffff || cdOffset === 0xffffffff) {
+    throw new Error('This study exceeds direct browser USB unpacking limits. Use Download USB ZIP instead.');
+  }
+
+  const decoder = new TextDecoder('utf-8');
+  const entries: StoredZipEntry[] = [];
+  let cursor = cdOffset;
+
+  for (let i = 0; i < totalEntries; i += 1) {
+    if (cursor + 46 > len || view.getUint32(cursor, true) !== 0x02014b50) {
+      throw new Error('ZIP central directory is malformed.');
+    }
+    const method = view.getUint16(cursor + 10, true);
+    const compSize = view.getUint32(cursor + 20, true);
+    const nameLen = view.getUint16(cursor + 28, true);
+    const extraLen = view.getUint16(cursor + 30, true);
+    const commentLen = view.getUint16(cursor + 32, true);
+    const localHeaderOffset = view.getUint32(cursor + 42, true);
+    const name = decoder.decode(bytes.subarray(cursor + 46, cursor + 46 + nameLen));
+    cursor += 46 + nameLen + extraLen + commentLen;
+
+    if (name.endsWith('/')) continue;
+    if (method !== 0) {
+      throw new Error('Unsupported ZIP compression method for direct browser write; use Download USB ZIP.');
+    }
+    if (localHeaderOffset + 30 > len || view.getUint32(localHeaderOffset, true) !== 0x04034b50) {
+      throw new Error('ZIP local file header is malformed.');
+    }
+    const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+    const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+    const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+    if (dataStart + compSize > len) {
+      throw new Error('ZIP entry extends past end of package.');
+    }
+    entries.push({ name, data: bytes.subarray(dataStart, dataStart + compSize) });
+  }
+  return entries;
+}
+
+export async function writeStudyDirectToUsbDirectory(
+  studyUid: string,
+  study: Study,
+  onStatus: (message: string) => void,
+): Promise<{ folderName: string; fileCount: number }> {
+  const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
+  if (!picker) {
+    throw new Error('Direct folder/USB writing is only available in Chrome or Edge on a secure context.');
+  }
+  const rootDir = await picker({ mode: 'readwrite', id: 'paxs-usb-export' });
+  onStatus('Downloading DICOMDIR package from archive…');
+
+  const url = `${appBasePath()}/api/v1/export/dicomdir/client/${encodeURIComponent(studyUid)}/zip`;
+  const res = await apiFetch(url);
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res));
+  }
+  const buffer = await res.arrayBuffer();
+  onStatus('Unpacking DICOMDIR file-set…');
+  const entries = parseStoredZip(buffer);
+
+  const folderName = safeStudyFolderName(study);
+  const targetFolder = await rootDir.getDirectoryHandle(folderName, { create: true });
+
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    const parts = entry.name.split('/').filter((p) => p && p !== '.' && p !== '..');
+    if (!parts.length) continue;
+    onStatus(`Writing file ${i + 1} of ${entries.length} to ${folderName}…`);
+    let dir = targetFolder;
+    for (let d = 0; d < parts.length - 1; d += 1) {
+      dir = await dir.getDirectoryHandle(parts[d], { create: true });
+    }
+    const fileHandle = await dir.getFileHandle(parts[parts.length - 1], { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(new Uint8Array(entry.data));
+    await writable.close();
+  }
+
+  return { folderName, fileCount: entries.length };
+}

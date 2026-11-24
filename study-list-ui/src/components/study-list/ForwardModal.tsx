@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Forward, Server } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { fetchNodes, forwardStudy, type DicomNode } from '@/lib/api';
+import { displayPatientName, fetchNodes, forwardStudy, type DicomNode } from '@/lib/api';
 
 interface ForwardModalProps {
   study: Study | null;
@@ -51,12 +51,22 @@ export function ForwardModal({ study, isOpen, onClose, onToast }: ForwardModalPr
     setLoading(true);
     setError(null);
     try {
-      await forwardStudy(study.study_uid, node);
-      // H01: the backend queues the job, so the wording must not claim delivery.
-      onToast(`Queued for forwarding to ${node}`);
+      const result = await forwardStudy(study.study_uid, node);
+      if (result.sent === 0) {
+        setError(result.reason || `C-STORE failed: ${result.failed} instance(s) could not be sent to ${node}.`);
+        return;
+      }
+      if (result.failed > 0) {
+        onToast(`C-STORE partially completed: ${result.sent} sent, ${result.failed} failed to ${node}.`);
+      } else if (result.ok) {
+        onToast(`C-STORE completed: ${result.sent} instance(s) sent to ${node}.`);
+      } else {
+        setError(result.reason || `C-STORE returned an unsuccessful status after sending ${result.sent} instance(s).`);
+        return;
+      }
       onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Forward failed');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'C-STORE forwarding failed. Please retry.');
     } finally {
       setLoading(false);
     }
@@ -64,37 +74,37 @@ export function ForwardModal({ study, isOpen, onClose, onToast }: ForwardModalPr
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && !loading && onClose()}>
-      <DialogContent className="bg-[#0c1424] border-slate-700 text-slate-200 sm:max-w-md">
+      <DialogContent className="bg-panel border-hairline-strong text-foreground sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="text-xl font-bold flex items-center gap-2">
-            <Forward className="w-5 h-5 text-teal-400" />
+            <Forward className="w-5 h-5 text-teal" />
             C-STORE Forward
           </DialogTitle>
         </DialogHeader>
 
         <div className="space-y-6 py-4">
           <div className="space-y-2">
-            <label className="text-sm text-slate-400">Study to Forward</label>
-            <div className="p-3 bg-[#070c18] rounded border border-slate-800 text-sm">
-              <div className="font-semibold text-slate-200">{study.patient_name.replace(/\^/g, ' ')}</div>
-              <div className="text-slate-500 font-mono text-xs mt-1">UID: {study.study_uid}</div>
+            <label className="text-sm text-muted">Study to Forward</label>
+            <div className="p-3 bg-ink rounded border border-hairline text-sm">
+              <div className="font-semibold text-foreground">{displayPatientName(study.patient_name)}</div>
+              <div className="text-faint font-mono text-xs mt-1">UID: {study.study_uid}</div>
             </div>
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm text-slate-400">Destination Node</label>
+            <label className="text-sm text-muted">Destination Node</label>
             {loadingNodes ? (
-              <div className="text-sm text-slate-500 p-3">Loading nodes…</div>
+              <div className="text-sm text-faint p-3">Loading nodes…</div>
             ) : nodes.length === 0 ? (
-              <div className="text-sm text-amber-300 p-3 bg-amber-950/20 border border-amber-900/40 rounded">
+              <div className="text-sm text-warn p-3 bg-warn/10 border border-warn/40 rounded">
                 No enabled DICOM nodes are configured on this server.
               </div>
             ) : (
               <Select value={node} onValueChange={setNode}>
-                <SelectTrigger className="bg-[#070c18] border-slate-700 text-white">
+                <SelectTrigger className="bg-ink border-hairline-strong text-white">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent className="bg-[#0c1424] border-slate-700 text-slate-200">
+                <SelectContent className="bg-panel border-hairline-strong text-foreground">
                   {nodes.map((n) => (
                     <SelectItem key={n.ae_title} value={n.ae_title}>
                       {n.ae_title} ({n.host}:{n.port})
@@ -106,17 +116,17 @@ export function ForwardModal({ study, isOpen, onClose, onToast }: ForwardModalPr
           </div>
 
           {error && (
-            <div className="p-3 bg-rose-950/40 border border-rose-800 rounded-lg text-sm text-rose-200">
+            <div className="p-3 bg-danger/12 border border-danger/40 rounded-lg text-sm text-danger">
               {error}
             </div>
           )}
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={loading} className="border-slate-700 text-slate-300 hover:bg-slate-800">
+          <Button variant="outline" onClick={onClose} disabled={loading} className="border-hairline-strong text-foreground/85 hover:bg-raised-2">
             Cancel
           </Button>
-          <Button onClick={handleForward} disabled={loading || !node} className="bg-teal-600 hover:bg-teal-500 text-white">
+          <Button onClick={handleForward} disabled={loading || !node} className="bg-teal hover:brightness-110 text-white">
             {loading ? (
               <span className="flex items-center gap-2">
                 <Server className="w-4 h-4 animate-spin" /> Sending...

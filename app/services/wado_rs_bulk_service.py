@@ -39,7 +39,7 @@ RAW_FRAME_CONTENT_TYPE = "application/octet-stream; transfer-syntax=1.2.840.1000
 #
 # Locked: the warm service decodes on a background thread while request handlers
 # decode on the event loop, and byte accounting is a read-modify-write.
-_FRAME_CACHE: OrderedDict[tuple[str, int], bytes] = OrderedDict()
+_FRAME_CACHE: OrderedDict[tuple[str, str, int], bytes] = OrderedDict()
 _FRAME_CACHE_LOCK = threading.Lock()
 
 
@@ -53,7 +53,10 @@ def frame_cache_budget_bytes() -> int:
     raw = getattr(settings, "DICOM_FRAME_CACHE_MB", 256)
     try:
         mb = int(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        # An unparseable override falls back to the documented 256 MB budget;
+        # 0 stays 0 below, so a deliberate disable is never masked.
+        log.debug("frame_cache_budget_invalid error_type=%s", type(exc).__name__)
         mb = 256
     return max(0, mb) * 1024 * 1024
 
@@ -63,7 +66,7 @@ def frame_cache_stats() -> dict[str, int]:
     return cache_stats.snapshot()["frame"]
 
 
-def _cache_get(key: tuple[str, int]) -> bytes | None:
+def _cache_get(key: tuple[str, str, int, int]) -> bytes | None:
     with _FRAME_CACHE_LOCK:
         val = _FRAME_CACHE.get(key)
         if val is None:
@@ -74,7 +77,7 @@ def _cache_get(key: tuple[str, int]) -> bytes | None:
         return val
 
 
-def _cache_put(key: tuple[str, int], value: bytes) -> None:
+def _cache_put(key: tuple[str, str, int, int], value: bytes) -> None:
     budget = frame_cache_budget_bytes()
     if budget <= 0:
         # Caching disabled (DICOM_FRAME_CACHE_MB=0): store nothing rather than
@@ -148,14 +151,14 @@ def extract_frame_bytes(
                 if 0 <= idx < len(all_frames):
                     frames.append((all_frames[idx], mime))
             return frames
-        except Exception as exc:  # noqa: BLE001 — fall back to pixel_array
+        except Exception as exc:  # noqa: BLE001 - boundary guard: fall back to pixel_array
             # Not necessarily an error, but the reason matters: this is the
             # first place a transfer syntax the encapsulation layer cannot walk
             # shows up, so record the syntax and the cause together.
             log.warning(
-                "Encapsulated frame extraction failed (%s: %s); "
-                "falling back to pixel_array unpacking | %s",
-                type(exc).__name__, exc, decode_context(ds),
+                "encapsulated_frame_extraction_failed error_type=%s; "
+                "fallback=pixel_array | %s",
+                type(exc).__name__, decode_context(ds),
             )
 
     # Case B: Uncompressed raw pixel array
@@ -182,14 +185,18 @@ def extract_frame_bytes(
                     frame_bytes = arr[idx].tobytes()
                     frames.append((frame_bytes, "application/octet-stream" + ts_param))
     except Exception as exc:
-        log.exception("Failed to extract pixel array frames | %s", decode_context(ds))
+        log.error(
+            "pixel_array_frame_decode_failed error_type=%s | %s",
+            type(exc).__name__, decode_context(ds),
+        )
         raise ValueError(f"Failed to extract frame bytes: {exc}") from exc
 
     return frames
 
 
 def decode_frames_to_raw(
-    ds: Dataset, frame_indices: list[int]
+    ds: Dataset, frame_indices: list[int], tenant_id: int | None = None,
+    content_version: int = 1,
 ) -> list[tuple[bytes, str]]:
     """Serve frames as raw uncompressed little-endian pixel bytes.
 
@@ -199,7 +206,12 @@ def decode_frames_to_raw(
     ``application/octet-stream`` with an explicit uncompressed transfer-syntax.
     Uncompressed instances pass straight through. On any decode failure we fall back
     to the raw codestream so the request never hard-fails.
+
+    ``content_version`` (C-04) is the instance's stored-object version; it is part
+    of every cache key, so frames decoded before a rewrite are never served after.
     """
+    from app.services import content_version as cv
+
     transfer_syntax = getattr(ds.file_meta, "TransferSyntaxUID", None)
     is_compressed = bool(
         transfer_syntax and getattr(transfer_syntax, "is_compressed", False)
@@ -211,6 +223,7 @@ def decode_frames_to_raw(
 
     number_of_frames = int(getattr(ds, "NumberOfFrames", 1) or 1)
     sop_uid = str(getattr(ds, "SOPInstanceUID", ""))
+    tenant_key = str(tenant_id) if tenant_id is not None else ""
 
     # Serve from the decoded-frame cache / Redis FIRST — the per-request Dataset is
     # fresh, so the expensive ``ds.pixel_array`` (a 3072x2560 J2K decode takes
@@ -222,12 +235,14 @@ def decode_frames_to_raw(
     result: list[tuple[bytes, str] | None] = []
     missing: list[int] = []
     for frame_idx in frame_indices:
-        cached = _cache_get((sop_uid, frame_idx))
+        cache_key = (tenant_key, sop_uid, content_version, frame_idx)
+        redis_key = cv.raw_frame_key(tenant_id, sop_uid, content_version, frame_idx)
+        cached = _cache_get(cache_key)
         if cached is None:
-            r_cached = cache_get(f"paxs:frame:{sop_uid}:{frame_idx}")
+            r_cached = cache_get(redis_key)
             if r_cached is not None:
                 cached = r_cached
-                _cache_put((sop_uid, frame_idx), cached)
+                _cache_put(cache_key, cached)
         if cached is not None:
             result.append((cached, RAW_FRAME_CONTENT_TYPE))
         else:
@@ -239,7 +254,7 @@ def decode_frames_to_raw(
 
     try:
         arr = ds.pixel_array
-    except Exception as exc:  # noqa: BLE001 - any decode failure falls back
+    except Exception as exc:  # noqa: BLE001 - boundary guard: any decode failure falls back
         # The primary codec-diagnosis site: an installed pylibjpeg plugin is
         # missing or cannot handle this syntax. The context names the syntax and
         # the pixel layout, so the gap is identifiable without opening the file.
@@ -261,8 +276,9 @@ def decode_frames_to_raw(
             raise ValueError(f"Frame {frame_idx} out of bounds")
 
         data = np.ascontiguousarray(frame_arr).tobytes()
-        _cache_put((sop_uid, frame_idx), data)
-        cache_set(f"paxs:frame:{sop_uid}:{frame_idx}", data, expire_seconds=3600)
+        _cache_put((tenant_key, sop_uid, content_version, frame_idx), data)
+        redis_key = cv.raw_frame_key(tenant_id, sop_uid, content_version, frame_idx)
+        cache_set(redis_key, data, expire_seconds=3600)
         # Patch the first still-empty slot for this frame.
         pos = frame_indices.index(frame_idx)
         result[pos] = (data, RAW_FRAME_CONTENT_TYPE)
@@ -290,11 +306,73 @@ def build_multipart_related_payload(
     return payload, media_type
 
 
+#: V-11: MPEG transfer syntaxes whose PixelData is one encapsulated video stream.
+VIDEO_TRANSFER_SYNTAX_MEDIA_TYPES = {
+    "1.2.840.10008.1.2.4.100": "video/mpeg",   # MPEG2 Main Profile / Main Level
+    "1.2.840.10008.1.2.4.101": "video/mpeg",   # MPEG2 Main Profile / High Level
+    "1.2.840.10008.1.2.4.102": "video/mp4",    # MPEG-4 AVC/H.264 High Profile
+    "1.2.840.10008.1.2.4.103": "video/mp4",    # MPEG-4 AVC/H.264 BD-compatible
+    "1.2.840.10008.1.2.4.104": "video/mp4",    # MPEG-4 AVC/H.264 2D video
+    "1.2.840.10008.1.2.4.105": "video/mp4",    # MPEG-4 AVC/H.264 3D video
+    "1.2.840.10008.1.2.4.106": "video/mp4",    # MPEG-4 AVC/H.264 Stereo
+    "1.2.840.10008.1.2.4.107": "video/mp4",    # HEVC/H.265 Main Profile
+    "1.2.840.10008.1.2.4.108": "video/mp4",    # HEVC/H.265 Main 10 Profile
+}
+
+#: V-11: encapsulated-document media types served under their own type. Only
+#: PDF: an archived CDA/XML or anything else served inline could execute script
+#: in the archive's origin, so every other type is an opaque download.
+SAFE_DOCUMENT_MEDIA_TYPES = {"application/pdf"}
+
+
+def encapsulated_document(ds: Dataset) -> tuple[bytes, str]:
+    """Bytes of (0042,0011) with a safe media type (V-11, PS3.3 C.24.2).
+
+    ``MIMETypeOfEncapsulatedDocument`` is data from the sender, never trusted
+    as-is: PDF is served as ``application/pdf`` so the viewer's PDF viewport can
+    show it; anything else is ``application/octet-stream``. A trailing pad byte
+    after ``%%EOF`` is harmless to PDF readers and is kept.
+    """
+    document = getattr(ds, "EncapsulatedDocument", None)
+    if document is None:
+        raise KeyError("Bulk data attribute 'EncapsulatedDocument' not found in dataset")
+    declared = str(getattr(ds, "MIMETypeOfEncapsulatedDocument", "") or "").strip().lower()
+    if not declared and bytes(document[:5]) == b"%PDF-":
+        declared = "application/pdf"
+    media_type = declared if declared in SAFE_DOCUMENT_MEDIA_TYPES else "application/octet-stream"
+    return bytes(document), media_type
+
+
+def video_stream(ds: Dataset) -> tuple[bytes, str] | None:
+    """The playable MPEG stream inside an MPEG-encapsulated PixelData, else None (V-11).
+
+    An MPEG object's PixelData is the whole video split across encapsulation
+    fragments (PS3.5 A.4.5-A.4.7); returning the raw element would hand the
+    browser item tags and the offset table instead of a video.
+    """
+    transfer_syntax = str(getattr(getattr(ds, "file_meta", None), "TransferSyntaxUID", "") or "")
+    media_type = VIDEO_TRANSFER_SYNTAX_MEDIA_TYPES.get(transfer_syntax)
+    pixel_data = getattr(ds, "PixelData", None)
+    if media_type is None or not pixel_data:
+        return None
+    from pydicom.encaps import generate_frames
+
+    # The whole video is one "frame" of fragments; generate_frames skips the
+    # Basic Offset Table item that generate_fragments would yield first.
+    return b"".join(generate_frames(pixel_data, number_of_frames=1)), media_type
+
+
 def extract_bulk_attribute(ds: Dataset, tag_path: str) -> tuple[bytes, str]:
     """Extract a specific DICOM bulk data attribute (e.g., PixelData, 7FE00010, OverlayData)."""
     tag_path_clean = tag_path.replace(",", "").replace(" ", "").upper()
 
+    if tag_path_clean in ("ENCAPSULATEDDOCUMENT", "00420011"):
+        return encapsulated_document(ds)
+
     if tag_path_clean in ("PIXELDATA", "7FE00010"):
+        video = video_stream(ds)
+        if video is not None:
+            return video
         val = getattr(ds, "PixelData", b"")
         return val, "application/octet-stream"
 

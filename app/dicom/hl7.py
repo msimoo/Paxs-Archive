@@ -1,5 +1,4 @@
-"""Minimal HL7 v2 listener (hospital EMR/HIS integration) — the Interop
-write-path (ADT + ORM).
+"""HL7 v2 MLLP listener for ADT/ORM feeds and tenant-scoped PIX/PDQ queries.
 
 Listens on a TCP port for:
   * ADT^A01/A04/A08/A31 (admit / register / update) — parses the PID
@@ -8,40 +7,127 @@ Listens on a TCP port for:
   * ORM^O01 (order entry / imaging order) — turns each order into a
     SCHEDULED Modality Worklist step (create on NW, update on XO, cancel on
     CA/OC/DC/CR), the RIS -> PACS write-path that closes the Interop loop.
+  * QBP^Q23/Q22 — delegates to ``hl7_qbp`` and returns a tenant-scoped RSP.
 
 This is deliberately a *small, dependency-free* HL7 parser: it handles the
 segments PAXS needs (MSH + PID + ORC + OBR, ZDS for radiology orders) and
 ignores the rest. It speaks plain HL7 (lower-layer framing is simply
 newline-delimited or MLLP).
 
-Threading: runs in its own daemon thread; uses the sync DB engine (same as the
-DICOM receiver / worker) because socket handlers are not async.
+Threading: runs in its own daemon thread; uses a bounded connection worker
+pool and the sync DB engine (same as the DICOM receiver / worker). Every socket
+has an explicit timeout and every MLLP frame has a hard byte limit.
 """
 
 from __future__ import annotations
 
+import contextlib
+import ipaddress
 import logging
 import secrets
 import socket
+import ssl
 import threading
-from datetime import date
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.db.models import Patient, ScheduledProcedureStep
 from app.db.session import SyncSessionLocal
-
+from app.dicom.hl7_qbp import handle_qbp_message
+from app.services import query_service
+from app.services.hl7_pix_pdq_service import hl7_sender_tenant
 from app.services.pix_pdq_service import (
-    handle_adt_feed_patient_registration,
     handle_adt_feed_patient_merge,
-    pix_query_by_identifier,
-    pix_query_by_demographics,
-    pdq_query_by_identifier,
-    pdq_query_by_demographics,
+    handle_adt_feed_patient_registration,
 )
 
 log = logging.getLogger("paxs.hl7")
+
+
+def is_hl7_source_allowed(peer_ip: str, allowed: str) -> bool:
+    """True when ``peer_ip`` may talk to the MLLP listener (H-06, fail closed).
+
+    ``allowed`` is the comma-separated ``HL7_ALLOWED_SOURCE_IPS`` value. Empty
+    admits loopback peers only. An unparseable peer address is refused.
+    """
+    try:
+        address = ipaddress.ip_address(str(peer_ip).split("%", 1)[0])
+    except ValueError:
+        # Fail closed (N-8), but observably: a socket peer that is not an IP
+        # address is never expected, so say so rather than refusing silently.
+        log.warning("hl7_peer_address_unparseable; connection refused")
+        return False
+    if getattr(address, "ipv4_mapped", None) is not None:
+        address = address.ipv4_mapped
+    entries = [part.strip() for part in (allowed or "").split(",") if part.strip()]
+    if not entries:
+        return address.is_loopback
+    for entry in entries:
+        try:
+            if address in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:  # validated at settings load; skip defensively
+            log.warning("hl7_allowlist_entry_invalid")
+    return False
+
+def _hl7_id(value: str) -> str:
+    """The namespace ID of an HD field (``APP^OID^ISO`` -> ``APP``), upper-cased."""
+    return str(value or "").split("^", 1)[0].strip().upper()
+
+
+def is_hl7_sender_allowed(application: str, facility: str, allowed: str) -> bool:
+    """True when MSH-3/MSH-4 name a sender in ``HL7_ALLOWED_SENDING_FACILITIES`` (H-06).
+
+    Empty ``allowed`` disables the check (the IP allowlist still applies).
+    Matching uses the HD namespace ID, case-insensitively, because HL7 senders
+    vary the universal-ID components and the case between interface engines.
+    """
+    entries = [part.strip() for part in (allowed or "").split(",") if part.strip()]
+    if not entries:
+        return True
+    sender = (_hl7_id(application), _hl7_id(facility))
+    if not all(sender):
+        return False
+    for entry in entries:
+        app, _sep, fac = entry.partition("|")
+        if (_hl7_id(app), _hl7_id(fac)) == sender:
+            return True
+    return False
+
+
+class HL7TlsConfigurationError(RuntimeError):
+    """HL7_TLS_ENABLED is set but no usable server certificate is configured."""
+
+
+def hl7_server_ssl_context() -> ssl.SSLContext | None:
+    """Server TLS context for MLLP (H-06), or None when TLS is off.
+
+    Raises :class:`HL7TlsConfigurationError` rather than ever falling back to
+    plaintext (N-8). ``HL7_TLS_CA`` turns on mutual TLS: the client must
+    present a certificate signed by that CA.
+    """
+    if not settings.HL7_TLS_ENABLED:
+        return None
+    cert, key = settings.HL7_TLS_CERT, settings.HL7_TLS_KEY
+    if not cert or not key:
+        raise HL7TlsConfigurationError("HL7_TLS_CERT and HL7_TLS_KEY are required")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        context.load_cert_chain(certfile=cert, keyfile=key)
+        if settings.HL7_TLS_CA:
+            context.load_verify_locations(cafile=settings.HL7_TLS_CA)
+            context.verify_mode = ssl.CERT_REQUIRED
+    except (OSError, ssl.SSLError) as exc:
+        raise HL7TlsConfigurationError(
+            f"HL7 TLS certificate could not be loaded ({type(exc).__name__})"
+        ) from exc
+    return context
+
 
 # Message types that carry patient registration/update information.
 _HANDLED_TRIGGERS = {"A01", "A04", "A08", "A31", "A40"}
@@ -109,7 +195,7 @@ def parse_adt_message(message: str) -> dict | None:
 
     msh = segments[0]
     if not msh.startswith("MSH|"):
-        log.debug("Ignoring non-HL7 payload (%.60r)", message[:60])
+        log.debug("hl7_non_hl7_payload_ignored")
         return None
 
     # MSH-9 is MessageType: e.g. ADT^A01^ADT_A01
@@ -118,7 +204,7 @@ def parse_adt_message(message: str) -> dict | None:
 
     pid = next((s for s in segments if s.startswith("PID|")), None)
     if pid is None:
-        log.debug("ADT %s message has no PID segment", trigger)
+        log.debug("hl7_adt_missing_pid")
         return None
 
     return {
@@ -246,8 +332,7 @@ def _create_default_step(session, patient: Patient, data: dict) -> None:
         status="SCHEDULED",
     )
     session.add(step)
-    log.info("HL7 scheduled default worklist step %s for %s",
-             step.sps_id, patient.patient_id)
+    log.info("hl7_worklist_default_scheduled")
 
 
 def _ensure_patient(session, data: dict) -> Patient | None:
@@ -255,32 +340,34 @@ def _ensure_patient(session, data: dict) -> Patient | None:
     needed. Race-safe: if a C-STORE/STOW for the same brand-new MRN wins the
     INSERT first (and we lose on the unique patient_id), we adopt the winner
     instead of crashing the listener thread and dropping the message."""
-    # C10: the MRN is no longer globally unique, so this lookup is explicitly
-    # limited to the legacy (unscoped) bucket — it can never adopt a patient
-    # that belongs to a tenant.
-    #
-    # KNOWN GAP: the HL7 listener has no AE->tenant mapping (unlike the DICOM
-    # receiver), so ADT/ORM registrations can only land in the legacy bucket.
-    # A deployment that ingests DICOM from tenant-mapped AE titles must give the
-    # listener the same mapping, otherwise HL7-registered patients will not
-    # correlate with tenant-scoped DICOM patients.
+    tenant_id = data.get("tenant_id")
+    patient_scope = query_service.tenant_predicate(
+        Patient.tenant_id, tenant_id, False
+    )
     patient = (
         session.query(Patient)
-        .filter(Patient.patient_id == data["patient_id"], Patient.tenant_id.is_(None))
+        .filter(
+            Patient.patient_id == data["patient_id"],
+            patient_scope,
+        )
         .one_or_none()
     )
     if patient is None:
         try:
-            patient = Patient(patient_id=data["patient_id"], tenant_id=None)
+            patient = Patient(patient_id=data["patient_id"], tenant_id=tenant_id)
             session.add(patient)
-            log.info("HL7 new patient %s (%s)", data["patient_id"], data.get("name"))
+            log.info("hl7_patient_create")
             session.flush()
-        except IntegrityError:
+        except IntegrityError as exc:
+            log.warning("hl7_patient_insert_conflict error_type=%s", type(exc).__name__)
             # The modality's insert for this MRN committed first — adopt it.
             session.rollback()
             patient = (
                 session.query(Patient)
-                .filter(Patient.patient_id == data["patient_id"], Patient.tenant_id.is_(None))
+                .filter(
+                    Patient.patient_id == data["patient_id"],
+                    patient_scope,
+                )
                 .one_or_none()
             )
     if patient is not None:
@@ -352,11 +439,9 @@ def _upsert_order_step(session, patient: Patient, data: dict) -> None:
             status="SCHEDULED",
         )
         session.add(step)
-        log.info("HL7 ORM %s scheduled worklist step %s for %s",
-                 data.get("control"), step.sps_id, patient.patient_id)
+        log.info("hl7_orm_worklist_scheduled")
     else:
-        log.info("HL7 ORM %s updated worklist step %s for %s",
-                 data.get("control"), step.sps_id, patient.patient_id)
+        log.info("hl7_orm_worklist_updated")
 
     filler = (data.get("filler_order") or "").strip()
     if filler:
@@ -400,8 +485,7 @@ def _cancel_order_steps(session, patient: Patient, data: dict) -> None:
         )
         if matches:
             step.status = "CANCELED"
-            log.info("HL7 ORM %s canceled worklist step %s for %s",
-                     data.get("control"), step.sps_id, patient.patient_id)
+            log.info("hl7_orm_worklist_canceled")
 
 
 def _upsert_order(data: dict) -> None:
@@ -427,7 +511,7 @@ def _upsert_order(data: dict) -> None:
         elif control in _ORDER_CREATE:
             _upsert_order_step(session, patient, data)
         else:
-            log.debug("HL7 ORM: unhandled order control %r — ignoring", control)
+            log.debug("hl7_orm_unhandled_control_ignored")
             return
         session.commit()
 
@@ -445,326 +529,311 @@ def _apply_demographics(patient: Patient, data: dict) -> None:
         patient.patient_phone = data["phone"]
 
 
-def _handle_message(raw: bytes) -> None:
+def _msh_field(value: str) -> str:
+    """Keep inbound MSH values safe for reuse in a response segment."""
+    return "".join(char for char in value if char not in "|\r\n\x0b\x1c")[:128]
+
+
+def _build_ack(text: str, ack_code: str, error_text: str | None = None) -> bytes:
+    """Build a standard MLLP-framed HL7 ACK for an inbound message."""
+    segments = [segment for segment in text.replace("\r", "\n").split("\n") if segment]
+    fields = segments[0].split("|") if segments and segments[0].startswith("MSH|") else []
+    control_id = _msh_field(fields[9]) if len(fields) > 9 else ""
+    receiving_app = _msh_field(fields[2]) if len(fields) > 2 else ""
+    receiving_facility = _msh_field(fields[3]) if len(fields) > 3 else ""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S+0000")
+    response_id = secrets.token_hex(8).upper()
+    msh = (
+        f"MSH|^~\\&|PAXS|PAXS|{receiving_app}|{receiving_facility}|"
+        f"{timestamp}||ACK|{response_id}|P|2.5"
+    )
+    msa = f"MSA|{ack_code}|{control_id}"
+    ack_segments = [msh, msa]
+    if error_text:
+        safe_error = _msh_field(error_text)
+        ack_segments.append(f"ERR|||{safe_error}")
+    payload = ("\r".join(ack_segments) + "\r").encode("utf-8")
+    return b"\x0b" + payload + b"\x1c\x0d"
+
+
+def _resolve_ingest_tenant(text: str, source_ip: str | None) -> tuple[int | None, bool]:
+    """Map exact TCP peer/MSH identity; unmapped senders retain the NULL bucket."""
+    msh = text.replace("\n", "\r").split("\r", 1)[0].split("|")
+    if not source_ip or len(msh) <= 3:
+        return None, True
+    sender_key = f"{source_ip}|{msh[2]}|{msh[3]}"
+    if sender_key not in settings.HL7_SENDER_TENANT_MAP:
+        return None, True
     try:
-        text = raw.decode("utf-8", errors="replace").strip("\x0b\x1c\x0d\r\n ")
-    except Exception:
-        return
-    if not text:
-        return
-    segments = [s for s in text.replace("\r", "\n").split("\n") if s.strip()]
+        tenant_id = hl7_sender_tenant(sender_key, settings.HL7_SENDER_TENANT_MAP)
+    except Exception as exc:  # noqa: BLE001 - boundary guard: fail closed on mapping/database faults
+        log.error("hl7_ingest_tenant_resolution_failed error_type=%s", type(exc).__name__)
+        return None, False
+    if tenant_id is None:
+        log.error("hl7_ingest_tenant_mapping_invalid")
+        return None, False
+    return tenant_id, True
+
+
+def _handle_message(raw: bytes, source_ip: str | None = None) -> bytes:
+    """Process one HL7 payload and return its MLLP ACK, NAK or QBP RSP frame."""
+    text = raw.decode("utf-8", errors="replace").strip("\x0b\x1c\x0d\r\n ")
+    segments = [segment for segment in text.replace("\r", "\n").split("\n") if segment.strip()]
     if not segments or not segments[0].startswith("MSH|"):
-        return
-    msg_type = (segments[0].split("|")[8] if len(segments[0].split("|")) > 8 else "") or ""
-    if msg_type.startswith("ORM^O01"):
-        data = parse_orm_message(text)
-        if data:
+        log.warning("hl7_message_rejected reason=missing_msh")
+        return _build_ack(text, "AR", "MSH segment missing or malformed")
+
+    msh_fields = segments[0].split("|")
+    if len(msh_fields) <= 9 or not msh_fields[9].strip():
+        log.warning("hl7_message_rejected reason=missing_control_id")
+        return _build_ack(text, "AR", "Message control ID missing")
+
+    # H-06: a permitted host must not impersonate another feed. Checked before
+    # any message-type dispatch, so a refused sender never reaches the DB.
+    if not is_hl7_sender_allowed(msh_fields[2], msh_fields[3],
+                                 settings.HL7_ALLOWED_SENDING_FACILITIES):
+        # MSH-3/MSH-4 are interface identifiers, not patient data (N-2).
+        log.warning("hl7_message_rejected reason=sender_not_allowed app=%s facility=%s",
+                    _hl7_id(msh_fields[2]), _hl7_id(msh_fields[3]))
+        return _build_ack(text, "AR", "Sending application/facility not authorized")
+
+    msg_type = msh_fields[8] if len(msh_fields) > 8 else ""
+    if msg_type.startswith(("QBP^Q23", "QBP^Q22")) and not any(
+        segment.startswith("QPD|") for segment in segments
+    ):
+        return _build_ack(text, "AE", "Query message is missing QPD")
+
+    if msg_type.startswith("QBP^Q23"):
+        return handle_qbp_message(text, source_ip)
+    if msg_type.startswith("QBP^Q22"):
+        return handle_qbp_message(text, source_ip)
+    if not msg_type.startswith(("ADT^", "ORM^O01")):
+        return _build_ack(text, "AR", "Unsupported message type")
+
+    tenant_id, scope_valid = _resolve_ingest_tenant(text, source_ip)
+    if not scope_valid:
+        return _build_ack(text, "AE", "Sender tenant scope could not be verified")
+
+    try:
+        if msg_type.startswith("ORM^O01"):
+            data = parse_orm_message(text)
+            if data is None:
+                return _build_ack(text, "AE", "ORM message could not be parsed")
+            data["tenant_id"] = tenant_id
             _upsert_order(data)
-        return
-    data = parse_adt_message(text)
-    if data and data["trigger"] in ("A04", "A08", "A40"):  # PIX Patient Identity Feed
-        if data["trigger"] == "A40":
-            handle_adt_feed_patient_merge(data)
+            return _build_ack(text, "AA")
+
+        if msg_type.startswith("ADT^"):
+            data = parse_adt_message(text)
+            if data is None:
+                return _build_ack(text, "AE", "ADT message could not be parsed")
         else:
-            handle_adt_feed_patient_registration(data)
-        return
-    if msg_type.startswith("QBP^Q23"):  # PIX Query
-        _handle_pix_query(text)
-        return
-    if msg_type.startswith("QBP^Q22"):  # PDQ Query
-        _handle_pdq_query(text)
-        return
-    if data and data["trigger"] in _HANDLED_TRIGGERS:
-        _upsert_patient(data)
+            data = parse_adt_message(text)
+        if data is not None:
+            data["tenant_id"] = tenant_id
+
+        if data and data["trigger"] in ("A04", "A08", "A40"):
+            if data["trigger"] == "A40":
+                # The merge service applies the same mapped or legacy scope.
+                handle_adt_feed_patient_merge(data)
+            else:
+                handle_adt_feed_patient_registration(data)
+            return _build_ack(text, "AA")
+        if data and data["trigger"] in _HANDLED_TRIGGERS:
+            _upsert_patient(data)
+        elif data:
+            return _build_ack(text, "AR", "Unsupported ADT trigger")
+        else:
+            return _build_ack(text, "AR", "Unsupported message type")
+        return _build_ack(text, "AA")
+    except Exception as exc:
+        log.error("hl7_message_processing_failed error_type=%s", type(exc).__name__)
+        return _build_ack(text, "AE", "Message processing failed")
 
 
-# --------------------------------------------------------------------------- #
-# PIX Query (QBP^Q23) + Response (RSP^K23)
-# --------------------------------------------------------------------------- #
-def _parse_qpd_segment(seg: str) -> dict:
-    """Parse QPD (Query Parameter Definition) segment.
-    
-    QPD-1 = Query Tag (e.g., "QRY_123")
-    QPD-2 = Query/Response Profile (e.g., "IHE PIX Query", "IHE PDQ Query")
-    QPD-3+ = query parameters (varies by profile)
+def _send_ack(conn, ack: bytes) -> bool:
+    """Write an MLLP ACK frame; return False when the peer cannot be written to.
+
+    A reply failure is never fatal - the inbound message has already been
+    processed - so transport problems are logged and reported, not raised.
     """
-    parts = seg.split("|")
-    if len(parts) < 3:
-        return {}
-    return {
-        "query_tag": parts[1] if len(parts) > 1 else "",
-        "profile": parts[2] if len(parts) > 2 else "",
-        "params": parts[3:] if len(parts) > 3 else [],
-    }
-
-
-def _extract_pix_query_params(qpd: dict) -> dict:
-    """Extract PIX query parameters from QPD segment.
-    
-    IHE PIX Query (QBP^Q23) QPD fields:
-      QPD-3: Patient ID List (PID-3) - ID^AA^ID_Type
-      QPD-4: Patient Name (optional)
-      QPD-5: Mother's Maiden Name (optional)
-      QPD-6: DOB (optional)
-      QPD-7: Sex (optional)
-      QPD-8: Address (optional)
-      QPD-9: Phone (optional)
-    """
-    params = qpd.get("params", [])
-    result = {"query_tag": qpd.get("query_tag", "")}
-    
-    # QPD-3: Patient ID List (can be multiple, pipe-separated or repeatable)
-    if len(params) >= 1 and params[0]:
-        # Format: ID^AA^ID_Type or just ID^AA
-        id_parts = params[0].split("^")
-        result["patient_id"] = id_parts[0] if len(id_parts) > 0 else None
-        result["issuer"] = id_parts[1] if len(id_parts) > 1 else None
-        result["id_type"] = id_parts[2] if len(id_parts) > 2 else "MR"
-    
-    # QPD-4: Patient Name
-    if len(params) >= 2 and params[1]:
-        result["patient_name"] = params[1].replace("^", " ")
-    
-    # QPD-6: DOB
-    if len(params) >= 4 and params[3]:
-        result["birth_date"] = params[3]
-    
-    # QPD-7: Sex
-    if len(params) >= 5 and params[4]:
-        result["sex"] = params[4]
-    
-    # QPD-9: Phone
-    if len(params) >= 7 and params[6]:
-        result["phone"] = params[6]
-    
-    return result
-
-
-def _extract_pdq_query_params(qpd: dict) -> dict:
-    """Extract PDQ query parameters from QPD segment.
-    
-    IHE PDQ Query (QBP^Q22) QPD fields:
-      QPD-3: Patient ID List (optional)
-      QPD-4: Patient Name (optional)
-      QPD-5: Mother's Maiden Name (optional)
-      QPD-6: DOB (optional)
-      QPD-7: Sex (optional)
-      QPD-8: Address (optional)
-      QPD-9: Phone (optional)
-      QPD-10: SSN (optional)
-      QPD-11: Driver's License (optional)
-      QPD-12: Assigning Authority (optional) - filter by AA
-    """
-    params = qpd.get("params", [])
-    result = {"query_tag": qpd.get("query_tag", "")}
-    
-    # QPD-3: Patient ID List
-    if len(params) >= 1 and params[0]:
-        id_parts = params[0].split("^")
-        result["patient_id"] = id_parts[0] if len(id_parts) > 0 else None
-        result["issuer"] = id_parts[1] if len(id_parts) > 1 else None
-    
-    # QPD-4: Patient Name
-    if len(params) >= 2 and params[1]:
-        result["patient_name"] = params[1].replace("^", " ")
-    
-    # QPD-6: DOB
-    if len(params) >= 4 and params[3]:
-        result["birth_date"] = params[3]
-    
-    # QPD-7: Sex
-    if len(params) >= 5 and params[4]:
-        result["sex"] = params[4]
-    
-    # QPD-9: Phone
-    if len(params) >= 7 and params[6]:
-        result["phone"] = params[6]
-    
-    # QPD-12: Assigning Authority filter
-    if len(params) >= 10 and params[9]:
-        result["assigning_authority_oid"] = params[9]
-    
-    return result
-
-
-def _handle_pix_query(text: str) -> None:
-    """Process a PIX Query (QBP^Q23) and send RSP^K23 response."""
-    segments = [s for s in text.replace("\r", "\n").split("\n") if s.strip()]
-    qpd = next((s for s in segments if s.startswith("QPD|")), None)
-    if not qpd:
-        log.warning("PIX Query missing QPD segment")
-        return
-    
-    qpd_data = _parse_qpd_segment(qpd)
-    params = _extract_pix_query_params(qpd_data)
-    query_tag = params.get("query_tag", "")
-    
-    # Execute query
-    results = []
-    if params.get("patient_id") and params.get("issuer"):
-        results = pix_query_by_identifier(params["issuer"], params["patient_id"])
-    elif params.get("patient_name") or params.get("birth_date") or params.get("sex"):
-        results = pix_query_by_demographics(
-            patient_name=params.get("patient_name"),
-            birth_date=params.get("birth_date"),
-            sex=params.get("sex"),
-        )
-    
-    # Build and send response
-    response = _build_pix_response(query_tag, results)
-    log.info("PIX Query %s: %d result(s)", query_tag, len(results))
-    # TODO: Send response back over MLLP connection
-    # For now, log the response
-    log.debug("PIX Response:\n%s", response)
-
-
-def _handle_pdq_query(text: str) -> None:
-    """Process a PDQ Query (QBP^Q22) and send RSP^K22 response."""
-    segments = [s for s in text.replace("\r", "\n").split("\n") if s.strip()]
-    qpd = next((s for s in segments if s.startswith("QPD|")), None)
-    if not qpd:
-        log.warning("PDQ Query missing QPD segment")
-        return
-    
-    qpd_data = _parse_qpd_segment(qpd)
-    params = _extract_pdq_query_params(qpd_data)
-    query_tag = params.get("query_tag", "")
-    
-    # Execute query
-    results = []
-    if params.get("patient_id") and params.get("issuer"):
-        results = pdq_query_by_identifier(params["issuer"], params["patient_id"])
-    elif params.get("patient_name") or params.get("birth_date") or params.get("sex"):
-        results = pdq_query_by_demographics(
-            patient_name=params.get("patient_name"),
-            birth_date=params.get("birth_date"),
-            sex=params.get("sex"),
-            assigning_authority_oid=params.get("assigning_authority_oid"),
-        )
-    
-    # Build and send response
-    response = _build_pdq_response(query_tag, results)
-    log.info("PDQ Query %s: %d result(s)", query_tag, len(results))
-    log.debug("PDQ Response:\n%s", response)
-
-
-def _build_pix_response(query_tag: str, results: list) -> str:
-    """Build HL7 RSP^K23 (PIX Query Response) message."""
-    from datetime import datetime
-    
-    msh = f"MSH|^~\\&|PAXS^PIX^|PAXS|QRY|{datetime.now().strftime('%Y%m%d%H%M%S')}||RSP^K23|{query_tag}|P|2.5"
-    msa = f"MSA|AA|{query_tag}"
-    qak = f"QAK|{query_tag}|OK|IHE PIX Query"
-    
-    segments = [msh, msa, qak]
-    
-    for result in results:
-        # PID segment with the identity from each AA
-        pid_parts = [
-            "PID",
-            "1",  # PID-1: Set ID
-            f"{result.identifier}^^^^{result.assigning_authority_oid}^PI",  # PID-3
-            "",  # PID-4: Patient ID List (deprecated)
-            "",  # PID-5: Patient Name (will add if available)
-        ]
-        segments.append("|".join(pid_parts))
-    
-    return "\r".join(segments) + "\r"
-
-
-def _build_pdq_response(query_tag: str, results: list) -> str:
-    """Build HL7 RSP^K22 (PDQ Query Response) message."""
-    from datetime import datetime
-    
-    msh = f"MSH|^~\\&|PAXS^PDQ^|PAXS|PAXS|QRY|{datetime.now().strftime('%Y%m%d%H%M%S')}||RSP^K22|{query_tag}|P|2.5"
-    msa = f"MSA|AA|{query_tag}"
-    qak = f"QAK|{query_tag}|OK|IHE PDQ Query"
-    
-    segments = [msh, msa, qak]
-    
-    for demo in results:
-        # PID segment with all identities
-        for ident in demo.identities:
-            pid_parts = [
-                "PID",
-                "1",
-                f"{ident.identifier}^^^^{ident.assigning_authority_oid}^PI",
-                "",
-                demo.patient_name or "",
-                "",
-                demo.birth_date or "",
-                demo.sex or "",
-            ]
-            segments.append("|".join(pid_parts))
-    
-    return "\r".join(segments) + "\r"
+    try:
+        conn.sendall(ack)
+        return True
+    except OSError as exc:
+        log.debug("hl7_ack_send_failed error_type=%s", type(exc).__name__)
+        return False
+    except Exception as exc:  # noqa: BLE001 - boundary guard: isolate one client
+        log.warning("hl7_ack_send_unsupported error_type=%s", type(exc).__name__)
+        return False
 
 
 class HL7Listener(threading.Thread):
+    """Bounded MLLP listener with strict framing and socket limits."""
+
     def __init__(self, host: str | None = None, port: int | None = None):
         super().__init__(name="paxs-hl7-listener", daemon=True)
         self.host = host or settings.HL7_HOST
         self.port = port or settings.HL7_PORT
-        self._stop = threading.Event()
+        self.max_connections = max(1, int(getattr(settings, "HL7_MAX_CONCURRENT_CONNECTIONS", 20)))
+        self.max_message_bytes = max(1, int(getattr(settings, "HL7_MAX_MESSAGE_BYTES", 1024 * 1024)))
+        self.socket_timeout = max(1.0, float(getattr(settings, "HL7_SOCKET_TIMEOUT_SECONDS", 15.0)))
+        # Keep Thread._stop callable so listener.join() can finish shutdown.
+        self._stop_event = threading.Event()
         self._sock: socket.socket | None = None
+        self._pool = ThreadPoolExecutor(
+            max_workers=self.max_connections,
+            thread_name_prefix="paxs-hl7-client",
+        )
+        self._slots = threading.BoundedSemaphore(self.max_connections)
+        self._reject_log_lock = threading.Lock()
+        self._last_reject_log = 0.0
+        self._ssl_context: ssl.SSLContext | None = None
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         if self._sock:
             try:
                 self._sock.close()
-            except OSError:
-                pass
+            except OSError as exc:
+                log.error("hl7_listener_stop_close_failed error_type=%s", type(exc).__name__)
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+    def _reject_connection(self, conn: socket.socket) -> None:
+        """Close an over-capacity socket and rate-limit the warning."""
+        with contextlib.suppress(OSError):
+            conn.close()
+        now = time.monotonic()
+        with self._reject_log_lock:
+            if now - self._last_reject_log >= 1.0:
+                self._last_reject_log = now
+                log.warning("hl7_connection_limit_reached")
+
+    def _release_slot(self, _future) -> None:
+        self._slots.release()
 
     def run(self) -> None:
-        log.info("HL7 ADT listener starting on %s:%s", self.host, self.port)
+        """Accept connections until shutdown using a bounded worker pool.
+
+        ``socket.timeout`` is the expected idle-poll sentinel: the listening
+        socket carries a 1s timeout so shutdown is noticed without blocking,
+        and the resulting timeout is normal operation, not an I/O failure.
+        """
+        log.info("hl7_listener_starting")
+        try:
+            # H-06: resolved before binding, so a TLS misconfiguration leaves
+            # the port closed instead of silently serving plaintext.
+            self._ssl_context = hl7_server_ssl_context()
+        except HL7TlsConfigurationError as exc:
+            # The cause type only (no raw exception text in logs); the operator
+            # checks HL7_TLS_CERT / HL7_TLS_KEY / HL7_TLS_CA.
+            cause = type(exc.__cause__).__name__ if exc.__cause__ else "missing_cert_or_key"
+            log.error("hl7_listener_tls_misconfigured cause=%s; listener not started "
+                      "(check HL7_TLS_CERT / HL7_TLS_KEY / HL7_TLS_CA)", cause)
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            return
         try:
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._sock.bind((self.host, self.port))
-            self._sock.listen(5)
+            self._sock.listen(self.max_connections)
             self._sock.settimeout(1.0)
         except OSError as exc:
-            log.error("HL7 listener failed to bind %s:%s — %s", self.host, self.port, exc)
+            log.error("hl7_listener_bind_failed error_type=%s", type(exc).__name__)
+            self._pool.shutdown(wait=False, cancel_futures=True)
             return
 
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 conn, addr = self._sock.accept()
-            except socket.timeout:
+            except socket.timeout:  # expected idle-poll sentinel — not an I/O failure
                 continue
-            except OSError:
+            except OSError as exc:
+                if self._stop_event.is_set():
+                    # Shutdown closed the listening socket under us: the loop is
+                    # ending, so this is expected rather than a failure.
+                    log.debug("hl7_listener_accept_stopped error_type=%s",
+                              type(exc).__name__)
+                else:
+                    log.error("hl7_listener_accept_failed error_type=%s",
+                              type(exc).__name__)
                 break
-            # One thread per connection so a slow/idle EMR never stalls the
-            # accept loop for every other sender.
-            threading.Thread(
-                target=self._handle_connection,
-                args=(conn, addr),
-                daemon=True,
-            ).start()
+            # H-06: an unlisted peer is dropped before any byte is read.
+            if not is_hl7_source_allowed(str(addr[0]), settings.HL7_ALLOWED_SOURCE_IPS):
+                log.warning("hl7_connection_refused_source peer_ip=%s", addr[0])
+                self._reject_connection(conn)
+                continue
+            if not self._slots.acquire(blocking=False):
+                self._reject_connection(conn)
+                continue
+            try:
+                future = self._pool.submit(self._handle_connection, conn, addr)
+                future.add_done_callback(self._release_slot)
+            except RuntimeError as exc:  # the pool was shut down mid-accept
+                # Shutdown raced an accepted connection: give the slot back and
+                # drop the peer cleanly rather than leaking a worker slot.
+                log.warning("hl7_pool_unavailable_on_accept error_type=%s",
+                            type(exc).__name__)
+                self._slots.release()
+                self._reject_connection(conn)
 
-        log.info("HL7 ADT listener stopped")
+        log.info("hl7_listener_stopped")
 
     def _handle_connection(self, conn: socket.socket, addr) -> None:
-        conn.settimeout(5.0)
-        buffer = b""
+        buffer = bytearray()
         try:
-            while not self._stop.is_set():
+            conn.settimeout(self.socket_timeout)
+            if self._ssl_context is not None:
+                # H-06: the handshake runs on this worker thread, bounded by the
+                # socket timeout, so a stalled client cannot block accept().
+                try:
+                    conn = self._ssl_context.wrap_socket(conn, server_side=True)
+                except (ssl.SSLError, OSError) as exc:
+                    log.warning("hl7_tls_handshake_failed error_type=%s", type(exc).__name__)
+                    return
+            while not self._stop_event.is_set():
                 chunk = conn.recv(4096)
                 if not chunk:
                     break
-                buffer += chunk
-                # MLLP framing: <0x0B> message <0x1C><0x0D>
-                while b"\x1c\x0d" in buffer:
-                    msg, _, buffer = buffer.partition(b"\x1c\x0d")
-                    _handle_message(msg)
-        except OSError:
-            pass
+                buffer.extend(chunk)
+                # Process complete MLLP frames before enforcing the cap on the
+                # still-open frame. This permits multiple bounded messages per
+                # connection without retaining earlier payloads.
+                while True:
+                    trailer_at = buffer.find(b"\x1c\x0d")
+                    if trailer_at < 0:
+                        break
+                    frame = bytes(buffer[:trailer_at])
+                    del buffer[:trailer_at + 2]
+                    payload = frame[1:] if frame.startswith(b"\x0b") else frame
+                    if len(payload) > self.max_message_bytes:
+                        return
+                    ack: bytes | None
+                    try:
+                        ack = _handle_message(frame, source_ip=str(addr[0]))
+                    except Exception as exc:  # noqa: BLE001 - boundary guard: isolate one client
+                        # Never `log.exception` here: the traceback can carry the
+                        # message body, which is patient data (N-2).
+                        log.warning(
+                            "hl7_ack_generation_failed error_type=%s", type(exc).__name__
+                        )
+                        ack = _build_ack("", "AR", "Message could not be processed")
+                    # The message has been processed; replying is best effort so a
+                    # read-only or already-closed peer never aborts the read loop.
+                    if ack:
+                        if not _send_ack(conn, ack):
+                            return
+                if len(buffer) > self.max_message_bytes:
+                    log.warning("hl7_message_size_limit_reached")
+                    return
+        except (OSError, TimeoutError):
+            log.debug("hl7_connection_closed")
         finally:
+            buffer.clear()
             try:
                 conn.close()
-            except OSError:
-                pass
+            except OSError as exc:
+                log.error("hl7_connection_close_failed error_type=%s", type(exc).__name__)
 
 
 _listener: HL7Listener | None = None

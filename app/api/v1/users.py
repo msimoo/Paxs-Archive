@@ -9,23 +9,27 @@ DELETE /api/v1/users/{user_id}          -> remove an account
 Safety guards: an admin can never delete or disable *themselves*, and the
 last active ADMIN cannot be deleted, disabled or demoted (the archive would
 become unmanageable).
+
+Q-3 / FA-2: every statement lives in :mod:`app.services.user_service`; this
+module keeps the HTTP shape, the guards and the audit calls. Accounts are not
+tenant-owned rows, so the isolation boundary here is ``require_admin`` rather
+than a tenant predicate.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.auth import ROLES, write_audit
 from app.api.v1.deps import require_admin
 from app.core.security import hash_password
-from app.db.models import AuthAuditLog, Session, User
+from app.db.models import User
 from app.db.session import get_db
+from app.services import user_service
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
@@ -43,23 +47,19 @@ def _user_dict(user: User) -> dict:
 
 
 async def _get_user(db: AsyncSession, user_id: int) -> User:
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    user = await user_service.get_user(db, user_id)
     if user is None:
         raise HTTPException(404, "User not found")
     return user
 
 
-async def _active_admin_count(db: AsyncSession) -> int:
-    # FOR UPDATE serializes concurrent admin mutations (two admins disabling
-    # each other at once) so the archive can never be left with zero admins.
-    # SQLite ignores the clause; MySQL honors it.
-    return (
-        await db.execute(
-            select(func.count(User.id)).with_for_update().where(
-                User.role == "ADMIN", User.is_active.is_(True)
-            )
-        )
-    ).scalar_one()
+def _parse_details(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return {"raw": raw}
 
 
 class CreateUserBody(BaseModel):
@@ -84,10 +84,7 @@ class ResetPasswordBody(BaseModel):
 
 @router.get("")
 async def list_users(_admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    users = (
-        await db.execute(select(User).order_by(User.created_at.asc(), User.id.asc()))
-    ).scalars().all()
-    return [_user_dict(u) for u in users]
+    return [_user_dict(u) for u in await user_service.list_users(db)]
 
 
 @router.post("", status_code=201)
@@ -95,23 +92,12 @@ async def create_user(body: CreateUserBody, _admin: User = Depends(require_admin
                       db: AsyncSession = Depends(get_db)):
     if body.role not in ROLES:
         raise HTTPException(422, f"Invalid role, use one of {ROLES}")
-    existing = (
-        await db.execute(select(User).where(User.username == body.username))
-    ).scalar_one_or_none()
-    if existing is not None:
+    if await user_service.username_exists(db, body.username):
         raise HTTPException(409, "Username already taken")
-    user = User(
-        username=body.username,
-        password_hash=hash_password(body.password),
-        full_name=body.full_name,
-        role=body.role,
-        tenant_id=body.tenant_id,
+    user = await user_service.create_user(
+        db, username=body.username, password=body.password,
+        full_name=body.full_name, role=body.role, tenant_id=body.tenant_id,
     )
-    db.add(user)
-    await db.flush()
-    # MySQL has no RETURNING: server-generated columns (id, created_at) are
-    # expired by the flush and must be reloaded inside the async context.
-    await db.refresh(user)
     return _user_dict(user)
 
 
@@ -124,15 +110,6 @@ async def list_sessions(_admin: User = Depends(require_admin),
     activity first, joined with the owning account so the admin sees who is
     signed in from which device / IP.
     """
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    rows = (
-        await db.execute(
-            select(Session, User)
-            .join(User, User.id == Session.user_id)
-            .where(Session.is_revoked.is_(False), Session.expires_at > now)
-            .order_by(Session.last_used_at.desc())
-        )
-    ).all()
     return [
         {
             "id": s.id,
@@ -146,7 +123,7 @@ async def list_sessions(_admin: User = Depends(require_admin),
             "last_used_at": s.last_used_at.isoformat() if s.last_used_at else None,
             "expires_at": s.expires_at.isoformat() if s.expires_at else None,
         }
-        for s, u in rows
+        for s, u in await user_service.list_active_sessions(db)
     ]
 
 
@@ -159,16 +136,12 @@ async def revoke_session(session_id: str, admin: User = Depends(require_admin),
     refresh cookie no longer rotates and the /viewer gate 303s it to /login.
     Other sessions (other devices / browsers) are untouched.
     """
-    session = (
-        await db.execute(select(Session).where(Session.id == session_id))
-    ).scalar_one_or_none()
+    session = await user_service.get_session(db, session_id)
     if session is None:
         raise HTTPException(404, "Session not found")
     if session.is_revoked:
         raise HTTPException(409, "Session already revoked")
-    user = (
-        await db.execute(select(User).where(User.id == session.user_id))
-    ).scalar_one_or_none()
+    user = await user_service.get_user(db, session.user_id)
     session.is_revoked = True
     session.revoke_reason = "admin"
     await write_audit(db, session.user_id, "session_revoked",
@@ -189,20 +162,13 @@ async def revoke_user_sessions(user_id: int, admin: User = Depends(require_admin
     they target themselves, so you can't lock yourself out.
     """
     user = await _get_user(db, user_id)
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    clauses = [
-        Session.user_id == user_id,
-        Session.is_revoked.is_(False),
-        Session.expires_at > now,
-    ]
-    if user_id == admin.id:
+    target = await user_service.sessions_of_user(
+        db, user_id,
         # Never lock yourself out: revoking your own user id skips your own
         # sessions entirely (returns revoked=0) rather than killing the
         # device you are currently using.
-        clauses.append(Session.user_id != admin.id)
-    target = (
-        await db.execute(select(Session).where(*clauses))
-    ).scalars().all()
+        exclude_user_id=admin.id if user_id == admin.id else None,
+    )
     for s in target:
         s.is_revoked = True
         s.revoke_reason = "admin_bulk"
@@ -224,17 +190,9 @@ async def list_auth_audit(action: str | None = None, user_id: int | None = None,
     and user. Exposes IPs and user agents, so it is admin-only (the DICOM
     tamper-evident trail stays on GET /api/v1/audit).
     """
-    stmt = (
-        select(AuthAuditLog, User)
-        .outerjoin(User, User.id == AuthAuditLog.user_id)
-        .order_by(AuthAuditLog.id.desc())
-        .limit(min(max(limit, 1), 500))
+    rows = await user_service.list_auth_audit(
+        db, action=action, user_id=user_id, limit=limit
     )
-    if action:
-        stmt = stmt.where(AuthAuditLog.action == action)
-    if user_id is not None:
-        stmt = stmt.where(AuthAuditLog.user_id == user_id)
-    rows = (await db.execute(stmt)).all()
     return [
         {
             "id": e.id,
@@ -258,14 +216,6 @@ async def list_locked(_admin: User = Depends(require_admin),
     Admin console shows each with remaining minutes and a one-click unlock;
     unknown usernames never appear here (failed logins don't create users).
     """
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    rows = (
-        await db.execute(
-            select(User)
-            .where(User.locked_until.is_not(None), User.locked_until > now)
-            .order_by(User.locked_until.asc())
-        )
-    ).scalars().all()
     return [
         {
             "id": u.id,
@@ -274,9 +224,9 @@ async def list_locked(_admin: User = Depends(require_admin),
             "role": u.role,
             "failed_attempts": u.failed_attempts or 0,
             "locked_until": u.locked_until.isoformat() if u.locked_until else None,
-            "remaining_minutes": max(int((u.locked_until - now).total_seconds() // 60), 1),
+            "remaining_minutes": user_service.lockout_remaining_minutes(u),
         }
-        for u in rows
+        for u in await user_service.list_locked(db)
     ]
 
 
@@ -297,15 +247,6 @@ async def reset_lockout(user_id: int, admin: User = Depends(require_admin),
     return {"ok": True, "username": user.username}
 
 
-def _parse_details(raw: str | None) -> dict | None:
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except (ValueError, TypeError):
-        return {"raw": raw}
-
-
 @router.patch("/{user_id}")
 async def patch_user(user_id: int, body: PatchUserBody,
                      admin: User = Depends(require_admin),
@@ -323,7 +264,7 @@ async def patch_user(user_id: int, body: PatchUserBody,
 
     # Last-admin guards: never leave the archive without an active ADMIN.
     if user.role == "ADMIN" and not is_self:
-        admins = await _active_admin_count(db)
+        admins = await user_service.active_admin_count(db)
         if admins <= 1 and (body.is_active is False or (body.role is not None and body.role != "ADMIN")):
             raise HTTPException(422, "Cannot disable or demote the last ADMIN")
 
@@ -350,16 +291,10 @@ async def reset_password(user_id: int, body: ResetPasswordBody,
     user.password_hash = hash_password(body.password)
     # H04: a password reset must invalidate existing sessions — otherwise a
     # stolen cookie keeps working after the credential is changed.
-    revoked = (
-        await db.execute(
-            update(Session)
-            .where(Session.user_id == user.id, Session.is_revoked.is_(False))
-            .values(is_revoked=True)
-        )
-    ).rowcount
+    revoked = await user_service.revoke_all_sessions(db, user.id)
     await write_audit(db, user.id, "password_change")
     await db.flush()
-    return {"ok": True, "username": user.username, "sessions_revoked": revoked or 0}
+    return {"ok": True, "username": user.username, "sessions_revoked": revoked}
 
 
 @router.delete("/{user_id}")
@@ -368,8 +303,7 @@ async def delete_user(user_id: int, admin: User = Depends(require_admin),
     user = await _get_user(db, user_id)
     if user.id == admin.id:
         raise HTTPException(422, "You cannot delete your own account")
-    if user.role == "ADMIN" and await _active_admin_count(db) <= 1:
+    if user.role == "ADMIN" and await user_service.active_admin_count(db) <= 1:
         raise HTTPException(422, "Cannot delete the last ADMIN")
-    await db.delete(user)
-    await db.flush()
+    await user_service.delete_account(db, user)
     return {"ok": True, "username": user.username}

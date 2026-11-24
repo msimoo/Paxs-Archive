@@ -19,7 +19,26 @@ except ImportError:
 import uvicorn
 
 from app.main import app
-from app.core.config import is_production_environment, settings
+from app.core.config import (
+    InsecureConfigurationError,
+    is_production_environment,
+    settings,
+    validate_production_settings,
+)
+
+
+def _enforce_production_config() -> None:
+    """B-1: refuse to start when the production configuration is insecure.
+
+    ``app/main/startup.py`` runs the same check in its lifespan, so any ASGI server
+    fails closed; this wrapper exists so the CLI exits with a clean, readable
+    ``SystemExit`` instead of a uvicorn startup traceback.
+    """
+    try:
+        validate_production_settings(settings)
+    except InsecureConfigurationError as exc:
+        raise SystemExit(f"[FATAL] {exc}") from exc
+
 
 def _is_production() -> bool:
     """H06: production means fail-closed startup and no auto-reload.
@@ -61,6 +80,12 @@ def _load_ssl_context():
     return None
 
 if __name__ == "__main__":
+    # Frozen exe: multiprocessing children must not re-run the server.
+    import multiprocessing
+    import sys
+
+    multiprocessing.freeze_support()
+    _enforce_production_config()
     host = os.getenv("PAXS_HOST", "0.0.0.0")
     port = int(os.getenv("PAXS_PORT", "8000"))
     ssl_kw = _load_ssl_context() or {}
@@ -81,12 +106,27 @@ if __name__ == "__main__":
         print(f"[PAXS] Mounted under sub-path: {root_path}")
     if forwarded_allow_ips != "127.0.0.1":
         print(f"[PAXS] Trusting X-Forwarded-* from: {forwarded_allow_ips}")
+    # The dev reloader watches the whole project tree by default, and the
+    # runtime state lives in that tree: the object store and backups
+    # are written on every ingest and every request. Without these excludes a
+    # single C-STORE restarts the server mid-write (observed: continuous
+    # "N changes detected" and a reload loop). Exclude runtime state only —
+    # source files stay watched, so hot-reload still works while editing.
+    reload_excludes = [
+        "paxs.db", "paxs.db-wal", "paxs.db-shm",
+        "storage/*", "storage/**",
+        "backups/*", ".workbuddy-ai/*", ".tools/*",
+        "*.log", "*.png", "__pycache__/*",
+    ]
     uvicorn.run(
         "app.main:app",
         host=host,
         port=port,
         log_level="info",
-        reload=not _is_production(),
+        # Never in a frozen exe: each reloader child relaunches the whole exe,
+        # which starts another reloader (observed: ~80 processes, then OOM).
+        reload=not _is_production() and not getattr(sys, "frozen", False),
+        reload_excludes=reload_excludes,
         proxy_headers=True,
         forwarded_allow_ips=forwarded_allow_ips,
         root_path=root_path,

@@ -6,21 +6,40 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import (
+    get_current_user,
+    get_current_user_any,
+    require_admin,
+    require_destructive_role,
+)
+from app.core.config import get_settings
 from app.db.models import DicomNode, User
 from app.db.session import get_db
-from app.api.v1.deps import get_current_user, require_destructive_role
-from app.services import tenant_service
+from app.services import node_service, tenant_service
 from app.services.audit_service import add_audit
 
 log = logging.getLogger("paxs.api.nodes")
 
 router = APIRouter(prefix="/api/v1/nodes", tags=["dicom-nodes"])
+REMOTE_FIND_MAX_RESULTS = 200
+
+
+def _log_remote_node_exception(operation: str, ae_title: str, exc: Exception) -> None:
+    """Log the transport failure without peer response text or patient data."""
+    log.warning(
+        "Remote node operation failed (operation=%s, ae_title=%s, error_type=%s)",
+        operation,
+        ae_title,
+        type(exc).__name__,
+    )
 
 
 class NodeIn(BaseModel):
@@ -34,6 +53,10 @@ class NodeIn(BaseModel):
     web_url: str | None = Field(default=None, max_length=512)
     web_username: str | None = Field(default=None, max_length=128)
     web_password: str | None = Field(default=None, max_length=256)
+    # B-16: path to this peer's PEM certificate. The SCU pins it as its trust
+    # anchor when no global DICOM_TLS_CA is configured; without one of the two a
+    # production SCU refuses the TLS association rather than trusting any peer.
+    trust_cert: str | None = Field(default=None, max_length=512)
 
 
 class SendScope(BaseModel):
@@ -72,6 +95,8 @@ class WebRetrieveQuery(FindQuery):
 
 
 def _node_out(node: DicomNode) -> dict:
+    from app.dicom.dcmtk_move import configured_for
+
     return {
         "ae_title": node.ae_title,
         "host": node.host,
@@ -79,6 +104,8 @@ def _node_out(node: DicomNode) -> dict:
         "description": node.description,
         "enabled": node.enabled,
         "web_url": node.web_url,
+        "trust_cert": node.trust_cert,
+        "dcmtk_move": configured_for(node.trust_cert),
         "has_web_auth": bool(node.web_username or node.web_password),
         "created_at": node.created_at.isoformat() if node.created_at else None,
         "updated_at": node.updated_at.isoformat() if node.updated_at else None,
@@ -87,8 +114,8 @@ def _node_out(node: DicomNode) -> dict:
 
 @router.get("")
 async def list_nodes(db: AsyncSession = Depends(get_db),
-                     user: User = Depends(get_current_user)):
-    nodes = (await db.execute(select(DicomNode).order_by(DicomNode.ae_title))).scalars().all()
+                     user: User = Depends(get_current_user_any)):
+    nodes = await node_service.list_nodes(db)
     return [_node_out(n) for n in nodes]
 
 
@@ -97,10 +124,7 @@ async def create_node(body: NodeIn, db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     if user.role != "ADMIN":
         raise HTTPException(403, "Only ADMIN can register DICOM nodes")
-    existing = (
-        await db.execute(select(DicomNode).where(DicomNode.ae_title == body.ae_title))
-    ).scalar_one_or_none()
-    if existing:
+    if await node_service.node_exists(db, body.ae_title):
         raise HTTPException(409, f"Node '{body.ae_title}' already registered")
     if body.web_url:
         try:
@@ -109,10 +133,7 @@ async def create_node(body: NodeIn, db: AsyncSession = Depends(get_db),
             body = body.model_copy(update={"web_url": validate_web_url(body.web_url)})
         except ValueError as exc:
             raise HTTPException(422, f"Invalid web_url: {exc}") from exc
-    node = DicomNode(**body.model_dump())
-    db.add(node)
-    await db.flush()
-    await db.refresh(node)  # load server_default timestamps
+    node = await node_service.create_node(db, body.model_dump())
     log.info("DICOM node %s (%s:%s) registered by %s",
              body.ae_title, body.host, body.port, user.username)
     return _node_out(node)
@@ -123,9 +144,7 @@ async def update_node(ae_title: str, body: NodeIn, db: AsyncSession = Depends(ge
                       user: User = Depends(get_current_user)):
     if user.role != "ADMIN":
         raise HTTPException(403, "Only ADMIN can update DICOM nodes")
-    node = (
-        await db.execute(select(DicomNode).where(DicomNode.ae_title == ae_title))
-    ).scalar_one_or_none()
+    node = await node_service.get_node(db, ae_title)
     if node is None:
         raise HTTPException(404, "Node not found")
     data = body.model_dump()
@@ -136,10 +155,7 @@ async def update_node(ae_title: str, body: NodeIn, db: AsyncSession = Depends(ge
             data["web_url"] = validate_web_url(data["web_url"])
         except ValueError as exc:
             raise HTTPException(422, f"Invalid web_url: {exc}") from exc
-    for field, value in data.items():
-        setattr(node, field, value)
-    await db.flush()
-    await db.refresh(node)  # load server_default/onupdate timestamps
+    await node_service.update_node(db, node, data)
     log.info("DICOM node %s updated by %s", ae_title, user.username)
     return _node_out(node)
 
@@ -149,13 +165,18 @@ async def delete_node(ae_title: str, db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     if user.role != "ADMIN":
         raise HTTPException(403, "Only ADMIN can delete DICOM nodes")
-    node = (
-        await db.execute(select(DicomNode).where(DicomNode.ae_title == ae_title))
-    ).scalar_one_or_none()
+    node = await node_service.get_node(db, ae_title)
     if node is None:
         raise HTTPException(404, "Node not found")
-    await db.delete(node)
+    await node_service.delete_node(db, node)
     log.info("DICOM node %s removed by %s", ae_title, user.username)
+
+
+@router.get("/dcmtk/status")
+async def dcmtk_status(user: User = Depends(require_admin)):
+    from app.dicom import dcmtk
+
+    return await asyncio.to_thread(dcmtk.status)
 
 
 @router.post("/{ae_title}/ping")
@@ -163,9 +184,7 @@ async def ping_node(ae_title: str, db: AsyncSession = Depends(get_db),
                     user: User = Depends(get_current_user)):
     """C-ECHO (verification) against the registered node — checks reachability
     and that the peer really speaks DICOM."""
-    node = (
-        await db.execute(select(DicomNode).where(DicomNode.ae_title == ae_title))
-    ).scalar_one_or_none()
+    node = await node_service.get_node(db, ae_title)
     if node is None:
         raise HTTPException(404, "Node not found")
     if not node.enabled:
@@ -176,10 +195,19 @@ async def ping_node(ae_title: str, db: AsyncSession = Depends(get_db),
     try:
         # Off the event loop: a C-ECHO opens a DIMSE association (up to ~30 s
         # against an unreachable peer) and must not stall every other request.
-        result = await asyncio.to_thread(send_echo, node.host, node.port, node.ae_title)
-    except Exception as exc:
-        log.warning("C-ECHO to %s failed: %s", ae_title, exc)
-        return {"ae_title": ae_title, "ok": False, "reason": str(exc)}
+        settings = get_settings()
+        trust_cert = getattr(node, "trust_cert", None)
+        if settings.DCMTK_BIN_DIR and not (settings.DICOM_TLS_ENABLED or trust_cert):
+            from app.dicom import dcmtk
+
+            result = await asyncio.to_thread(dcmtk.send_echo, node.host, node.port, node.ae_title)
+        else:
+            result = await asyncio.to_thread(
+                send_echo, node.host, node.port, node.ae_title, trust_cert=trust_cert,
+            )
+    except Exception as exc:  # peer libraries may include response data in exception text
+        _log_remote_node_exception("C-ECHO", ae_title, exc)
+        return {"ae_title": ae_title, "ok": False, "reason": "Remote C-ECHO failed"}
     return {"ae_title": ae_title, **result}
 
 
@@ -199,9 +227,7 @@ async def send_to_node(ae_title: str, body: SendScope,
     if not (body.study_uids or body.series_uids or body.instance_uids):
         raise HTTPException(422, "Provide at least one of study_uids, series_uids or instance_uids")
 
-    node = (
-        await db.execute(select(DicomNode).where(DicomNode.ae_title == ae_title))
-    ).scalar_one_or_none()
+    node = await node_service.get_node(db, ae_title)
     if node is None:
         raise HTTPException(404, "Node not found")
     if not node.enabled:
@@ -215,9 +241,9 @@ async def send_to_node(ae_title: str, body: SendScope,
             send_to_node_sync, ae_title, body.study_uids, body.series_uids,
             body.instance_uids, body.our_ae_title, tenant_id, include_all,
         )
-    except Exception as exc:
-        log.warning("C-STORE send to %s failed: %s", ae_title, exc)
-        return {"ae_title": ae_title, "ok": False, "reason": str(exc), "sent": 0, "failed": 0, "results": []}
+    except Exception as exc:  # transport exceptions may contain DICOM values or local paths
+        _log_remote_node_exception("C-STORE", ae_title, exc)
+        return {"ae_title": ae_title, "ok": False, "reason": "C-STORE send failed", "sent": 0, "failed": 0, "results": []}
 
     if not result.get("ok") and result.get("sent", 0) == 0 and result.get("failed", 0) == 0:
         # Node-level or scope-level failure (missing node handled above):
@@ -239,7 +265,7 @@ async def send_to_node(ae_title: str, body: SendScope,
 @router.post("/{ae_title}/find")
 async def find_on_node(ae_title: str, body: FindQuery,
                        db: AsyncSession = Depends(get_db),
-                       user: User = Depends(require_destructive_role)):
+                       user: User = Depends(require_admin)):
     """C-FIND SCU trigger: query a remote node (Q/R information model) and
     return the matches. Runs in a worker thread; the DICOM transfer never
     blocks the event loop.
@@ -248,9 +274,7 @@ async def find_on_node(ae_title: str, body: FindQuery,
     the C-FIND, so no local tenant scoping applies (matches are the peer's
     own data). A node that rejects the query surfaces as a 502.
     """
-    node = (
-        await db.execute(select(DicomNode).where(DicomNode.ae_title == ae_title))
-    ).scalar_one_or_none()
+    node = await node_service.get_node(db, ae_title)
     if node is None:
         raise HTTPException(404, "Node not found")
     if not node.enabled:
@@ -261,11 +285,11 @@ async def find_on_node(ae_title: str, body: FindQuery,
     try:
         result = await asyncio.to_thread(
             query_remote_node_sync, ae_title, body.level, body.filters,
-            body.our_ae_title,
+            body.our_ae_title, REMOTE_FIND_MAX_RESULTS,
         )
-    except Exception as exc:
-        log.warning("C-FIND on %s failed: %s", ae_title, exc)
-        return {"ae_title": ae_title, "ok": False, "reason": str(exc), "matches": []}
+    except Exception as exc:  # peer exceptions may include query or response values
+        _log_remote_node_exception("C-FIND", ae_title, exc)
+        return {"ae_title": ae_title, "ok": False, "reason": "Remote C-FIND failed", "matches": []}
 
     if not result.get("ok"):
         raise HTTPException(502, result.get("reason") or "Remote C-FIND failed")
@@ -277,7 +301,7 @@ async def find_on_node(ae_title: str, body: FindQuery,
 @router.post("/{ae_title}/pull")
 async def pull_from_node(ae_title: str, body: FindQuery,
                          db: AsyncSession = Depends(get_db),
-                         user: User = Depends(require_destructive_role)):
+                         user: User = Depends(require_admin)):
     """C-GET SCU trigger: pull matching instances from a remote node and
     ingest them into the local archive.
 
@@ -288,25 +312,34 @@ async def pull_from_node(ae_title: str, body: FindQuery,
     Every ingested instance is audit-logged as ``PULLED``. The DIMSE transfer
     runs in a worker thread so the event loop stays free.
     """
-    node = (
-        await db.execute(select(DicomNode).where(DicomNode.ae_title == ae_title))
-    ).scalar_one_or_none()
+    node = await node_service.get_node(db, ae_title)
     if node is None:
         raise HTTPException(404, "Node not found")
     if not node.enabled:
         raise HTTPException(409, "Node is disabled")
 
+    # C-21: end the request's transaction *before* the transfer is handed to a
+    # worker thread. Every received instance is stored and indexed from that
+    # thread in its own session, while this session still holds an open
+    # transaction — a read is enough, because the engine's begin listener opens
+    # one on the first statement and SQLite's rollback journal cannot be
+    # upgraded to EXCLUSIVE while a reader holds SHARED. The worker then waits
+    # out the whole ``busy_timeout`` (30 s), and the pull answers 502
+    # "ingestion failed" for instances that were never actually at fault.
+    # Nothing below re-reads ``node``, so an expiring commit is safe here.
+    await db.commit()
+
     from app.dicom.sender import pull_from_node_sync
 
-    tenant_id, _include_all = tenant_service.scope_from_user(user)
+    tenant_id, include_all = tenant_service.scope_from_user(user)
     try:
         result = await asyncio.to_thread(
             pull_from_node_sync, ae_title, body.level, body.filters,
-            body.our_ae_title, tenant_id,
+            body.our_ae_title, tenant_id, include_all=include_all,
         )
-    except Exception as exc:
-        log.warning("C-GET pull from %s failed: %s", ae_title, exc)
-        return {"ae_title": ae_title, "ok": False, "reason": str(exc),
+    except Exception as exc:  # peer exceptions may include query or response values
+        _log_remote_node_exception("C-GET", ae_title, exc)
+        return {"ae_title": ae_title, "ok": False, "reason": "Remote C-GET failed",
                 "pulled": 0, "failed": 0, "results": []}
 
     if not result.get("ok"):
@@ -332,9 +365,7 @@ async def pull_from_node(ae_title: str, body: FindQuery,
 # --------------------------------------------------------------------------- #
 async def _web_node(ae_title: str, db: AsyncSession) -> DicomNode:
     """Load a node and require it to be enabled with a DICOMweb base URL."""
-    node = (
-        await db.execute(select(DicomNode).where(DicomNode.ae_title == ae_title))
-    ).scalar_one_or_none()
+    node = await node_service.get_node(db, ae_title)
     if node is None:
         raise HTTPException(404, "Node not found")
     if not node.enabled:
@@ -347,7 +378,7 @@ async def _web_node(ae_title: str, db: AsyncSession) -> DicomNode:
 @router.post("/{ae_title}/web/query")
 async def web_query_node(ae_title: str, body: FindQuery,
                          db: AsyncSession = Depends(get_db),
-                         user: User = Depends(require_destructive_role)):
+                         user: User = Depends(require_admin)):
     """QIDO-RS query against a node's DICOMweb service (C-FIND's REST twin).
 
     Same query shape as ``/find`` (level + DICOM keyword filters). The remote
@@ -364,24 +395,48 @@ async def web_query_node(ae_title: str, body: FindQuery,
         matches = await asyncio.to_thread(qido_query, node, body.level, body.filters)
     except ValueError as exc:  # SSRF guard re-check
         raise HTTPException(422, f"Unsafe web_url: {exc}") from exc
-    except Exception as exc:
-        log.warning("DICOMweb QIDO on %s failed: %s", ae_title, exc)
-        return {"ae_title": ae_title, "ok": False, "reason": str(exc), "matches": []}
+    except Exception as exc:  # peer exceptions may include query or response values
+        _log_remote_node_exception("DICOMweb QIDO-RS", ae_title, exc)
+        return {"ae_title": ae_title, "ok": False, "reason": "Remote QIDO-RS query failed", "matches": []}
 
     rows = qido_to_match_rows(body.level, matches)
-    return {
+    response = {
         "ae_title": ae_title,
         "ok": True,
         "transport": "dicomweb",
         "level": body.level.upper(),
         "matches": rows,
     }
+    if len(matches) >= REMOTE_FIND_MAX_RESULTS:
+        response["truncated"] = True
+    return response
+
+
+def _detached_node(node: DicomNode):
+    """A plain, session-independent copy of the fields a web transfer needs.
+
+    C-21: the WADO-RS retrieve hands the node to a worker thread while the
+    request session is released (see ``web_retrieve_node``). Passing the ORM
+    instance across that boundary would risk a lazy load on a detached object
+    (``MissingGreenlet`` / ``DetachedInstanceError``) from a thread that has no
+    greenlet to await it. Only these four fields are ever read by
+    ``remote_wado_service`` / ``dicomweb_client``, so they are copied eagerly,
+    while the session is still open.
+    """
+    import types
+
+    return types.SimpleNamespace(
+        ae_title=node.ae_title,
+        web_url=node.web_url,
+        web_username=node.web_username,
+        web_password=node.web_password,
+    )
 
 
 @router.post("/{ae_title}/web/retrieve")
 async def web_retrieve_node(ae_title: str, body: WebRetrieveQuery,
                             db: AsyncSession = Depends(get_db),
-                            user: User = Depends(require_destructive_role)):
+                            user: User = Depends(require_admin)):
     """WADO-RS retrieve from a node's DICOMweb service (C-GET's REST twin).
 
     Retrieves the study named by ``filters["StudyInstanceUID"]`` over
@@ -406,9 +461,26 @@ async def web_retrieve_node(ae_title: str, body: WebRetrieveQuery,
     from app.core.config import settings
     from app.services.dicomweb_client import qido_query, wado_retrieve
     from app.services.lifecycle_service import archive_study
+    from app.services.remote_wado_service import WadoSizeLimitExceeded
 
-    tenant_id, _include_all = tenant_service.scope_from_user(user)
+    tenant_id, include_all = tenant_service.scope_from_user(user)
     auto_archive = body.auto_archive or settings.LIFECYCLE_AUTO_ARCHIVE_WADO_PULL
+
+    # C-21: end the request's transaction *before* the ingest work is handed to
+    # a worker thread. The ingest path opens its own session per instance and
+    # commits it there, while the request session still holds an open
+    # transaction — a read is enough, because the engine's begin listener opens
+    # one on the first statement and SQLite's rollback journal cannot be
+    # upgraded to EXCLUSIVE while a reader holds SHARED. The worker then waits
+    # on a lock held by a request that is itself waiting on the worker, and the
+    # retrieve fails with ``sqlite3.OperationalError: database is locked`` →
+    # HTTP 502 on a pull that had actually succeeded.
+    #
+    # The node's fields are copied first so nothing in the thread touches the
+    # ORM instance, and ``expire_on_commit=False`` keeps the rest of this handler
+    # from re-reading it either.
+    node = _detached_node(node)
+    await db.commit()
 
     study_uids = [study_uid] if study_uid else []
     if not study_uids and patient_id:
@@ -419,11 +491,13 @@ async def web_retrieve_node(ae_title: str, body: WebRetrieveQuery,
                 uid_tag = m.get("0020000D", {}).get("Value", [])
                 if uid_tag and uid_tag[0]:
                     study_uids.append(str(uid_tag[0]))
-        except Exception as exc:
-            log.warning("QIDO-RS lookup for PatientID %s on %s failed: %s", patient_id, ae_title, exc)
+        except Exception:
+            # The remote transport/parser exception may embed PHI or response
+            # content; keep this network boundary diagnostic PHI-free.
+            log.warning("QIDO-RS study lookup on remote node %s failed", ae_title)
 
     if not study_uids:
-        raise HTTPException(404, f"No studies found for Patient ID: {patient_id}")
+        raise HTTPException(404, "No matching studies found on the remote node")
 
     total_pulled = 0
     total_failed = 0
@@ -431,12 +505,20 @@ async def web_retrieve_node(ae_title: str, body: WebRetrieveQuery,
 
     for suid in study_uids:
         try:
-            res = await asyncio.to_thread(wado_retrieve, node, suid, tenant_id)
+            res = await asyncio.to_thread(
+                wado_retrieve, node, suid, tenant_id, include_all=include_all
+            )
             total_pulled += res.get("pulled", 0)
             total_failed += res.get("failed", 0)
             all_results.extend(res.get("results", []))
-        except Exception as exc:
-            log.warning("DICOMweb WADO retrieve for %s failed: %s", suid, exc)
+        except WadoSizeLimitExceeded as exc:
+            # B-14/FP-11: a peer that advertises (or streams) more than the cap
+            # is a policy refusal, not a transient remote error. Surface it as
+            # 413 and stop — retrying the next study would just repeat the DoS.
+            log.warning("Remote WADO-RS retrieve refused by the size cap: %s", exc)
+            raise HTTPException(413, str(exc)) from None
+        except Exception as exc:  # peer exceptions may include response data or local paths
+            _log_remote_node_exception("DICOMweb WADO-RS", ae_title, exc)
 
     # A retrieve only "succeeded" if at least one instance actually landed.
     # Zero parts back (empty multipart / study not found remotely) or an
@@ -515,31 +597,30 @@ async def web_upload_node(ae_title: str, body: SendScope,
         raise HTTPException(404, "No matching instances")
 
     if progress:
-        # NDJSON stream — the transfer runs in a worker thread and pushes
-        # progress events through an asyncio queue as batches resolve, so a
-        # client (the Transfer Accelerator panel) can drive a determinate
-        # progress bar instead of waiting blind for the whole upload.
-        return await _stream_web_upload(
-            node, targets, accelerated=accelerated, workers=workers,
-            db=db, user=user, ae_title=ae_title,
+        # NDJSON stream lets the Transfer Accelerator panel show progress.
+        return _stream_web_upload(
+            SimpleNamespace(web_url=node.web_url,
+                            web_username=node.web_username,
+                            web_password=node.web_password),
+            targets, accelerated=accelerated, workers=workers,
+            db=db, performed_by=user.username, ae_title=ae_title,
         )
 
+    from app.services.node_transfer_service import TransferCapacityError, run_stow_upload
+
     try:
-        if accelerated:
-            from app.services.accelerator_service import accelerated_stow_upload
-
-            result = await asyncio.to_thread(
-                accelerated_stow_upload, node, targets, workers=workers
-            )
-        else:
-            from app.services.dicomweb_client import stow_upload
-
-            result = await asyncio.to_thread(stow_upload, node, targets)
+        result = await run_stow_upload(
+            node, targets, accelerated=accelerated, workers=workers
+        )
+    except TransferCapacityError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except ValueError as exc:  # SSRF guard re-check
         raise HTTPException(422, f"Unsafe web_url: {exc}") from exc
-    except Exception as exc:
-        log.warning("DICOMweb STOW upload to %s failed: %s", ae_title, exc)
-        return {"ae_title": ae_title, "ok": False, "reason": str(exc),
+    except Exception as exc:  # remote transport exceptions may include peer response text
+        log.warning("DICOMweb STOW upload to %s failed (error_type=%s)",
+                    ae_title, type(exc).__name__)
+        return {"ae_title": ae_title, "ok": False,
+                "reason": "DICOMweb STOW transfer failed",
                 "sent": 0, "failed": 0, "results": []}
 
     if result.get("sent", 0) == 0 and result.get("failed", 0) > 0:
@@ -558,92 +639,21 @@ async def web_upload_node(ae_title: str, body: SendScope,
     return {"ae_title": ae_title, "transport": "dicomweb", **result}
 
 
-async def _stream_web_upload(node, targets: list[dict], *, accelerated: bool,
-                             workers: int | None, db: AsyncSession, user: User,
-                             ae_title: str):
-    """Stream a web upload as NDJSON: per-batch progress + a final result.
+def _stream_web_upload(
+    node: Any, targets: list[dict], *, accelerated: bool, workers: int | None,
+    db: AsyncSession, performed_by: str, ae_title: str,
+) -> StreamingResponse:
+    """Adapt the transfer service event iterator to an NDJSON HTTP response."""
+    from app.services.node_transfer_service import (
+        TransferCapacityError,
+        stream_stow_events,
+    )
 
-    The transfer itself is synchronous (httpx), so it runs in a worker thread
-    and pushes events into an asyncio queue via ``call_soon_threadsafe``; the
-    response body is an async generator draining that queue. Event lines:
-
-    * ``{"event": "progress", "done": N, "total": M}`` — after each batch
-      resolves (accelerated path), ``done`` = instances the remote confirmed.
-    * ``{"event": "done", "result": {...}}`` — the final result, same shape
-      as the non-streaming JSON response.
-    * ``{"event": "error", "message": "..."}`` — terminal failure (SSRF
-      re-check, transport exception, or every instance rejected). Nothing
-      further is sent after an error line.
-
-    Auditing happens in the async generator (it needs the request session),
-    after the ``done`` event but before the final line is yielded.
-    """
-    import json as _json
-
-    from fastapi.responses import StreamingResponse
-
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue = asyncio.Queue()
-
-    def emit(event: dict) -> None:
-        loop.call_soon_threadsafe(queue.put_nowait, event)
-
-    def _run() -> None:
-        try:
-            if accelerated:
-                from app.services.accelerator_service import accelerated_stow_upload
-
-                result = accelerated_stow_upload(
-                    node, targets, workers=workers,
-                    on_progress=lambda done, total: emit(
-                        {"event": "progress", "done": done, "total": total}
-                    ),
-                )
-            else:
-                from app.services.dicomweb_client import stow_upload
-
-                result = stow_upload(node, targets)
-        except ValueError as exc:  # SSRF guard re-check
-            emit({"event": "error", "message": f"Unsafe web_url: {exc}"})
-            return
-        except Exception as exc:
-            log.warning("DICOMweb STOW upload to %s failed: %s", ae_title, exc)
-            emit({"event": "error", "message": str(exc)})
-            return
-
-        if result.get("sent", 0) == 0 and result.get("failed", 0) > 0:
-            # Every instance rejected / remote error — same semantics as the
-            # non-streaming 502, but the stream is already open so it becomes
-            # a terminal error line instead of an HTTP status.
-            emit({"event": "error",
-                  "message": result.get("reason") or "STOW-RS upload failed"})
-            return
-
-        emit({"event": "done",
-              "result": {"ae_title": ae_title, "transport": "dicomweb", **result}})
-
-    task = asyncio.create_task(asyncio.to_thread(_run))
-
-    async def _events():
-        try:
-            while True:
-                event = await queue.get()
-                if event.get("event") == "done":
-                    # Audit every instance that actually transferred.
-                    for item in event["result"].get("results", []):
-                        if item.get("ok"):
-                            add_audit(db, item["sop_uid"], "FORWARDED",
-                                      performed_by=user.username,
-                                      study_instance_uid=item.get("study_uid"),
-                                      file_path=None)
-                    await db.flush()
-                    yield _json.dumps(event) + "\n"
-                    return
-                yield _json.dumps(event) + "\n"
-                if event.get("event") == "error":
-                    return
-        finally:
-            if not task.done():
-                task.cancel()
-
-    return StreamingResponse(_events(), media_type="application/x-ndjson")
+    try:
+        events = stream_stow_events(
+            node, targets, accelerated=accelerated, workers=workers, db=db,
+            performed_by=performed_by, ae_title=ae_title,
+        )
+    except TransferCapacityError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return StreamingResponse(events, media_type="application/x-ndjson")

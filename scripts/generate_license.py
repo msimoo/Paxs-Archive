@@ -40,23 +40,52 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
-from app.core.licensing.crypto import (
+# These imports must follow the sys.path bootstrap above, so the script can be
+# run straight from a checkout without installing the package (hence E402).
+from app.core.licensing.crypto import (  # noqa: E402
     LicenseData,
+    LicenseError,
+    RevokedSigningKey,
+    assert_license_signature,
     decrypt_license_container,
     encrypt_license_container,
     generate_rsa_key_pair,
     sign_license,
-    verify_license_signature,
 )
-from app.core.licensing.fingerprint import get_hardware_info, get_machine_fingerprint
+from app.core.licensing.fingerprint import (  # noqa: E402
+    get_hardware_info,
+    get_machine_fingerprint,
+)
 
 KEYS_DIR = ROOT_DIR / "scripts" / "vendor_keys"
 PRIVATE_KEY_PATH = KEYS_DIR / "paxs_vendor_private.pem"
 PUBLIC_KEY_PATH = KEYS_DIR / "paxs_vendor_public.pem"
 
 
+def load_signing_key() -> bytes:
+    """The vendor signing key: secrets manager first, then the git-ignored file.
+
+    B-2/FS-7: prefer ``PAXS_LICENSE_SIGNING_KEY`` (PEM in an env var injected by
+    Vault/KMS) or ``PAXS_LICENSE_SIGNING_KEY_PATH`` (a mounted secret). The
+    on-disk fallback is the git-ignored ``scripts/vendor_keys/`` directory, which
+    exists only on the vendor's own machine. Nothing is ever bundled in source.
+    """
+    env_pem = os.environ.get("PAXS_LICENSE_SIGNING_KEY")
+    if env_pem:
+        return env_pem.encode("utf-8")
+    env_path = os.environ.get("PAXS_LICENSE_SIGNING_KEY_PATH")
+    if env_path and Path(env_path).is_file():
+        return Path(env_path).read_bytes()
+    if PRIVATE_KEY_PATH.exists():
+        return PRIVATE_KEY_PATH.read_bytes()
+    print("[!] No vendor signing key configured.")
+    print("    Set PAXS_LICENSE_SIGNING_KEY (PEM) or PAXS_LICENSE_SIGNING_KEY_PATH,")
+    print("    or run `init-keys` to create one in the git-ignored keys directory.")
+    sys.exit(1)
+
+
 def cmd_init_keys(args):
-    """Generate vendor RSA-2048 key pair."""
+    """Generate vendor RSA-4096 key pair."""
     KEYS_DIR.mkdir(parents=True, exist_ok=True)
     if PRIVATE_KEY_PATH.exists() and not args.force:
         print(f"[!] Private key already exists at {PRIVATE_KEY_PATH}. Use --force to overwrite.")
@@ -65,9 +94,15 @@ def cmd_init_keys(args):
     priv_pem, pub_pem = generate_rsa_key_pair()
     PRIVATE_KEY_PATH.write_bytes(priv_pem)
     PUBLIC_KEY_PATH.write_bytes(pub_pem)
-    print(f"[OK] Generated vendor RSA-2048 keys:")
-    print(f"    Private: {PRIVATE_KEY_PATH}")
+    print("[OK] Generated vendor RSA-4096 keys:")
+    print(f"    Private: {PRIVATE_KEY_PATH}   <-- NEVER commit this")
     print(f"    Public:  {PUBLIC_KEY_PATH}")
+    print("\n[!] Move the private key into your secrets manager and delete it from disk.")
+    print("    The directory is git-ignored; confirm with:")
+    print("      git check-ignore -v scripts/vendor_keys/paxs_vendor_private.pem")
+    print("\n[!] Then paste the public key into TRUSTED_PUBLIC_KEY_PEM in")
+    print("    app/core/licensing/crypto.py and PAXS_VENDOR_PUBLIC_KEY in the portal")
+    print("    config. See docs/SECURITY-KEY-ROTATION.md.")
     print("\nPublic Key PEM:\n" + pub_pem.decode("ascii"))
 
 
@@ -93,11 +128,7 @@ def cmd_fingerprint(args):
 
 def cmd_create(args):
     """Create and sign a new license file."""
-    if not PRIVATE_KEY_PATH.exists():
-        print(f"[!] Vendor private key not found at {PRIVATE_KEY_PATH}. Run 'init-keys' first.")
-        sys.exit(1)
-
-    priv_pem = PRIVATE_KEY_PATH.read_bytes()
+    priv_pem = load_signing_key()
 
     now = datetime.now(timezone.utc)
     expires_at = None if args.perpetual else (now + timedelta(days=args.days))
@@ -174,7 +205,16 @@ def cmd_verify(args):
     if PUBLIC_KEY_PATH.exists():
         pub_key = serialization.load_pem_public_key(PUBLIC_KEY_PATH.read_bytes(), backend=default_backend())
 
-    sig_ok = verify_license_signature(data, pub_key)
+    # Report *why* a signature failed — a revoked signing key needs a different
+    # remedy (ask the vendor for a re-issued licence) from a corrupt file.
+    sig_ok, sig_note = True, ""
+    try:
+        assert_license_signature(data, pub_key)
+    except RevokedSigningKey as exc:
+        sig_ok, sig_note = False, f"\n                       {exc}"
+    except LicenseError as exc:
+        sig_ok, sig_note = False, f"\n                       {exc}"
+
     current_fp = get_machine_fingerprint()
     fp_match = (data.machine_fingerprint == "*" or data.machine_fingerprint == current_fp)
 
@@ -185,7 +225,7 @@ def cmd_verify(args):
     print("=" * 60)
     print(f"  PAXS License Inspection: {path.name}")
     print("=" * 60)
-    print(f"  Signature Valid:     {'[OK] YES' if sig_ok else '[ERR] INVALID / TAMPERED'}")
+    print(f"  Signature Valid:     {'[OK] YES' if sig_ok else '[ERR] INVALID / TAMPERED'}{sig_note}")
     print(f"  Hardware Match:      {'[OK] YES' if fp_match else '[MISMATCH] (Target: ' + data.machine_fingerprint + ', Host: ' + current_fp + ')'}")
     print(f"  Expiration Status:   {'[EXPIRED]' if is_expired else '[ACTIVE]'}")
     print("-" * 60)

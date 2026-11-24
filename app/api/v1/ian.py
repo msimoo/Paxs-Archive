@@ -13,11 +13,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user
-from app.db.models import InstanceAvailabilityNotification, User
+from app.api.v1.deps import get_current_user, tenant_scope
+from app.db.models import User
 from app.db.session import get_db
 from app.services import ian_service
 
@@ -31,7 +30,7 @@ class TriggerIANRequest(BaseModel):
     target_ae_title: str | None = Field(None, description="Optional target AE title (notifies all enabled nodes if None)")
 
 
-def _notif_to_dict(n: InstanceAvailabilityNotification) -> dict[str, Any]:
+def _notif_to_dict(n: Any) -> dict[str, Any]:
     d = n.__dict__
     sent_at = d.get("sent_at")
     created_at = d.get("created_at")
@@ -43,7 +42,7 @@ def _notif_to_dict(n: InstanceAvailabilityNotification) -> dict[str, Any]:
         "instance_availability": d.get("instance_availability", "ONLINE"),
         "status": d.get("status", "PENDING"),
         "payload_json": d.get("payload_json", "{}"),
-        "error_message": d.get("error_message"),
+        "error_message": "IAN delivery failed" if d.get("error_message") else None,
         "sent_at": sent_at.isoformat() if hasattr(sent_at, "isoformat") else (str(sent_at) if sent_at else None),
         "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else (str(created_at) if created_at else None),
         "updated_at": updated_at.isoformat() if hasattr(updated_at, "isoformat") else (str(updated_at) if updated_at else None),
@@ -55,13 +54,16 @@ async def trigger_ian_notification(
     req: TriggerIANRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-):
+) -> JSONResponse:
     """Trigger N-CREATE Instance Availability Notification for a study."""
+    tenant_id, include_all = tenant_scope(user)
     try:
         notifs = await ian_service.notify_study_available(
             db,
             study_instance_uid=req.study_instance_uid,
             target_ae_title=req.target_ae_title,
+            tenant_id=tenant_id,
+            include_all=include_all,
         )
         await db.commit()
         return JSONResponse(
@@ -72,8 +74,8 @@ async def trigger_ian_notification(
             status_code=200,
         )
     except Exception as exc:
-        log.exception("Failed to send IAN notification for study %s", req.study_instance_uid)
-        raise HTTPException(500, f"IAN notification failed: {exc}") from exc
+        log.error("IAN notification failed error_type=%s", type(exc).__name__)
+        raise HTTPException(500, "IAN notification failed") from None
 
 
 @router.get("/notifications", response_class=JSONResponse)
@@ -82,10 +84,15 @@ async def list_ian_notifications(
     status: str | None = Query(None, description="Filter by status (SENT / FAILED / PENDING)"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-):
+) -> JSONResponse:
     """List IAN notification logs."""
+    tenant_id, include_all = tenant_scope(user)
     results = await ian_service.list_notifications(
-        db, study_instance_uid=study_instance_uid, status=status
+        db,
+        study_instance_uid=study_instance_uid,
+        status=status,
+        tenant_id=tenant_id,
+        include_all=include_all,
     )
     return JSONResponse([_notif_to_dict(n) for n in results])
 
@@ -95,10 +102,12 @@ async def get_ian_notification(
     notif_id: int,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-):
+) -> JSONResponse:
     """Get details of a specific IAN notification record."""
-    stmt = select(InstanceAvailabilityNotification).where(InstanceAvailabilityNotification.id == notif_id)
-    notif = (await db.execute(stmt)).scalar_one_or_none()
+    tenant_id, include_all = tenant_scope(user)
+    notif = await ian_service.get_notification(
+        db, notif_id, tenant_id=tenant_id, include_all=include_all
+    )
     if not notif:
         raise HTTPException(404, f"IAN notification #{notif_id} not found")
     return JSONResponse(_notif_to_dict(notif))

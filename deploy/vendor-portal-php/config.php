@@ -80,26 +80,50 @@ define('ADMIN_DEFAULT_PASS', paxs_env(
 ));
 
 // Deprecated: retained for backwards compatibility (not referenced by the
-// bundled portal code). Override or remove once nothing depends on it.
-define('PORTAL_SECRET_KEY', paxs_env('PAXS_PORTAL_SECRET_KEY', 'PAXS_PORTAL_SIGNING_SALT_98F4A12B7C'));
+// bundled portal code). B-2 / FS-7: the literal fallback was removed — with
+// nothing configured this is now an empty string, not a "secret" that is public
+// in this repository's history.
+define('PORTAL_SECRET_KEY', paxs_env('PAXS_PORTAL_SECRET_KEY'));
 
 // ------------------- Cryptographic Keys -------------------
 // Deterministic AES-256 root key matching PAXS Archive core (32 bytes raw SHA-256 digest).
-// SECURITY: this salt is shared with app/core/licensing/crypto.py. Changing it
-// makes every previously issued .lic container undecryptable — treat any change
-// as a licence migration, not a routine edit.
-define('PAXS_AES_ROOT_KEY', hash('sha256', paxs_env('PAXS_LIC_AES_SALT', 'PAXS_ARCHIVE_LIC_SEC_2026_AES25'), true));
+// SECURITY: this salt is shared with app/core/licensing/crypto.py, so both sides
+// must use the same value. B-2 / FS-7: there is deliberately NO default — the old
+// literal ('PAXS_ARCHIVE_LIC_SEC_2026_AES25') is public in git history and
+// mirrored in the archive's source, which made every container wrapped with it
+// effectively plaintext. Supply it through the environment, or as a constant in
+// the git-ignored ./config.local.php (which was the documented path but was
+// silently ignored before this change).
+$paxsAesSalt = paxs_env('PAXS_LIC_AES_SALT');
+if ($paxsAesSalt === '' && defined('PAXS_LIC_AES_SALT')) {
+    $paxsAesSalt = (string) constant('PAXS_LIC_AES_SALT');
+}
+if ($paxsAesSalt === '') {
+    throw new RuntimeException(
+        'PAXS_LIC_AES_SALT is not set. The licence container key must come from the '
+        . 'environment or ./config.local.php; the hardcoded default was removed in '
+        . 'B-2 / FS-7 because it is public in git history.'
+    );
+}
+define('PAXS_AES_ROOT_KEY', hash('sha256', $paxsAesSalt, true));
 
-// Vendor RSA-2048 Public Key (safe to distribute; used to verify issued licences)
+// Vendor RSA-4096 Public Key (safe to distribute; used to verify issued licences).
+// Rotated 2026-10-13 (B-2 / FS-7): the previous RSA-2048 key was committed to the
+// archive's git history and is revoked. Licences signed with it are refused.
 define('PAXS_VENDOR_PUBLIC_KEY', <<<EOD
 -----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2TEcG4VYlBoyBoUabo43
-pWA0t4fHj4EZZvHrG2/hZzPmbHuyV+mtGHH1b2l01C/vE1dFvQQT1uHziP4X5gW4
-cyNjKRdKR9JM6BCzbS2nrGXPDguqaLx3quR2rehimpq0zKw5rp3f176AIIv4hEA6
-V/5b7zVDakMqhEN38ruQYJQ45q1LpxbMGh/x+1pdHNFW7Ebdz4BATd8S9ekCCOp5
-FzDrFcJEZiSJieKnxhUXtfLxnyzt02UFgRNrQbI+eaI/Ib73PgOi7G5vyFEZbhyY
-GL5kbjLeddKdARRUR7npaWR9/HEgNMrZB8sUtHV47Gm8a+FivJTFP1KljkB7HMT0
-YQIDAQAB
+MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAxJGRB6mRMSkyep2JSnvU
+DeIZ6P+UoheLex6QtX71DQis/TG8XWVy4LVYKuvreSbB6HbvsDHa76Cg/WlL6PhG
+9BH4zwQZFoc8WmLRJ63UO5/pig4k+r52JO+/us9LY7mZKYcEPS2NTV/mIypFa5/n
+k9mvpwo2Odh30ei/yNP8MLx1J6/Ennqq2FzN7qOo6OfilyU2dVyYolDQ09hVrwSq
+oPIrXFMFsu+mC/oER9nL3jJX4fk0s+zQ+8LH8rqmtMsQntIK8ODDfqyzMudmYSNM
+h6ihzd6t13IUN1ZHw8/rpfzAK2WWQqJ+4+OewIBh5T/yyllDnOtiVF+dTIwDAUKZ
+mjkJPOKr1P314a1oN7aXqKSsTkikfpXABAWy7+4vnViJPvZMtUtSbUS5LRnXtsDO
+dfy83P7wa8sduVmy+M7HmzQIcgmYPZl7HliCkSVsXlbpYpi0zGXZ12GGKb2Te+He
+4I3HChXNTDrECe/4DWZaxcOY7+RjcoiUD3WW+u9z+d+Ki872CBNvH6DZlul92faj
+W/8OSkvT60LaMekKv+GqdQ4wjJ86LAEdEUkiITQptm1ShXDLQnZ799P22EBEGmJg
+nBeL9CqFyz5t5FFMG00s+WT9dZ27qAd1eV2o1TJqfjh+71Uag0NxGOyznvpJYcaC
+tQrhsiTdOmWm1hRRrreUnOUCAwEAAQ==
 -----END PUBLIC KEY-----
 EOD);
 

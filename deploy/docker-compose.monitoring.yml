@@ -17,6 +17,7 @@ services:
     container_name: paxs-prometheus
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-alerts.yml:/etc/prometheus/paxs-alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"

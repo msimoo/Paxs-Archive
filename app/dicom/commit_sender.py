@@ -41,6 +41,9 @@ log = logging.getLogger("paxs.commit-sender")
 FINALIZE_AFTER_SECONDS = 2.0
 # Sweep cadence of the worker thread.
 SWEEP_INTERVAL_SECONDS = 1.0
+# An association reference is only useful for a short-lived DIMSE exchange;
+# after five minutes it is an orphan and the registered-node fallback applies.
+ASSOCIATION_MAX_AGE_SECONDS = 300.0
 # Bound the time the worker waits on a single DIMSE round trip. A modality
 # that silently disappears must not stall the whole delivery queue (pynetdicom
 # defaults to 30s).
@@ -55,30 +58,78 @@ _ASSOCS_LOCK = threading.Lock()
 # monotonic clock is immune to both clock skew and DB timezone differences.
 _CREATED_AT: dict[str, float] = {}
 _CREATED_AT_LOCK = threading.Lock()
-_QUEUE: queue.Queue = queue.Queue()
+_QUEUE: queue.Queue[str] = queue.Queue(
+    maxsize=max(1, settings.STORAGE_COMMIT_MAX_PENDING)
+)
 _WORKER: threading.Thread | None = None
 _START_LOCK = threading.Lock()
 
 
-def register_association(tx_uid: str, assoc) -> None:
-    """Remember the association for `tx_uid` so the report can ride it."""
+def register_association(tx_uid: str, assoc: object) -> bool:
+    """Track an N-ACTION association when the configured in-memory budget allows."""
     try:
         assoc.acse_timeout = _DIMSE_TIMEOUT_SECONDS
         assoc.dimse_timeout = _DIMSE_TIMEOUT_SECONDS
-    except Exception:
-        pass
+    except (AttributeError, ValueError, TypeError) as exc:  # timeout tuning is best-effort
+        # Some association objects are read-only proxies; the defaults then
+        # stand. Debug keeps a genuinely wrong object type visible.
+        log.debug("commit_assoc_timeout_unsettable error_type=%s", type(exc).__name__)
     with _ASSOCS_LOCK:
-        _ASSOCS[tx_uid] = assoc
-    with _CREATED_AT_LOCK:
-        _CREATED_AT.setdefault(tx_uid, _time.monotonic())
+        with _CREATED_AT_LOCK:
+            if tx_uid not in _CREATED_AT and len(_CREATED_AT) >= settings.STORAGE_COMMIT_MAX_PENDING:
+                log.warning("commit tracking capacity reached; rejecting N-ACTION")
+                return False
+            _ASSOCS[tx_uid] = assoc
+            _CREATED_AT.setdefault(tx_uid, _time.monotonic())
     _ensure_worker()
+    return True
 
 
 def queue_report(tx_uid: str) -> None:
+    """Schedule a report without blocking; the DB sweep recovers saturation."""
     with _CREATED_AT_LOCK:
-        _CREATED_AT.setdefault(tx_uid, _time.monotonic())
+        if tx_uid not in _CREATED_AT:
+            if len(_CREATED_AT) >= settings.STORAGE_COMMIT_MAX_PENDING:
+                log.warning("commit tracking capacity reached; report deferred to DB sweep")
+                _ensure_worker()
+                return
+            _CREATED_AT[tx_uid] = _time.monotonic()
     _ensure_worker()
-    _QUEUE.put(tx_uid)
+    try:
+        _QUEUE.put_nowait(tx_uid)
+    except queue.Full:
+        log.warning("commit dispatch queue full; report deferred to DB sweep")
+
+
+def _cleanup_bookkeeping(tx_uid: str) -> None:
+    """Drop both in-memory association records for a terminal/aborted request."""
+    with _ASSOCS_LOCK:
+        with _CREATED_AT_LOCK:
+            _ASSOCS.pop(tx_uid, None)
+            _CREATED_AT.pop(tx_uid, None)
+
+
+def _sweep_orphan_associations(now: float | None = None) -> int:
+    """Remove association references older than the five-minute safety window."""
+    current = _time.monotonic() if now is None else now
+    removed = 0
+    with _ASSOCS_LOCK:
+        with _CREATED_AT_LOCK:
+            stale_ids = {
+                tx_uid
+                for tx_uid, created_at in _CREATED_AT.items()
+                if current - created_at >= ASSOCIATION_MAX_AGE_SECONDS
+            }
+            # An association without its timestamp cannot be aged safely, but it
+            # cannot be used to match a report either; remove only when the ID is
+            # not represented by a timestamp after a later registration.
+            for tx_uid in stale_ids:
+                _ASSOCS.pop(tx_uid, None)
+                _CREATED_AT.pop(tx_uid, None)
+                removed += 1
+    if removed:
+        log.warning("swept %d stale storage-commit association record(s)", removed)
+    return removed
 
 
 def _ensure_worker() -> None:
@@ -95,18 +146,20 @@ def _run() -> None:
             tx_uid = _QUEUE.get(timeout=SWEEP_INTERVAL_SECONDS)
         except queue.Empty:
             try:
+                _sweep_orphan_associations()
                 _finalize_stale()
             except OperationalError:
                 # Table dropped / engine closed (shutdown, test teardown) —
                 # the daemon worker simply has nothing left to sweep.
                 log.debug("commit sweep skipped (DB unavailable)")
-            except Exception:
-                log.exception("commit sweep failed")
+            except Exception as exc:
+                log.error("commit sweep failed error_type=%s", type(exc).__name__)
             continue
         try:
             _deliver(tx_uid)
-        except Exception:
-            log.exception("commit delivery failed for %s", tx_uid)
+        except Exception as exc:
+            log.error("commit delivery failed for %s error_type=%s",
+                      tx_uid, type(exc).__name__)
         finally:
             _QUEUE.task_done()
 
@@ -134,6 +187,14 @@ def _build_report(payload: dict) -> Dataset:
 # Delivery
 # --------------------------------------------------------------------------- #
 def _deliver(tx_uid: str) -> None:
+    """Send the report and always release association bookkeeping."""
+    try:
+        _deliver_impl(tx_uid)
+    finally:
+        _cleanup_bookkeeping(tx_uid)
+
+
+def _deliver_impl(tx_uid: str) -> None:
     """Send the N-EVENT-REPORT for `tx_uid`, then finalize the request row."""
     with SyncSessionLocal() as session:
         req = session.execute(
@@ -161,9 +222,11 @@ def _deliver(tx_uid: str) -> None:
                     _build_report(payload), 1, StorageCommitmentPushModel, tx_uid
                 )
                 ok = rsp is not None and int(getattr(rsp, "Status", 0xFFFF)) == 0x0000
-            except Exception:
+            except Exception as exc:
                 log.warning(
-                    "commit %s: report on original association failed", tx_uid, exc_info=True
+                    "commit %s: report on original association failed error_type=%s",
+                    tx_uid,
+                    type(exc).__name__,
                 )
         if not ok:
             ok = _deliver_via_node(tx_uid, payload, req.ae_title)
@@ -176,15 +239,6 @@ def _deliver(tx_uid: str) -> None:
         session.commit()
         log.info("Storage Commitment %s -> %s (%s)", tx_uid, req.status,
                  "delivered" if ok else "undeliverable")
-    # Drop the per-transaction bookkeeping now that the request is final.
-    # Keeping these would leak: _ASSOCS holds strong references to closed
-    # pynetdicom associations and both dicts grow unboundedly on a long-running
-    # archive (Storage Commitment is exactly the long-running case).
-    with _ASSOCS_LOCK:
-        _ASSOCS.pop(tx_uid, None)
-    with _CREATED_AT_LOCK:
-        _CREATED_AT.pop(tx_uid, None)
-
 
 def _deliver_via_node(tx_uid: str, payload: dict, ae_title: str | None) -> bool:
     """Fallback: deliver on a fresh association to the modality's AE, resolved
@@ -202,7 +256,16 @@ def _deliver_via_node(tx_uid: str, payload: dict, ae_title: str | None) -> bool:
         ae.add_requested_context(StorageCommitmentPushModel, ExplicitVRLittleEndian)
         ae.acse_timeout = _DIMSE_TIMEOUT_SECONDS
         ae.dimse_timeout = _DIMSE_TIMEOUT_SECONDS
-        assoc = ae.associate(node.host, node.port, ae_title=ae_title)
+        # B-16: the report carries SOP UIDs and patient-study references, so
+        # it must ride the same verified TLS channel as the images. Without
+        # tls_args this association was plaintext even when DICOM_TLS_ENABLED
+        # was on — and it silently skipped peer verification.
+        from app.dicom.sender import _tls_args
+
+        assoc = ae.associate(
+            node.host, node.port, ae_title=ae_title,
+            tls_args=_tls_args(node.host, getattr(node, "trust_cert", None)),
+        )
         if not assoc.is_established:
             log.warning("commit %s: could not re-associate to %s:%s",
                         tx_uid, node.host, node.port)
@@ -214,8 +277,9 @@ def _deliver_via_node(tx_uid: str, payload: dict, ae_title: str | None) -> bool:
             return rsp is not None and int(getattr(rsp, "Status", 0xFFFF)) == 0x0000
         finally:
             assoc.release()
-    except Exception:
-        log.exception("commit %s: fresh-association delivery failed", tx_uid)
+    except Exception as exc:
+        log.error("commit %s: fresh-association delivery failed error_type=%s",
+                  tx_uid, type(exc).__name__)
         return False
 
 
@@ -229,21 +293,27 @@ def _finalize_stale() -> None:
     must still be answered — the report carries the truth as of now, with a
     FailureReason per instance, so the modality can react.
     """
+    max_pending = settings.STORAGE_COMMIT_MAX_PENDING
+    if max_pending == 0:
+        return
     with _CREATED_AT_LOCK:
         created_snapshot = dict(_CREATED_AT)
     with SyncSessionLocal() as session:
         stale = session.execute(
-            select(StorageCommitRequest).where(StorageCommitRequest.status == "PENDING")
+            select(StorageCommitRequest)
+            .where(StorageCommitRequest.status == "PENDING")
+            .order_by(StorageCommitRequest.id.asc())
+            .limit(max_pending)
         ).scalars().all()
-        for req in stale:
-            mono = created_snapshot.get(req.transaction_uid)
-            if mono is not None:
-                age = _time.monotonic() - mono
-            elif req.created_at is not None:
-                # Restart fallback: created_at is naive UTC on SQLite
-                # (func.now() = UTC) but server-local on MySQL — best effort.
-                age = _time.time() - calendar.timegm(req.created_at.utctimetuple())
-            else:
-                continue
-            if age >= FINALIZE_AFTER_SECONDS:
-                _deliver(req.transaction_uid)
+        candidates = [(req.transaction_uid, req.created_at) for req in stale]
+    for tx_uid, created_at in candidates:
+        mono = created_snapshot.get(tx_uid)
+        if mono is not None:
+            age = _time.monotonic() - mono
+        elif created_at is not None:
+            # Restart fallback: naive-UTC on SQLite, server-local on MySQL.
+            age = _time.time() - calendar.timegm(created_at.utctimetuple())
+        else:
+            continue
+        if age >= FINALIZE_AFTER_SECONDS:
+            _deliver(tx_uid)

@@ -3,7 +3,7 @@
 Composes everything the panel renders:
 
 * live SQLAlchemy pool metrics (sync QueuePool shared by the receiver/worker)
-* MySQL live counters (Threads_connected, Slow_queries, …) when on MySQL
+* PostgreSQL live counters (pg_stat_activity / pg_stat_database)
 * read-replica status + the persisted routing toggle
 * the slow-query log ring buffer + its persisted toggle/threshold
 * the EXPLAIN analyzer for the hottest archive queries
@@ -64,43 +64,57 @@ def _set_setting(key: str, value: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# MySQL live counters
+# PostgreSQL live counters
 # --------------------------------------------------------------------------- #
 
-def _mysql_counters() -> dict | None:
-    if not settings.DATABASE_URL.startswith("mysql"):
-        return None
+def _postgres_counters() -> dict | None:
+    """Server-side connection / activity counters for the panel (best-effort)."""
     p = db_admin.parse_db_url(settings.DATABASE_URL)
-    import pymysql
+    if p["backend"] != "postgresql":
+        return None
+    import psycopg
 
     try:
-        conn = pymysql.connect(
-            host=p["host"], port=p["port"] or 3306, user=p["user"],
-            password=p["password"] or "", database=p["database"] or None,
-            connect_timeout=3, charset="utf8mb4",
+        conn = psycopg.connect(
+            host=p["host"], port=p["port"] or 5432, user=p["user"],
+            password=p["password"] or "", dbname=p["database"] or "postgres",
+            connect_timeout=3,
         )
     except Exception as exc:  # pragma: no cover - DB briefly down
-        return {"ok": False, "error": str(exc)[:160]}
+        # Driver messages can carry host/user details; report the type only.
+        return {"ok": False, "error": f"connection failed ({type(exc).__name__})"}
     try:
-        with conn.cursor() as cur:
-            cur.execute("SHOW GLOBAL STATUS")
-            status = {r[0]: r[1] for r in cur.fetchall()}
-            cur.execute("SHOW GLOBAL VARIABLES LIKE 'long_query_time'")
-            long_query = cur.fetchone()
-            cur.execute("SHOW GLOBAL VARIABLES LIKE 'max_connections'")
-            max_conn = cur.fetchone()
+        activity = conn.execute(
+            "SELECT count(*) AS total, "
+            "count(*) FILTER (WHERE state = 'active') AS active, "
+            "count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx "
+            "FROM pg_stat_activity WHERE datname = current_database()"
+        ).fetchone()
+        stats = conn.execute(
+            "SELECT xact_commit, xact_rollback, blks_hit, blks_read, deadlocks, "
+            "pg_database_size(current_database()) "
+            "FROM pg_stat_database WHERE datname = current_database()"
+        ).fetchone()
+        max_conn = conn.execute("SHOW max_connections").fetchone()[0]
+        uptime = conn.execute(
+            "SELECT EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))"
+        ).fetchone()[0]
+        hit, read = int(stats[2] or 0), int(stats[3] or 0)
         return {
             "ok": True,
-            "threads_connected": int(status.get("Threads_connected", 0)),
-            "max_used_connections": int(status.get("Max_used_connections", 0)),
-            "total_connections": int(status.get("Connections", 0)),
-            "slow_queries_total": int(status.get("Slow_queries", 0)),
-            "uptime_seconds": int(status.get("Uptime", 0)),
-            "long_query_time": float(long_query[1]) if long_query else None,
-            "max_connections": int(max_conn[1]) if max_conn else None,
+            "connections": int(activity[0]),
+            "active": int(activity[1]),
+            "idle_in_transaction": int(activity[2]),
+            "max_connections": int(max_conn),
+            "commits": int(stats[0] or 0),
+            "rollbacks": int(stats[1] or 0),
+            "deadlocks": int(stats[4] or 0),
+            "cache_hit_ratio": round(hit / (hit + read), 4) if (hit + read) else None,
+            "database_bytes": int(stats[5] or 0),
+            "uptime_seconds": int(uptime or 0),
         }
-    except Exception as exc:  # pragma: no cover - defensive
-        return {"ok": False, "error": str(exc)[:160]}
+    except Exception as exc:  # pragma: no cover - defensive (e.g. missing pg_stat privileges)
+        return {"ok": False, "error": f"counters unavailable ({type(exc).__name__})"}
     finally:
         conn.close()
 
@@ -110,7 +124,7 @@ def _mysql_counters() -> dict | None:
 # --------------------------------------------------------------------------- #
 
 # Representative SQL for the hottest archive query paths, with literal bind
-# values so the same diagnostic runs unchanged on MySQL and SQLite. These
+# values so the diagnostic runs as-is on PostgreSQL. These
 # mirror the real ORM statements (studies list, search, series/instance
 # traversal, worklist, VNA composite path, reading UNREAD).
 HOT_QUERIES = [
@@ -124,11 +138,11 @@ HOT_QUERIES = [
     },
     {
         "name": "studies_search",
-        "label": "Studies search — patient name / MRN / description LIKE",
+        "label": "Studies search — patient name / MRN / description ILIKE",
         "sql": (
             "SELECT studies.* FROM studies JOIN patients ON patients.id = studies.patient_id "
-            "WHERE patients.patient_name LIKE '%ahmed%' OR patients.patient_id LIKE '%123%' "
-            "OR studies.study_description LIKE '%chest%' "
+            "WHERE patients.patient_name ILIKE '%ahmed%' OR patients.patient_id ILIKE '%123%' "
+            "OR studies.study_description ILIKE '%chest%' "
             "ORDER BY studies.study_date DESC LIMIT 20"
         ),
     },
@@ -190,7 +204,7 @@ def _hot_query_names() -> list[str]:
 def explain_query(name: str = "", custom_sql: str = "") -> dict:
     """Run EXPLAIN for a named hot query (or a read-only custom statement).
 
-    MySQL: ``EXPLAIN`` (full planner output). SQLite: ``EXPLAIN QUERY PLAN``.
+    PostgreSQL ``EXPLAIN`` (planner output), inside a READ ONLY transaction.
     A throwaway NullPool engine keeps this off the app's live pools.
     """
     sql = ""
@@ -210,7 +224,9 @@ def explain_query(name: str = "", custom_sql: str = "") -> dict:
     if ";" in sql:
         raise ValueError("Only a single statement is allowed")
     # Read-only guard — checked on the *cleaned* statement so "WITH … DELETE"
-    # (valid CTE-backed write on MySQL 8.0.19+ / SQLite) can't slip through.
+    # (a valid CTE-backed write on PostgreSQL) can't slip through. The plan also
+    # runs inside a READ ONLY transaction, so even a SELECT that calls a writing
+    # function is refused by the server.
     stripped = sql.lstrip().upper()
     if not (stripped.startswith("SELECT") or stripped.startswith("EXPLAIN")):
         raise ValueError("Only read-only statements (SELECT / EXPLAIN) are allowed")
@@ -219,10 +235,11 @@ def explain_query(name: str = "", custom_sql: str = "") -> dict:
     eng = create_engine(url, poolclass=NullPool)
     try:
         with eng.connect() as conn:
-            if url.startswith("mysql"):
-                rows = conn.execute(text(f"EXPLAIN {sql}")).mappings().all()
-            else:
-                rows = conn.execute(text(f"EXPLAIN QUERY PLAN {sql}")).mappings().all()
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            if stripped.startswith("EXPLAIN"):
+                raise ValueError("Submit the SELECT only — the analyzer adds EXPLAIN itself")
+            rows = conn.execute(text(f"EXPLAIN {sql}")).mappings().all()
+            conn.rollback()
         return {
             "backend": settings.DATABASE_URL.split("://")[0],
             "name": name or "custom",
@@ -255,8 +272,11 @@ async def perf_panel() -> dict:
         if stored_threshold is not None:
             try:
                 threshold = float(stored_threshold)
-            except ValueError:
-                pass
+            except ValueError as exc:
+                # A non-numeric stored override keeps the configured threshold;
+                # the type is enough to spot a corrupt settings row.
+                log.debug("slow_query_threshold_unparsable error_type=%s",
+                          type(exc).__name__)
         perf.set_slow_query(enabled, threshold)
         slow_cfg = perf.slow_query_state()
 
@@ -281,7 +301,7 @@ async def perf_panel() -> dict:
             "pool_size": settings.DB_POOL_SIZE,
             "max_overflow": settings.DB_MAX_OVERFLOW,
         },
-        "mysql": _mysql_counters(),
+        "postgresql": _postgres_counters(),
         "replica": replica,
         "slow_query": {
             **slow_cfg,
@@ -310,6 +330,10 @@ def set_replica(enabled: bool) -> dict:
     if not replica_configured():
         raise ValueError("No read replica configured (DB_READ_REPLICA_URL is empty)")
     _set_setting(_REPLICA_TOGGLE_KEY, "1" if enabled else "0")
+    # H-08: get_read_db caches the toggle; apply the change here at once.
+    from app.db.session import reset_replica_toggle_cache
+
+    reset_replica_toggle_cache()
     return {"configured": True, "enabled": enabled}
 
 

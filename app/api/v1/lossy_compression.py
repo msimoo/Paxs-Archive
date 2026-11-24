@@ -95,9 +95,9 @@ async def create_lossy_rule(
     except lossy_compression_service.LossyCompressionError as exc:
         # Unsupported/unencodable target — reject before it can be stored.
         raise HTTPException(400, str(exc)) from exc
-    except Exception as exc:
-        log.exception("Failed to create lossy compression rule %s", req.name)
-        raise HTTPException(400, f"Failed to create rule: {exc}") from exc
+    except Exception as exc:  # unexpected persistence errors may contain PHI or paths
+        log.error("lossy_rule_create_failed error_type=%s", type(exc).__name__)
+        raise HTTPException(400, "Failed to create rule") from None
 
 
 @router.get("/rules", response_class=JSONResponse)

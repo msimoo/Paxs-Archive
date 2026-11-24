@@ -1,6 +1,6 @@
-# Stateless PAXS node (roadmap #47). Nodes share MySQL + object storage (S3/MinIO)
+# Stateless PAXS node (roadmap #47). Nodes share PostgreSQL + object storage (S3/MinIO)
 # and are load-balanced by HAProxy — see deploy/LOAD-BALANCING.md.
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
@@ -19,7 +19,7 @@ COPY run_paxs.py .
 
 # Each node reports its own instance id (HAProxy round-robin visibility).
 ENV PAXS_INSTANCE_ID=node-1 \
-    DATABASE_URL=mysql+aiomysql://paxs_user:paxs@mysql:3306/paxs_db \
+    ENVIRONMENT=production \
     STORAGE_BACKEND=s3 \
     S3_ENDPOINT_URL=http://minio:9000 \
     DICOM_RECEIVER_ENABLED=true \

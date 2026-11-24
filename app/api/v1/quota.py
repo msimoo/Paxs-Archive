@@ -10,13 +10,21 @@ Admin-only endpoints for managing storage quotas:
     GET    /api/v1/quotas/status       Current usage vs limits (monitoring)
     GET    /api/v1/quotas/status/tenant/{tenant_id}  Tenant-specific status
     GET    /api/v1/quotas/status/backend/{backend_name}  Backend-specific status
+    POST   /api/v1/quotas/reconcile    Recompute counters from indexed bytes
+    POST   /api/v1/quotas/reconcile/{tenant_id}  Reconcile one tenant
 
 Quotas apply to either a tenant (tenant_id) OR a storage backend (storage_backend_name).
 A quota of 0 bytes means unlimited. The warning_threshold_pct (default 80%) triggers
 advisory alerts but does not block writes.
+
+Scopes are independent (C-17): a **tenant** quota caps the tenant's total bytes
+across every backend, and a **backend** quota caps that backend's total across
+every tenant. Both are enforced for a write; they are never ANDed.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -72,17 +80,19 @@ def _serialize_quota(q: StorageQuota, usage_bytes: int) -> dict:
 
 async def _get_usage_for_quota(db: AsyncSession, q: StorageQuota) -> int:
     from sqlalchemy import func
+
     from app.db.models import Instance, Series, Study
 
     if q.tenant_id is not None:
+        # Tenant scope: total bytes across ALL backends (C-17). Filtering this
+        # by the row's own storage_backend_name would report — and so enforce —
+        # a single-backend limit for a quota the operator set tenant-wide.
         stmt = (
             select(func.coalesce(func.sum(Instance.file_size_bytes), 0))
             .join(Instance.series)
             .join(Series.study)
             .where(Study.tenant_id == q.tenant_id)
         )
-        if q.storage_backend_name:
-            stmt = stmt.where(Instance.storage_backend == q.storage_backend_name)
     else:
         stmt = select(func.coalesce(func.sum(Instance.file_size_bytes), 0)).where(
             Instance.storage_backend == q.storage_backend_name
@@ -177,7 +187,7 @@ async def delete_quota(quota_id: int, db: AsyncSession = Depends(get_db),
         raise HTTPException(404, f"Quota {quota_id} not found")
     await db.delete(q)
     await db.commit()
-    return None
+    return
 
 
 @router.get("/status")
@@ -204,3 +214,34 @@ async def backend_quota_status(backend_name: str, db: AsyncSession = Depends(get
     """Quota status for a specific storage backend."""
     status = await quota_service.get_quota_status_async(db, backend_name=backend_name)
     return JSONResponse(status)
+
+
+# --------------------------------------------------------------------------- #
+# Reconciliation (C-17 / FD-7)
+# --------------------------------------------------------------------------- #
+# The counters are maintained incrementally; these endpoints let an operator
+# force the recompute the worker also runs on a schedule. They are read-only
+# with respect to storage — they never delete or move an object.
+@router.post("/reconcile")
+async def reconcile_all_quotas(db: AsyncSession = Depends(get_db),
+                               user: User = Depends(require_admin)):
+    """Recompute every tenant's counters from the indexed instance sizes.
+
+    Idempotent: the value written is derived from the rows, never from the
+    counter being corrected, so calling this twice changes nothing the second
+    time. Reports how many rows drifted (and by how much) so an operator can see
+    whether anything had actually leaked.
+    """
+    report = await asyncio.to_thread(quota_service.scheduled_reconcile_tenants)
+    return JSONResponse(report)
+
+
+@router.post("/reconcile/{tenant_id}")
+async def reconcile_tenant_quotas(tenant_id: int, db: AsyncSession = Depends(get_db),
+                                  user: User = Depends(require_admin)):
+    """Recompute one tenant's counters from the indexed instance sizes (C-17)."""
+    tenant = await db.get(Tenant, tenant_id)
+    if not tenant:
+        raise HTTPException(404, f"Tenant {tenant_id} not found")
+    report = await asyncio.to_thread(quota_service.recompute_tenant_storage, tenant_id)
+    return JSONResponse(report)

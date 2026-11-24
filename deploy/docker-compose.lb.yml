@@ -3,49 +3,61 @@
 #   docker compose -f deploy/docker-compose.lb.yml up -d --build
 #
 # Topology: HAProxy (:8000 API / :10400 DIMSE / :2575 HL7) -> 3 stateless
-# PAXS nodes -> shared MySQL 8 + MinIO (shared object storage). Any node can
+# PAXS nodes -> shared PostgreSQL 17 + MinIO (shared object storage). Any node can
 # die or restart; HAProxy fails it over. See deploy/LOAD-BALANCING.md.
 
 services:
   haproxy:
     image: haproxy:3.0-alpine
     container_name: paxs-haproxy
+    restart: unless-stopped
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports:
-      - "8000:8000"     # REST API / DICOMweb / dashboard
+      - "127.0.0.1:8000:8000" # REST API; access through the configured TLS reverse proxy
       - "10400:10400"   # DIMSE
       - "2575:2575"     # HL7 MLLP
-      - "8404:8404"     # HAProxy stats page
-      - "8405:8405"     # HAProxy Prometheus metrics (/metrics)
+      - "127.0.0.1:8405:8405" # HAProxy metrics; keep management endpoint off public interfaces
     depends_on:
       - paxs-node-1
       - paxs-node-2
       - paxs-node-3
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8404/;csv"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8405/metrics"]
       interval: 15s
       timeout: 3s
       retries: 3
+    networks:
+      default:
+        ipv4_address: ${PAXS_HAPROXY_IP:?Set PAXS_HAPROXY_IP inside PAXS_DOCKER_SUBNET}
 
   paxs-node-1: &paxs-node
     build:
       context: ..
       dockerfile: deploy/Dockerfile
     container_name: paxs-node-1
+    restart: unless-stopped
     environment: &paxs-env
       PAXS_INSTANCE_ID: node-1
-      DATABASE_URL: mysql+aiomysql://paxs_user:paxs@mysql:3306/paxs_db
+      ENVIRONMENT: production
+      SECRET_KEY: ${PAXS_SECRET_KEY:?Set PAXS_SECRET_KEY to a random value of at least 32 characters}
+      AUTH_COOKIE_SECURE: "true"
+      CORS_ORIGINS: ${PAXS_CORS_ORIGINS:?Set PAXS_CORS_ORIGINS to the browser origin}
+      PUBLIC_BASE_URL: ${PAXS_PUBLIC_BASE_URL:?Set PAXS_PUBLIC_BASE_URL to the HTTPS site URL}
+      PAXS_FORWARDED_ALLOW_IPS: ${PAXS_HAPROXY_IP:?Set PAXS_HAPROXY_IP inside PAXS_DOCKER_SUBNET}
+      FORWARDED_ALLOW_IPS: ${PAXS_HAPROXY_IP:?Set PAXS_HAPROXY_IP inside PAXS_DOCKER_SUBNET}
+      TRUSTED_PROXIES: ${PAXS_HAPROXY_IP:?Set PAXS_HAPROXY_IP inside PAXS_DOCKER_SUBNET}
+      DATABASE_URL: postgresql+asyncpg://paxs_user:${PAXS_DB_PASSWORD:?Set PAXS_DB_PASSWORD to a URL-safe random value}@postgres:5432/paxs_db
       STORAGE_BACKEND: s3
       S3_ENDPOINT_URL: http://minio:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
+      S3_ACCESS_KEY: ${PAXS_MINIO_ROOT_USER:?Set PAXS_MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${PAXS_MINIO_ROOT_PASSWORD:?Set PAXS_MINIO_ROOT_PASSWORD}
       S3_BUCKET: paxs
       DICOM_RECEIVER_ENABLED: "true"
       WORKER_ENABLED: "true"
       HL7_ENABLED: "true"
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
       minio:
         condition: service_started
@@ -68,18 +80,19 @@ services:
       <<: *paxs-env
       PAXS_INSTANCE_ID: node-3
 
-  mysql:
-    image: mysql:8.0
-    container_name: paxs-mysql
+  postgres:
+    image: postgres:17
+    container_name: paxs-postgres
+    restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: paxs_db
-      MYSQL_USER: paxs_user
-      MYSQL_PASSWORD: paxs
+      POSTGRES_DB: paxs_db
+      POSTGRES_USER: paxs_user
+      POSTGRES_PASSWORD: ${PAXS_DB_PASSWORD:?Set PAXS_DB_PASSWORD to a URL-safe random value}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
     volumes:
-      - mysql-data:/var/lib/mysql
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ppaxs"]
+      test: ["CMD-SHELL", "pg_isready -U paxs_user -d paxs_db -h 127.0.0.1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -87,16 +100,25 @@ services:
   minio:
     image: minio/minio:latest
     container_name: paxs-minio
+    restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${PAXS_MINIO_ROOT_USER:?Set PAXS_MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${PAXS_MINIO_ROOT_PASSWORD:?Set PAXS_MINIO_ROOT_PASSWORD}
     volumes:
       - minio-data:/data
     ports:
-      - "9000:9000"   # S3 API (named storage backend + DR replica target)
-      - "9001:9001"   # MinIO console
+      - "127.0.0.1:9000:9000" # Local S3 administration only; nodes use the private network
+      - "127.0.0.1:9001:9001" # MinIO console; keep management off public interfaces
 
 volumes:
-  mysql-data:
+  postgres-data:
   minio-data:
+
+networks:
+  default:
+    name: paxs-lb
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${PAXS_DOCKER_SUBNET:?Set a non-overlapping PAXS_DOCKER_SUBNET}

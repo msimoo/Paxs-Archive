@@ -40,12 +40,16 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import re
 from fnmatch import fnmatch
+from urllib.parse import urlsplit
+
+log = logging.getLogger("paxs.proxy")
 
 # Root-absolute path roots owned by the app. Only these are ever prefixed, so a
 # genuine external URL (``https://host/viewer``) or an unrelated path is left
-# alone. Keep in sync with the FastAPI mounts in app/main.py.
+# alone. Keep in sync with the FastAPI mounts in app/main/app.py.
 APP_MOUNT_ROOTS = (
     "/viewer",
     "/studies-ui",
@@ -90,8 +94,11 @@ class TrustedHosts:
             if "/" in p:
                 try:
                     self.networks.append(ipaddress.ip_network(p, strict=False))
-                except ValueError:
-                    pass
+                except ValueError as exc:  # a bad CIDR is dropped, not trusted
+                    # Dropping an entry narrows trust; warn so an operator's typo
+                    # in TRUSTED_PROXIES does not silently change behaviour.
+                    log.warning("trusted_host_cidr_ignored error_type=%s",
+                                type(exc).__name__)
 
     def __contains__(self, host: str | None) -> bool:
         if host is None:
@@ -103,13 +110,136 @@ class TrustedHosts:
             try:
                 if ipaddress.ip_address(host) in net:
                     return True
-            except ValueError:
-                pass
+            except ValueError as exc:  # a hostname simply is not an address
+                log.debug("trusted_host_not_an_address error_type=%s",
+                          type(exc).__name__)
         return False
 
 
 # Retained for callers that imported the original private name.
 _TrustedHosts = TrustedHosts
+
+
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.IGNORECASE)
+_UNROUTABLE_HOSTS = {"0.0.0.0", "::"}
+
+
+def _valid_authority_input(raw: str | None) -> bool:
+    """Reject malformed, oversized, or URL-like host authority input."""
+    return bool(
+        isinstance(raw, str)
+        and raw
+        and len(raw) <= 300
+        and raw == raw.strip()
+        and not any(char.isspace() or ord(char) < 33 or ord(char) == 127 for char in raw)
+        and not any(char in raw for char in ",/\\?#@")
+    )
+
+
+def _canonicalize_hostname(hostname: str) -> tuple[str, bool] | None:
+    """Return canonical hostname and IPv6 flag, or reject invalid names."""
+    if "%" in hostname:
+        return None
+    try:
+        address = ipaddress.ip_address(hostname)
+        canonical_host = str(address).lower()
+        is_ipv6 = address.version == 6
+    except ValueError:
+        try:
+            canonical_host = hostname.rstrip(".").encode("idna").decode("ascii").lower()
+        except (UnicodeError, ValueError):
+            return None
+        if (
+            not canonical_host
+            or len(canonical_host) > 253
+            or canonical_host in _UNROUTABLE_HOSTS
+            or any(not _DNS_LABEL_RE.fullmatch(label) for label in canonical_host.split("."))
+        ):
+            return None
+        is_ipv6 = False
+    return canonical_host, is_ipv6
+
+
+def _parse_host_authority(raw: str | None):
+    """Return a canonical (hostname, port, authority), rejecting URL syntax."""
+    if not _valid_authority_input(raw):
+        return None
+    assert raw is not None
+    try:
+        parts = urlsplit(f"//{raw}")
+        if parts.netloc != raw or parts.path or parts.query or parts.fragment:
+            return None
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if not hostname:
+        return None
+    canonical = _canonicalize_hostname(hostname)
+    if canonical is None:
+        return None
+    canonical_host, is_ipv6 = canonical
+    if canonical_host in _UNROUTABLE_HOSTS or (port is not None and port == 0):
+        return None
+    authority = f"[{canonical_host}]" if is_ipv6 else canonical_host
+    if port is not None:
+        authority += f":{port}"
+    return canonical_host, port, authority
+
+
+def _matches_allowed_authority(
+    hostname: str,
+    port: int | None,
+    allowed_hosts: str | list[str] | tuple[str, ...],
+) -> bool:
+    """Check canonical host and optional port against explicit allowlist entries."""
+    patterns = allowed_hosts.split(",") if isinstance(allowed_hosts, str) else allowed_hosts
+    for item in patterns:
+        pattern = str(item).strip()
+        wildcard = pattern.startswith("*.")
+        if wildcard:
+            pattern = pattern[2:]
+        if "*" in pattern:
+            continue
+        try:
+            allowed_ip = ipaddress.ip_address(pattern)
+        except ValueError as exc:  # a hostname pattern is the normal case
+            log.debug("proxy_pattern_not_an_address error_type=%s", type(exc).__name__)
+            allowed = _parse_host_authority(pattern)
+            if allowed is None:
+                continue
+            allowed_host, allowed_port, _ = allowed
+        else:
+            allowed_host, allowed_port = str(allowed_ip).lower(), None
+        host_matches = (
+            hostname.endswith("." + allowed_host) and hostname != allowed_host
+            if wildcard
+            else hostname == allowed_host
+        )
+        if host_matches and (allowed_port is None or allowed_port == port):
+            return True
+    return False
+
+
+def validated_host_authority(
+    raw: str | None,
+    allowed_hosts: str | list[str] | tuple[str, ...] | None,
+) -> str | None:
+    """Canonicalize a request host only when it matches an explicit allowlist.
+
+    Exact hostnames/IPs and leftmost ``*.example.org`` patterns are supported.
+    A port in an allowlist entry pins the port; otherwise a validated request
+    port is retained. Catch-all wildcards are intentionally rejected.
+    """
+    parsed = _parse_host_authority(raw)
+    if parsed is None:
+        return None
+    hostname, port, authority = parsed
+    if allowed_hosts is None:
+        return authority
+    if _matches_allowed_authority(hostname, port, allowed_hosts):
+        return authority
+    return None
 
 
 class ForwardedPrefixMiddleware:
@@ -119,9 +249,15 @@ class ForwardedPrefixMiddleware:
     before routing, and so streaming/File responses pass through untouched.
     """
 
-    def __init__(self, app, trusted_hosts: str | list[str] = "127.0.0.1") -> None:
+    def __init__(
+        self,
+        app,
+        trusted_hosts: str | list[str] = "127.0.0.1",
+        allowed_hosts: str | list[str] = "localhost,127.0.0.1,::1",
+    ) -> None:
         self.app = app
         self.trusted = TrustedHosts(trusted_hosts)
+        self.allowed_hosts = allowed_hosts
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] not in ("http", "websocket"):
@@ -157,10 +293,11 @@ class ForwardedPrefixMiddleware:
 
         # X-Forwarded-Host / Proto so request.base_url and url_for are correct.
         fwd_host = headers.get("x-forwarded-host", "").split(",")[0].strip()
-        if fwd_host:
+        safe_host = validated_host_authority(fwd_host, self.allowed_hosts)
+        if safe_host:
             new_scope["headers"] = [
                 (k, v) for (k, v) in new_scope.get("headers", ()) if k.lower() != b"host"
-            ] + [(b"host", fwd_host.encode("latin1"))]
+            ] + [(b"host", safe_host.encode("ascii"))]
 
         fwd_proto = headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
         if fwd_proto in ("http", "https", "ws", "wss"):

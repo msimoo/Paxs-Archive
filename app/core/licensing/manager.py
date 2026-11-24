@@ -19,9 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from app.core.licensing.crypto import (
+    InvalidLicenseSignature,
+    LicenseConfigurationError,
     LicenseData,
+    RevokedSigningKey,
+    assert_license_signature,
     decrypt_license_container,
-    verify_license_signature,
 )
 from app.core.licensing.fingerprint import get_hardware_info, get_machine_fingerprint
 
@@ -83,6 +86,31 @@ class LicenseManager:
     @property
     def license_data(self) -> LicenseData | None:
         return self._data
+
+    def _check_signature(self, data: LicenseData) -> tuple[LicenseStatus | None, str]:
+        """``(failure status, message)``, or ``(None, "")`` when the signature is good.
+
+        Split out of :meth:`load_license` so the two failure modes stay legible
+        and the caller stays inside the function-length ceiling: a licence signed
+        by the retired vendor key (B-2/FS-7) is reported as such — a generic
+        "invalid signature" would send the operator hunting for a corrupt file.
+        """
+        try:
+            assert_license_signature(data)
+            return None, ""
+        except RevokedSigningKey as exc:
+            log.error("License %s was signed by a revoked vendor key: %s",
+                      data.license_id, exc)
+            return LicenseStatus.INVALID_SIGNATURE, (
+                "This license was signed by the revoked vendor key and must be "
+                f"re-issued by the vendor. {exc}"
+            )
+        except (InvalidLicenseSignature, LicenseConfigurationError) as exc:
+            log.error("License signature verification failed for %s: %s",
+                      data.license_id, exc)
+            return LicenseStatus.INVALID_SIGNATURE, (
+                "License digital signature is invalid or has been modified"
+            )
 
     def load_license(self, file_path: Path | str | None = None) -> LicenseStatus:
         """Loads, decrypts, and verifies the license file."""
@@ -151,12 +179,13 @@ class LicenseManager:
             log.error("License container decryption error: %s", exc)
             return self._status
 
-        # Verify RSA digital signature
-        if not verify_license_signature(data):
+        # Verify the digital signature. B-2/FS-7: a licence signed by the retired
+        # vendor key is rejected here, with a message that says *why*.
+        failure, message = self._check_signature(data)
+        if failure is not None:
             self._data = data
-            self._status = LicenseStatus.INVALID_SIGNATURE
-            self._status_message = "License digital signature is invalid or has been modified"
-            log.error("License signature verification failed for %s", data.license_id)
+            self._status = failure
+            self._status_message = message
             return self._status
 
         # Verify hardware fingerprint
@@ -204,7 +233,16 @@ class LicenseManager:
         except Exception as exc:
             return False, f"Invalid license file format or decryption failed: {exc}"
 
-        if not verify_license_signature(data):
+        try:
+            assert_license_signature(data)
+        except RevokedSigningKey as exc:
+            return False, (
+                "This license was signed by the revoked vendor key and cannot be "
+                f"activated. {exc}"
+            )
+        except LicenseConfigurationError as exc:
+            return False, f"Licensing is misconfigured on this server: {exc}"
+        except InvalidLicenseSignature:
             return False, "License cryptographic signature is invalid or tampered"
 
         host_fp = get_machine_fingerprint()

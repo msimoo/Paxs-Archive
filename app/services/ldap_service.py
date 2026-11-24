@@ -1,6 +1,6 @@
 """LDAP / Active Directory integration service.
 
-Directory authentication is **fail-closed** (``plan_9_2026.md`` C02):
+Directory authentication is **fail-closed** (``plans/legacy/archive-notes/plan_9_2026.md`` C02):
 
 * disabled unless ``LDAP_ENABLED`` is true *and* ``LDAP_SERVER`` + ``LDAP_BASE_DN``
   are configured;
@@ -21,14 +21,16 @@ a declared setting, that fallback was in fact the only reachable code path.
 from __future__ import annotations
 
 import logging
+import ssl
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.roles import ROLES, normalize_role
-from app.db.models import User
+from app.db.models import AuthSource, Tenant, User
 
 log = logging.getLogger("paxs.ldap")
 
@@ -54,6 +56,10 @@ class LDAPUserIdentity:
 
 class LDAPConfigurationError(RuntimeError):
     """Raised when LDAP is enabled but not usable."""
+
+
+class LDAPIdentityConflictError(LDAPConfigurationError):
+    """Raised when LDAP would claim an account owned by another auth source."""
 
 
 # --------------------------------------------------------------------------- #
@@ -108,10 +114,36 @@ def is_ldap_configured() -> bool:
     )
 
 
+def _escape_dn_value(value: str) -> str:
+    """Escape an untrusted value inserted into an LDAP distinguished name."""
+    escaped: list[str] = []
+    last_index = len(value) - 1
+    for index, char in enumerate(value):
+        if char == "\0":
+            escaped.append("\\00")
+        elif ord(char) < 0x20 or ord(char) == 0x7F:
+            escaped.extend(f"\\{byte:02x}" for byte in char.encode("utf-8"))
+        elif char in ',+"\\<>;=/' or (char == "#" and index == 0):
+            escaped.append("\\" + char)
+        elif char == " " and (index == 0 or index == last_index):
+            escaped.append("\\ ")
+        else:
+            escaped.append(char)
+    return "".join(escaped)
+
+
+def _escape_filter_value(value: str) -> str:
+    """Escape LDAP filter metacharacters per RFC 4515."""
+    substitutions = {"\\": r"\5c", "*": r"\2a", "(": r"\28", ")": r"\29", "\0": r"\00"}
+    return "".join(substitutions.get(char, char) for char in value)
+
+
 def _user_dn(username: str) -> str:
     template = str(settings.LDAP_USER_DN_TEMPLATE or "uid={username},{base_dn}")
     try:
-        return template.format(username=username, base_dn=settings.LDAP_BASE_DN)
+        return template.format(
+            username=_escape_dn_value(username), base_dn=settings.LDAP_BASE_DN
+        )
     except (KeyError, IndexError, ValueError) as exc:  # malformed template
         raise LDAPConfigurationError(
             f"LDAP_USER_DN_TEMPLATE is invalid ({exc}); expected {{username}} / {{base_dn}} placeholders"
@@ -147,9 +179,11 @@ def _search_groups(conn, username: str) -> list[str]:
                 value = getattr(entry, attribute, None)
                 if value:
                     return [str(v) for v in value]
+        safe_dn = _escape_filter_value(_user_dn(username))
+        safe_username = _escape_filter_value(username)
         conn.search(
             search_base=base,
-            search_filter=f"(|(member={_user_dn(username)})(uid={username}))",
+            search_filter=f"(|(member={safe_dn})(uid={safe_username}))",
             attributes=["memberOf", "cn"],
         )
         groups: list[str] = []
@@ -158,8 +192,8 @@ def _search_groups(conn, username: str) -> list[str]:
             if member_of:
                 groups.extend(str(v) for v in member_of)
         return groups
-    except Exception as exc:  # noqa: BLE001 - group lookup is best effort
-        log.warning("LDAP group lookup failed for %s: %s", username, exc)
+    except Exception as exc:  # noqa: BLE001 - boundary guard: group lookup is best effort
+        log.warning("ldap_group_lookup_failed error_type=%s", type(exc).__name__)
         return []
 
 
@@ -175,13 +209,12 @@ def authenticate_ldap_user(username: str, password: str) -> LDAPUserIdentity | N
         return None
 
     if not settings.LDAP_ENABLED:
-        log.info("LDAP login refused for %r: directory authentication is disabled", username)
+        log.info("ldap_login_refused reason=disabled")
         return None
 
     if not is_ldap_configured():
         log.warning(
-            "LDAP login refused for %r: LDAP_SERVER and LDAP_BASE_DN must both be configured",
-            username,
+            "ldap_login_refused reason=directory_configuration_missing"
         )
         return None
 
@@ -189,15 +222,43 @@ def authenticate_ldap_user(username: str, password: str) -> LDAPUserIdentity | N
         import ldap3
     except ImportError:
         log.warning(
-            "LDAP login refused for %r: the optional 'ldap3' package is not installed", username
+            "ldap_login_refused reason=ldap_dependency_missing"
         )
         return None
 
     try:
+        server_url = str(settings.LDAP_SERVER or "").strip()
+        parts = urlsplit(server_url)
+        scheme = parts.scheme.lower()
+        if (
+            scheme not in {"ldap", "ldaps"}
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+            or parts.path not in ("", "/")
+            or parts.query
+            or parts.fragment
+        ):
+            raise LDAPConfigurationError(
+                "LDAP_SERVER must be an ldap:// or ldaps:// server URL without credentials or a path"
+            )
+
+        use_ssl = scheme == "ldaps"
+        if not use_ssl and not settings.LDAP_USE_TLS:
+            raise LDAPConfigurationError(
+                "LDAP simple binds require LDAPS or LDAP_USE_TLS=true for StartTLS"
+            )
+
+        environment = str(getattr(settings, "ENVIRONMENT", "") or "").strip().lower()
+        validation = ssl.CERT_NONE if environment in {"test", "testing"} else ssl.CERT_REQUIRED
+        ca_file = str(getattr(settings, "LDAP_CA_CERT_FILE", "") or "").strip() or None
+        tls = ldap3.Tls(validate=validation, ca_certs_file=ca_file)
         server = ldap3.Server(
-            settings.LDAP_SERVER,
+            parts.hostname,
+            port=parts.port or (636 if use_ssl else 389),
             get_info=ldap3.NONE,
-            use_ssl=str(settings.LDAP_SERVER).lower().startswith("ldaps://"),
+            use_ssl=use_ssl,
+            tls=tls,
             connect_timeout=float(settings.LDAP_TIMEOUT_SECONDS),
         )
         conn = ldap3.Connection(
@@ -208,27 +269,27 @@ def authenticate_ldap_user(username: str, password: str) -> LDAPUserIdentity | N
             receive_timeout=float(settings.LDAP_TIMEOUT_SECONDS),
             raise_exceptions=False,
         )
+        # LDAPS negotiates TLS when the socket is opened. Plain ldap:// is only
+        # permitted with StartTLS, and that negotiation must succeed before the
+        # connection is ever given credentials to bind.
+        if not use_ssl and not conn.start_tls():
+            log.warning("LDAP StartTLS negotiation failed; refusing bind")
+            return None
         if not conn.bind():
-            log.info(
-                "LDAP bind rejected for %r: %s",
-                username,
-                getattr(conn, "result", "") or "invalid credentials",
-            )
+            log.info("ldap_bind_rejected")
             return None
     except LDAPConfigurationError as exc:
         log.error("LDAP configuration error: %s", exc)
         return None
-    except Exception as exc:  # noqa: BLE001 - any failure denies the login
-        log.warning("LDAP bind error for %s: %s", username, exc)
+    except Exception as exc:  # noqa: BLE001 - boundary guard: any failure must deny the login, never 500
+        log.warning("LDAP transport or bind error: %s", type(exc).__name__)
         return None
 
     groups = _search_groups(conn, username)
     role = resolve_role(groups)
     if role is None:
         log.warning(
-            "LDAP login denied for %r: no configured group mapped to a PAXS role "
-            "(set LDAP_GROUP_ROLE_MAP or LDAP_DEFAULT_ROLE)",
-            username,
+            "ldap_login_denied reason=no_configured_role_mapping"
         )
         return None
 
@@ -250,8 +311,9 @@ def _display_name(conn, username: str) -> str:
                 value = getattr(entries[0], attribute, None)
                 if value:
                     return str(value)
-    except Exception:  # noqa: BLE001 - cosmetic only
-        pass
+    except (KeyError, AttributeError, TypeError) as exc:  # cosmetic only
+        # The username is a usable display name; never fail the page over a label.
+        log.debug("ldap_display_name_failed error_type=%s", type(exc).__name__)
     return username
 
 
@@ -264,15 +326,41 @@ def _email_domain() -> str:
 # --------------------------------------------------------------------------- #
 # provisioning
 # --------------------------------------------------------------------------- #
-async def sync_ldap_user_to_db(session: AsyncSession, identity: LDAPUserIdentity) -> User:
-    """Create or update the local record for a bound directory user.
+async def _assigned_directory_tenant_id(session: AsyncSession) -> int | None:
+    """Resolve the operator-assigned tenant for this LDAP directory.
 
-    * the role is always the canonical uppercase role resolved from the directory
-      groups (never a value supplied by the caller);
-    * ``is_active`` is never modified here, so an account disabled by an
-      administrator stays disabled;
-    * directory-managed accounts receive :data:`NO_LOCAL_PASSWORD_HASH` on
-      creation, which makes the local password login impossible.
+    A legacy single-scope installation with no VNA tenant rows may continue to
+    provision NULL-scoped accounts. Once tenant isolation is configured, LDAP
+    provisioning requires an explicit active ``LDAP_TENANT_ID`` and fails closed
+    rather than creating an unscoped account.
+    """
+    configured_id = getattr(settings, "LDAP_TENANT_ID", None)
+    if configured_id is not None:
+        try:
+            tenant_id = int(configured_id)
+        except (TypeError, ValueError) as exc:
+            raise LDAPConfigurationError("LDAP_TENANT_ID must be a valid tenant id") from exc
+        tenant = await session.get(Tenant, tenant_id)
+        if tenant is None or not tenant.is_active:
+            raise LDAPConfigurationError("LDAP_TENANT_ID must name an active tenant")
+        return tenant_id
+
+    has_tenants = (
+        await session.execute(select(Tenant.id).limit(1))
+    ).scalar_one_or_none()
+    if has_tenants is not None:
+        raise LDAPConfigurationError(
+            "LDAP_TENANT_ID must be configured when VNA tenants exist"
+        )
+    return None
+
+
+async def sync_ldap_user_to_db(session: AsyncSession, identity: LDAPUserIdentity) -> User:
+    """Create or synchronize only an LDAP-owned record in its assigned tenant.
+
+    Role and display name come from the bound directory identity. The local
+    password, active flag, and tenant assignment are never overwritten. Existing
+    non-LDAP accounts are a hard namespace collision, not candidates for adoption.
     """
     role = normalize_role(identity.mapped_role)
     if role is None:
@@ -280,23 +368,38 @@ async def sync_ldap_user_to_db(session: AsyncSession, identity: LDAPUserIdentity
             f"refusing to provision {identity.username!r}: {identity.mapped_role!r} is not a known role"
         )
 
+    tenant_id = await _assigned_directory_tenant_id(session)
+    normalized_username = str(identity.username or "").strip()
+    if not normalized_username:
+        raise LDAPConfigurationError("refusing to provision an empty LDAP username")
+
     user = (
-        await session.execute(select(User).where(User.username == identity.username))
+        await session.execute(
+            select(User).where(func.lower(User.username) == normalized_username.lower())
+        )
     ).scalar_one_or_none()
 
     if user is not None:
+        if user.auth_source != AuthSource.LDAP:
+            log.error("SECURITY ALERT: refused LDAP identity collision with a non-LDAP account")
+            raise LDAPIdentityConflictError("username belongs to another authentication source")
+        if user.tenant_id != tenant_id:
+            log.error("SECURITY ALERT: refused LDAP account sync across directory tenant scope")
+            raise LDAPIdentityConflictError("LDAP account belongs to a different tenant")
         user.full_name = identity.full_name or user.full_name
         user.role = role
         await session.flush()
         return user
 
     user = User(
-        username=identity.username,
+        username=normalized_username,
         password_hash=NO_LOCAL_PASSWORD_HASH,
         full_name=identity.full_name,
         role=role,
+        auth_source=AuthSource.LDAP,
+        tenant_id=tenant_id,
     )
     session.add(user)
     await session.flush()
-    log.info("Provisioned directory user %s with role %s", user.username, user.role)
+    log.info("Provisioned LDAP-owned account with directory-mapped role %s", user.role)
     return user

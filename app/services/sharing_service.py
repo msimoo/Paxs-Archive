@@ -9,12 +9,14 @@ import base64
 import io
 import secrets
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 import qrcode
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import resolve_public_base_url, settings
+from app.core.proxy_prefix import prefix_path
 from app.db.models import PatientShare, Study
 
 
@@ -77,7 +79,9 @@ def share_url(token: str, request=None) -> str:
     minting a dead ``http://0.0.0.0/...`` link (V2-2).
     """
     base = resolve_public_base_url(request)
-    return f"{base}/viewer?share={token}"
+    root_path = request.scope.get("root_path", "") if request is not None else ""
+    route = prefix_path(root_path, "/api/v1/share/exchange")
+    return f"{base}{route}?{urlencode({'share': token})}"
 
 
 def human_expiry(share: PatientShare) -> str:

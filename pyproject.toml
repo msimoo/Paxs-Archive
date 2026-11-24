@@ -1,0 +1,82 @@
+# Tool configuration for the CI gates (FT-3, UP-1, UP-7).
+#
+# There is deliberately no [build-system] / [project] table: this repository is
+# deployed as a source tree, not installed as a distribution. Only the analyser
+# sections live here.
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# Vendored viewer bundles and generated migration revisions are not hand-written
+# source; `.workbuddy-ai` is the agent scratch area.
+extend-exclude = ["app/static", "migrations/versions", ".workbuddy-ai", "venv"]
+
+[tool.ruff.lint]
+# Broad on purpose: `.github/workflows/ci.yml` runs this through
+# `tools/ci/ratchet.py`, which only fails on diagnostics that land on a line the
+# change touched. The 1004 pre-existing diagnostics are reported, never fatal —
+# but the next one cannot slip in.
+select = [
+    "E", "W",      # pycodestyle
+    "F",           # pyflakes: unused imports/names, undefined names
+    "I",           # import sorting
+    "N",           # pep8-naming
+    "UP",          # pyupgrade: modern syntax for the pinned target
+    "B",           # flake8-bugbear: real bug patterns (mutable defaults, ...)
+    "C4", "SIM", "RET", "PIE",
+    "RUF",         # ruff-specific
+    "ASYNC",       # async pitfalls — AGENTS.md N-4 (no blocking I/O in async def)
+    "S",           # bandit: security (PHI system)
+    "LOG",         # logging pitfalls — AGENTS.md N-2 (never log PHI)
+    "BLE",         # blind `except Exception:` — AGENTS.md §3.3 wants a reason,
+                   # which is what the repository's `# noqa: BLE001 - <why>` is
+    "T20",         # no print() in application code
+    "PLR0915", "PLR0912",  # function length / branching (AGENTS.md §3.1)
+]
+ignore = [
+    "E501",    # line length: the formatter owns it and the ratchet would spam
+    "S101",    # assert: used deliberately throughout the test suite
+    "S311",    # random: used for non-cryptographic ids, not secrets
+    "S324",    # md5/sha1: used for deterministic key names, not integrity
+    "B008",    # `Depends(...)` in a default IS the FastAPI idiom, not a bug
+    "S105",    # fires on token/cookie *names* ("X-PAXS-Share-Token", ...)
+    "UP017",   # the codebase standardises on `timezone.utc` (naive-UTC storage)
+    "RUF001", "RUF002", "RUF003",  # ambiguous unicode — docstrings use em dashes
+    "N818",    # exception class names need not end in "Error"
+    "PLR0912", # too-many-branches: noisy on protocol/dispatch tables
+]
+
+[tool.ruff.lint.pylint]
+# Mirrors the AGENTS.md §3.1 hard ceiling on function length.
+max-statements = 60
+
+[tool.ruff.lint.per-file-ignores]
+# The CI gates are command-line programs: printing to stdout (and the GitHub
+# annotation format) is their output channel, not a debugging leftover.
+"tools/**" = ["T201"]
+# Operator CLIs (key generation, licence issuing, gateway helpers) likewise.
+"scripts/**" = ["T201"]
+# `assert` is the assertion mechanism of the test suite.
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.13"
+# Optional third-party packages (ldap3, pylibjpeg plugins, ...) are imported
+# lazily and have no stubs; a missing stub is not a type error here.
+ignore_missing_imports = true
+show_error_codes = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+# Deliberately NOT `strict` / `check_untyped_defs`: 452 functions still carry
+# incomplete hints (AGENTS.md §3.3). `tools/ci/ratchet.py` fails the build only
+# on errors that land on a changed line, so new code is held to the standard
+# without the existing debt blocking every change.
+files = ["app"]
+exclude = ["app/static", "migrations/versions", "\\.workbuddy-ai", "venv"]
+
+[tool.pytest.ini_options]
+# C-05: collect only the repository's own suite. Untracked sibling folders
+# (PAXS_PYTHON_MILLENESYS/, COMPARISON/, build-*/) carry their own tests and
+# must never be picked up by a bare `pytest` run.
+testpaths = ["tests"]

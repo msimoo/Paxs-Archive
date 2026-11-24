@@ -53,10 +53,12 @@ async def replicate_study(study_uid: str,
         result = await asyncio.to_thread(
             replication_service.replicate_study, study_uid
         )
+    except replication_service.ReplicationBusyError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(400, f"Replication failed: {exc}") from exc
+        raise HTTPException(400, "Replication failed") from None
     if not result.get("ok", True):
-        raise HTTPException(422, result.get("error", "replication failed"))
+        raise HTTPException(422, "Replication failed")
     return result

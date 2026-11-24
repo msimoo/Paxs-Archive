@@ -19,66 +19,84 @@ their tenant (VNA), guests stay readable (the viewer is same-origin).
 
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import json
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
+    SHARE_COOKIE_NAME,
+    SHARE_TOKEN_HEADER,
     get_share_scope,
     require_series_access,
     require_series_read,
     tenant_scope,
 )
 from app.core.config import settings
+from app.core.concurrency import run_blocking
+from app.core.response_admission import (
+    AdmittedStreamingResponse,
+    release_response_bytes,
+    reserve_response_bytes,
+)
 from app.db.models import User
 from app.db.session import get_db
 from app.services import volume_service
+from app.services.volume.geometry_validation import GeometryValidationError
+from app.services.volume.slices import VolumeVariant
 
 log = logging.getLogger("paxs.api.volume")
 
 router = APIRouter(prefix="/api/v1/volume", tags=["Volume"])
 
 
-def _slice_range(raw: str | None, total: int) -> tuple[int, int]:
-    """Parse `slices` into a half-open [start, end) range over `total` slices."""
-    if not raw or raw.strip().lower() in ("", "all", "*"):
-        return 0, total
-    text = raw.strip().replace(":", "-")
-    try:
-        parts = text.split("-")
-        if len(parts) == 1:
-            idx = int(parts[0])
-            start, end = idx, idx
-        elif len(parts) == 2:
-            start, end = int(parts[0]), int(parts[1])
-        else:
-            raise ValueError
-    except (TypeError, ValueError):
-        raise HTTPException(
-            400, "slices must be 'all' or '<start>-<end>' (0-indexed, inclusive)"
-        ) from None
-    start = max(start, 0)
-    end = min(end, total - 1)
-    if start > end:
-        raise HTTPException(416, f"Slice range out of bounds (0-{total - 1})")
-    return start, end + 1
+def _geometry_http_exception(error: GeometryValidationError) -> HTTPException:
+    """Translate rejected MPR geometry to a stable, PHI-free HTTP contract."""
+    return HTTPException(
+        status_code=422,
+        detail={"code": error.code.value, "reason": error.detail},
+    )
 
 
 # ---------------------------------------------------------------------------
-# Processing mode negotiation (plan_viewer_process.md §5.1, Phase 1)
+# Processing mode negotiation (plans/legacy/archive-notes/plan_viewer_process.md §5.1, Phase 1)
 # ---------------------------------------------------------------------------
 
 _VALID_MODES = ("server", "client", "hybrid")
+
+
+def _viewer_session_identity(request: Request, user: User | None) -> str:
+    """Identify a viewer scope without storing a share token or trusting proxy headers."""
+    if user is not None:
+        return f"user:{user.id}"
+    share_token = request.headers.get(SHARE_TOKEN_HEADER) or request.cookies.get(SHARE_COOKIE_NAME)
+    if share_token:
+        digest = hashlib.sha256(share_token.encode("utf-8")).hexdigest()
+        return f"share:{digest}"
+    peer = request.client.host if request.client is not None else "unknown"
+    return f"peer:{peer}"
 
 
 def _global_mode() -> str:
     """The configured global mode, coerced to a known value."""
     mode = (settings.VIEWER_PROCESSING_MODE or "hybrid").lower().strip()
     return mode if mode in _VALID_MODES else "hybrid"
+
+
+def _normalise_role_map(parsed: dict[object, object]) -> dict[str, str]:
+    """Keep only string roles mapped to known viewer processing modes."""
+    role_map: dict[str, str] = {}
+    for role, mode in parsed.items():
+        if not isinstance(role, str) or not isinstance(mode, str):
+            continue
+        normalised_mode = mode.lower().strip()
+        if normalised_mode in _VALID_MODES:
+            role_map[role.upper().strip()] = normalised_mode
+    return role_map
 
 
 def parse_role_map() -> dict[str, str]:
@@ -115,13 +133,7 @@ def parse_role_map() -> dict[str, str]:
         )
         return {}
 
-    role_map: dict[str, str] = {}
-    for role, mode in parsed.items():
-        if not isinstance(role, str) or not isinstance(mode, str):
-            continue
-        if mode.lower().strip() in _VALID_MODES:
-            role_map[role.upper().strip()] = mode.lower().strip()
-    return role_map
+    return _normalise_role_map(parsed)
 
 
 def resolve_role_override(user: User | None) -> str | None:
@@ -233,9 +245,11 @@ def resolve_hybrid_mode(
         return "server"
 
     # 2. Server overloaded → shed onto the client if it can carry the load.
+    session_limit = max(0, settings.HYBRID_MAX_SERVER_MPR_SESSIONS)
+    volume_limit_mb = volume_service.server_volume_shed_budget_mb()
     server_overloaded = (
-        active_server_sessions >= settings.HYBRID_MAX_SERVER_MPR_SESSIONS
-        or server_vol_cache_mb >= settings.HYBRID_SERVER_VOL_BUDGET_MB
+        (session_limit > 0 and active_server_sessions >= session_limit)
+        or (volume_limit_mb > 0 and server_vol_cache_mb >= volume_limit_mb)
     )
     if server_overloaded:
         return "client" if webgl_score >= HYBRID_CLIENT_MIN_SCORE else "server"
@@ -266,7 +280,7 @@ def _negotiate_hybrid(webgl_score: int, rtt_ms: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Server-mode endpoint guards (plan_viewer_process.md §5.2 and §8 Phase 2)
+# Server-mode endpoint guards (plans/legacy/archive-notes/plan_viewer_process.md §5.2 and §8 Phase 2)
 #
 # Endpoints are never hard-blocked.  A rejected request returns 503 plus a
 # machine-readable X-PAXS-Mode-Hint header so the viewer can re-route itself,
@@ -315,7 +329,53 @@ def _mode_hint_headers(mode: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Server load reporting (plan_viewer_process.md §7.3, Phase 4 step 4.2)
+# B-10 — the two explicit volume budgets
+#
+# `VOLUME_MAX_SLICES` bounds the *slice count*, which is not a size: 4096 slices
+# of a 512x512 16-bit volume is ~2 GiB, and `/data` joined every chunk into one
+# `bytes` object — a single request could allocate and hold the whole thing.
+# `/tiles` had no cap of its own at all, so `range=0-4095` rendered thousands of
+# PNGs in one call. Both budgets are checked from *declared* values, before any
+# buffer is allocated or any frame is rendered.
+# ---------------------------------------------------------------------------
+
+def enforce_volume_byte_cap(payload_len: int) -> None:
+    """413 when the response body would exceed ``VOLUME_MAX_BYTES``.
+
+    Called with the exact declared length (``Content-Length``), so the refusal
+    is deterministic rather than a function of how the body happens to be built.
+    413 is the honest status: the request is well-formed, it just asks for more
+    than this node will materialise. ``0`` disables the cap (N-5: an explicit
+    zero means disabled, and is never silently replaced by a default).
+    """
+    max_bytes = int(getattr(settings, "VOLUME_MAX_BYTES", 0) or 0)
+    if max_bytes and payload_len > max_bytes:
+        raise HTTPException(
+            413,
+            f"Requested volume payload is {payload_len} bytes, above "
+            f"VOLUME_MAX_BYTES ({max_bytes}). Reduce the slice range or "
+            f"increase downsample.",
+        )
+
+
+def enforce_tile_cap(count: int) -> None:
+    """413 when a ``/tiles`` range asks for more than ``VOLUME_MAX_TILES``.
+
+    A tile is a reslice plus a PNG encode plus its share of the concatenated
+    response — far more expensive per unit than a raw slice, which is why it
+    gets its own budget instead of inheriting ``VOLUME_MAX_SLICES``.
+    """
+    max_tiles = int(getattr(settings, "VOLUME_MAX_TILES", 0) or 0)
+    if max_tiles and count > max_tiles:
+        raise HTTPException(
+            413,
+            f"Requested {count} tiles, above VOLUME_MAX_TILES ({max_tiles}). "
+            "Narrow the range or request fewer frames.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Server load reporting (plans/legacy/archive-notes/plan_viewer_process.md §7.3, Phase 4 step 4.2)
 #
 # Every volume endpoint advertises the server's current load so a hybrid client
 # can re-evaluate mid-session (e.g. stop promoting secondary viewports onto the
@@ -334,9 +394,10 @@ def server_load_headers() -> dict[str, str]:
     """Current server load as ``<active>/<max>`` and ``<mb>/<budget>`` ratios."""
     active = volume_service.active_server_session_count()
     cache_mb = volume_service.estimated_vol_cache_mb()
+    volume_limit_mb = volume_service.server_volume_shed_budget_mb()
     return {
         "X-PAXS-Server-Load": f"{active}/{settings.HYBRID_MAX_SERVER_MPR_SESSIONS}",
-        "X-PAXS-Vol-Cache-MB": f"{cache_mb}/{settings.HYBRID_SERVER_VOL_BUDGET_MB}",
+        "X-PAXS-Vol-Cache-MB": f"{cache_mb}/{volume_limit_mb}",
     }
 
 
@@ -346,14 +407,19 @@ def server_overloaded() -> bool:
     Used by the mid-session re-evaluation path: a saturated server must not be
     handed *additional* work even though the session already negotiated.
     """
+    session_limit = max(0, settings.HYBRID_MAX_SERVER_MPR_SESSIONS)
+    volume_limit_mb = volume_service.server_volume_shed_budget_mb()
     return (
-        volume_service.active_server_session_count() >= settings.HYBRID_MAX_SERVER_MPR_SESSIONS
-        or volume_service.estimated_vol_cache_mb() >= settings.HYBRID_SERVER_VOL_BUDGET_MB
+        (session_limit > 0 and volume_service.active_server_session_count() >= session_limit)
+        or (
+            volume_limit_mb > 0
+            and volume_service.estimated_vol_cache_mb() >= volume_limit_mb
+        )
     )
 
 
 # ---------------------------------------------------------------------------
-# Client-mode endpoint guards (plan_viewer_process.md §3.2 and §8 Phase 3)
+# Client-mode endpoint guards (plans/legacy/archive-notes/plan_viewer_process.md §3.2 and §8 Phase 3)
 #
 # The mirror image of the server-mode guard above.  In explicit ``client`` mode
 # the workstation owns reslicing and projection, so the server-side slicers are
@@ -393,26 +459,27 @@ def _reject_server_slicing(endpoint: str) -> HTTPException:
     )
 
 
-def _mode_endpoints(mode: str, series_uid: str) -> dict:
+def _mode_endpoints(mode: str, series_uid: str, variant: VolumeVariant = "auto") -> dict:
     """URL map the frontend should use for the resolved mode."""
     base = f"/api/v1/volume/{series_uid}"
-    common = {"info": f"{base}/info", "negotiate": f"{base}/negotiate"}
+    query = f"?variant={variant}" if variant != "auto" else ""
+    common = {"info": f"{base}/info{query}", "negotiate": f"{base}/negotiate{query}"}
     if mode == "server":
         return {
             **common,
-            "mpr_slice": f"{base}/mpr/slice",
-            "mip": f"{base}/mip",
-            "rendered": f"{base}/mpr/slice?format=png",
+            "mpr_slice": f"{base}/mpr/slice{query}",
+            "mip": f"{base}/mip{query}",
+            "rendered": f"{base}/mpr/slice{query}{'&' if query else '?'}format=png",
         }
     if mode == "client":
-        return {**common, "data": f"{base}/data"}
+        return {**common, "data": f"{base}/data{query}"}
     # hybrid / split — expose everything (a split session legitimately uses both
     # the coarse raw stream and the server-refined slice endpoint).
     return {
         **common,
-        "data": f"{base}/data",
-        "mpr_slice": f"{base}/mpr/slice",
-        "mip": f"{base}/mip",
+        "data": f"{base}/data{query}",
+        "mpr_slice": f"{base}/mpr/slice{query}",
+        "mip": f"{base}/mip{query}",
     }
 
 
@@ -461,6 +528,9 @@ def _mode_capabilities(mode: str) -> dict:
 async def volume_negotiate_endpoint(
     series_uid: str,
     request: Request,
+    webgl_score: int = Query(default=0, ge=0, le=100),
+    rtt_ms: int = Query(default=0, ge=0, le=600000),
+    variant: VolumeVariant = "auto",
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(require_series_read),
 ):
@@ -477,6 +547,7 @@ async def volume_negotiate_endpoint(
       ?rtt_ms=N                  measured RTT to this server in ms
       ?gpu_vram_mb=N             estimated GPU VRAM in MB (informational)
       ?hardware_concurrency=N    navigator.hardwareConcurrency (informational)
+      ?variant=auto|original|lossy  stack selection carried by returned URLs
     """
     if not settings.VOLUME_STREAMING_ENABLED:
         raise HTTPException(503, "Volume streaming is disabled")
@@ -497,12 +568,7 @@ async def volume_negotiate_endpoint(
     #    dynamic scoring (step 5.1): pinning a role to hybrid means "let the
     #    engine decide for this user", not "pin to a fixed pipeline".
     effective_mode = mode
-    q = request.query_params
-    webgl_score = 0
-    rtt_ms = 0
     if mode == "hybrid":
-        webgl_score = max(0, min(100, int(q.get("webgl_score", 0) or 0)))
-        rtt_ms = max(0, int(q.get("rtt_ms", 0) or 0))
         effective_mode = resolve_hybrid_mode(webgl_score, rtt_ms)
 
     # 3. Build response
@@ -515,7 +581,7 @@ async def volume_negotiate_endpoint(
         "configured_mode": mode,
         "effective_mode": effective_mode,
         "series_uid": series_uid,
-        "endpoints": _mode_endpoints(effective_mode, series_uid),
+        "endpoints": _mode_endpoints(effective_mode, series_uid, variant),
         "capabilities": _mode_capabilities(capability_mode),
     }
     # Step 5.1 — disclose the override so a user can tell "my role pinned this"
@@ -532,6 +598,7 @@ async def volume_negotiate_endpoint(
             "min_client_score": HYBRID_CLIENT_MIN_SCORE,
             "rtt_threshold_ms": settings.HYBRID_RTT_THRESHOLD_MS,
             "server_vol_budget_mb": settings.HYBRID_SERVER_VOL_BUDGET_MB,
+            "effective_server_vol_budget_mb": volume_service.server_volume_shed_budget_mb(),
             "max_server_sessions": settings.HYBRID_MAX_SERVER_MPR_SESSIONS,
         }
         body["hybrid_decision"] = {
@@ -583,40 +650,98 @@ def _negotiation_reason(
 async def volume_info_endpoint(
     series_uid: str,
     request: Request,
+    variant: VolumeVariant = "auto",
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(require_series_read),
 ):
-    """Volume geometry/encoding metadata for MPR reconstruction."""
+    """Volume geometry/encoding metadata for MPR reconstruction.
+
+    Auto uses the full series unless verified lossy copies overlap originals.
+    Explicit variants select a verified original or lossy copy group.
+    """
     if not settings.VOLUME_STREAMING_ENABLED:
         raise HTTPException(503, "Volume streaming is disabled")
     # C04: a series UID alone must not reach across institutions.
     await require_series_access(db, series_uid, user,
                                 share_scope=await get_share_scope(request))
     tenant_id, include_all = (None, True) if user is None else tenant_scope(user)
-    info = await volume_service.volume_info(
-        db, series_uid, tenant_id=tenant_id, include_all=include_all
-    )
+    try:
+        info = await volume_service.volume_info(
+            db, series_uid, tenant_id=tenant_id, include_all=include_all, variant=variant
+        )
+    except GeometryValidationError as exc:
+        raise _geometry_http_exception(exc) from None
     if info is None:
         raise HTTPException(404, "No readable volumetric series found")
     # §7.3 — /info is the probe endpoint the viewer already polls, so it is the
     # natural carrier for the load signal the hybrid engine re-reads mid-session.
     headers = {"Access-Control-Expose-Headers": LOAD_HEADERS_EXPOSED}
     headers.update(server_load_headers())
-    return JSONResponse(info, headers=headers)
+    response_info = dict(info)
+    response_info["client_mpr_limits"] = {
+        "max_slices": settings.VOLUME_MPR_CLIENT_MAX_SLICES,
+        "max_volume_bytes": settings.VOLUME_MPR_CLIENT_MAX_VOLUME_MB * 1024 * 1024,
+        "target_slices": settings.VOLUME_MPR_CLIENT_OVERVIEW_TARGET_SLICES,
+        "max_downsample": volume_service.MAX_DOWNSAMPLE,
+    }
+    response_info["server_mpr_overview"] = {
+        "downsample": settings.VOLUME_MPR_OVERVIEW_DOWNSAMPLE,
+        "max_primary_slices": settings.VOLUME_MPR_CLIENT_MAX_SLICES,
+    }
+    return JSONResponse(response_info, headers=headers)
+
+
+def _stream_headers(plan: volume_service.VolumeStreamPlan, mode: str) -> dict[str, str]:
+    """Response headers for a raw stream, from the plan's declared dimensions.
+
+    One builder for both formats: raw and NPY differ only in the dtype label and
+    in that ``mode=server`` adds the mode hint. Two copies of a nine-key dict is
+    how the two branches drifted apart before (Q-6).
+    """
+    headers = {
+        "Content-Length": str(plan.payload_len),
+        "X-Volume-Slices": f"{plan.out_count}",
+        "X-Volume-Rows": f"{plan.out_rows}",
+        "X-Volume-Cols": f"{plan.out_cols}",
+        "X-Volume-Downsample": f"{plan.downsample}",
+        "X-Volume-Dtype": plan.dtype,
+        "X-Volume-Derived-Resampled": "true" if plan.derived_resampled else "false",
+        "X-Volume-Gantry-Tilt-Corrected": "true" if plan.gantry_tilt_corrected else "false",
+        "Cache-Control": "private, no-store",
+        # V-13: no Range support here, so advertise none (RFC 9110 §14.3).
+        "Accept-Ranges": "none",
+        "Access-Control-Expose-Headers": (
+            "Content-Length, X-Volume-Slices, X-Volume-Rows, X-Volume-Cols, "
+            "X-Volume-Downsample, X-Volume-Dtype, X-Volume-Derived-Resampled, "
+            "X-Volume-Gantry-Tilt-Corrected, " + LOAD_HEADERS_EXPOSED
+        ),
+    }
+    if plan.fmt == "raw" and mode == "server":
+        headers.update(_mode_hint_headers(mode))
+    # §7.3 — advertise server load on every volume response so a hybrid client
+    # can re-evaluate mid-session without a dedicated metrics call.
+    headers.update(server_load_headers())
+    return headers
 
 
 @router.get("/{series_uid}/data")
 async def volume_data_endpoint(
     series_uid: str,
     request: Request,
+    variant: VolumeVariant = "auto",
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(require_series_read),
-):
+) -> Response:
     """Stream the raw voxel block of a series (optionally a sub-range).
 
     In ``server`` processing mode the raw stream is disabled — the thin client
-    renders from ``/mpr/slice`` and ``/tiles`` instead (plan_viewer_process.md
+    renders from ``/mpr/slice`` and ``/tiles`` instead (plans/legacy/archive-notes/plan_viewer_process.md
     §5.2).  Pass ``?force=1`` to bypass the guard.
+
+    Q-6: the request is *planned* by ``volume_service.plan_volume_stream`` —
+    window, sampled geometry, exact payload length and cache keys — and rendered
+    by ``render_volume_stream``. This handler owns only the HTTP surface: the ACL
+    and mode guards, the byte cap, the headers and the cache-hit status.
     """
     if not settings.VOLUME_STREAMING_ENABLED:
         raise HTTPException(503, "Volume streaming is disabled")
@@ -632,173 +757,58 @@ async def volume_data_endpoint(
         raise _reject_raw_streaming(series_uid, "data")
 
     tenant_id, include_all = (None, True) if user is None else tenant_scope(user)
-
-    bundle = await volume_service.volume_bundle(
-        db, series_uid, tenant_id=tenant_id, include_all=include_all
-    )
-    if bundle is None:
-        raise HTTPException(404, "No readable volumetric series found")
-    info, slices = bundle
-    # Multi-frame / Enhanced instances are expanded into per-frame slices by
-    # the service — no 422 needed; info["multi_frame"] is False for the
-    # expanded stream (info["source_multi_frame"] records the origin).
-
-    params = request.query_params
-    start, end = _slice_range(params.get("slices"), info["slices"])
-    count = end - start
-    if count <= 0:
-        raise HTTPException(416, f"Slice range out of bounds (0-{info['slices'] - 1})")
-    if count > settings.VOLUME_MAX_SLICES:
-        raise HTTPException(
-            416, f"Slice range exceeds VOLUME_MAX_SLICES ({settings.VOLUME_MAX_SLICES})"
+    try:
+        plan = await volume_service.plan_volume_stream(
+            db, series_uid,
+            tenant_id=tenant_id,
+            include_all=include_all,
+            params=dict(request.query_params),
+            max_slices=settings.VOLUME_MAX_SLICES,
+            variant=variant,
         )
+    except volume_service.VolumeStreamError as exc:
+        raise HTTPException(exc.http_status, str(exc)) from None
+    except GeometryValidationError as exc:
+        raise _geometry_http_exception(exc) from None
 
-    rescale = str(params.get("rescale", "")).lower() in ("1", "true", "yes")
-    downsample = max(1, min(8, int(params.get("downsample", 1) or 1)))
-    fmt = str(params.get("format", "raw")).lower()
-    if fmt not in ("raw", "npy"):
-        raise HTTPException(400, "format must be 'raw' or 'npy'")
-
-    rows = info["rows"]
-    cols = info["columns"]
-    samples = info["samples_per_pixel"]
-
-    # Declared geometry must equal the sampled array's shape. The sampler
-    # strides with arr[::step, ::step] (ceil(n/step) samples), so the shared
-    # strided_dim helper is used here instead of floor division (H13) — a
-    # mismatch produced wrong X-Volume-Rows/Cols, a wrong .npy header shape and
-    # a Content-Length that did not match the body.
-    out_rows = volume_service.strided_dim(rows, downsample)
-    out_cols = volume_service.strided_dim(cols, downsample)
-    out_count = len(slices[start:end:downsample])
-
-    def stream():
-        if fmt == "npy":
-            dtype = "float32" if rescale else info["dtype"]
-            shape = (out_count, out_rows, out_cols, samples) if samples > 1 else (out_count, out_rows, out_cols)
-            yield volume_service.npy_header(dtype, shape)
-        for chunk in volume_service.iter_volume_bytes(
-            slices, rescale=rescale, start=start, end=end, downsample=downsample
-        ):
-            yield chunk
-
-    if fmt == "raw":
-        payload_len = volume_service.volume_byte_length(
-            slices, info["dtype"], rows, cols, samples, start=start, end=end, downsample=downsample
+    # B-10: the byte ceiling is checked against the declared body length before
+    # the payload is built.
+    enforce_volume_byte_cap(plan.payload_len)
+    headers = _stream_headers(plan, mode)
+    reserve_response_bytes(plan.payload_len)
+    try:
+        cached = await volume_service.read_cached_stream(plan)
+    except BaseException:
+        # A cancelled Redis lookup also releases the reservation before no
+        # response object has taken ownership of it.
+        release_response_bytes(plan.payload_len)
+        raise
+    if cached is not None:
+        headers["X-Cache"] = "HIT"
+        chunks = (
+            cached[offset:offset + volume_service.STREAM_CHUNK_BYTES]
+            for offset in range(0, len(cached), volume_service.STREAM_CHUNK_BYTES)
         )
-        if rescale:
-            payload_len = out_count * out_rows * out_cols * samples * 4
-        headers = {
-            "Content-Length": str(payload_len),
-            "X-Volume-Slices": f"{out_count}",
-            "X-Volume-Rows": f"{out_rows}",
-            "X-Volume-Cols": f"{out_cols}",
-            "X-Volume-Downsample": f"{downsample}",
-            "X-Volume-Dtype": "float32" if rescale else info["dtype"],
-            "Cache-Control": "private, no-store",
-            "Accept-Ranges": "bytes",
-            "Access-Control-Expose-Headers": (
-                "Content-Length, X-Volume-Slices, X-Volume-Rows, X-Volume-Cols, "
-                "X-Volume-Downsample, X-Volume-Dtype, " + LOAD_HEADERS_EXPOSED
-            ),
-        }
-        if mode == "server":
-            headers.update(_mode_hint_headers(mode))
     else:
-        dtype = "float32" if rescale else info["dtype"]
-        payload_len = out_count * out_rows * out_cols * samples * np_dtype_itemsize(dtype)
-        payload_len += len(volume_service.npy_header(
-            dtype, (out_count, out_rows, out_cols, samples) if samples > 1 else (out_count, out_rows, out_cols)
-        ))
-        headers = {
-            "Content-Length": str(payload_len),
-            "X-Volume-Slices": f"{out_count}",
-            "X-Volume-Rows": f"{out_rows}",
-            "X-Volume-Cols": f"{out_cols}",
-            "X-Volume-Downsample": f"{downsample}",
-            "X-Volume-Dtype": dtype,
-            "Cache-Control": "private, no-store",
-            "Accept-Ranges": "bytes",
-            "Access-Control-Expose-Headers": (
-                "Content-Length, X-Volume-Slices, X-Volume-Rows, X-Volume-Cols, "
-                "X-Volume-Downsample, X-Volume-Dtype, " + LOAD_HEADERS_EXPOSED
-            ),
-        }
-
-    # §7.3 — advertise server load on every volume response so a hybrid client
-    # can re-evaluate mid-session without a dedicated metrics call.
-    headers.update(server_load_headers())
-
-    media_type = (
-        "application/x-npy" if fmt == "npy"
-        else "application/octet-stream"
-    )
-
-    r_key = f"paxs:vol:stream:{series_uid}:{start}_{end}_{downsample}_{int(rescale)}_{fmt}"
-    canonical_key = (
-        f"paxs:vol:stream:{series_uid}:{info['slices']}"
-        if (start == 0 and end == info["slices"] and downsample == 1 and not rescale and fmt == "raw")
-        else None
-    )
-
-    from app.services.redis_service import get_redis_client
-
-    r_client = get_redis_client() if getattr(settings, "REDIS_CACHE_ENABLED", False) else None
-    if r_client:
-        try:
-            cached = r_client.get(r_key) or (r_client.get(canonical_key) if canonical_key else None)
-            if cached is not None and len(cached) == payload_len:
-                headers["X-Cache"] = "HIT"
-                return Response(
-                    content=cached,
-                    media_type=media_type,
-                    headers=headers,
-                )
-        except Exception:
-            pass
-
-    def build_and_cache():
-        chunks = []
-        if fmt == "npy":
-            dtype = "float32" if rescale else info["dtype"]
-            shape = (
-                (out_count, out_rows, out_cols, samples)
-                if samples > 1
-                else (out_count, out_rows, out_cols)
-            )
-            chunks.append(volume_service.npy_header(dtype, shape))
-        for chunk in volume_service.iter_volume_bytes(
-            slices, rescale=rescale, start=start, end=end, downsample=downsample
-        ):
-            chunks.append(chunk)
-        data = b"".join(chunks)
-        if r_client and len(data) <= 256 * 1024 * 1024:
-            try:
-                r_client.set(r_key, data, ex=3600)
-                if canonical_key and canonical_key != r_key:
-                    r_client.set(canonical_key, data, ex=3600)
-            except Exception as exc:
-                log.debug("Failed to cache volume in Redis: %s", exc)
-        return data
-
-    data = await asyncio.to_thread(build_and_cache)
-    return Response(
-        content=data,
-        media_type=media_type,
-        headers=headers,
-    )
-
-
-def np_dtype_itemsize(dtype: str) -> int:
-    import numpy as np
-
-    return np.dtype(dtype).itemsize
+        chunks = volume_service.render_volume_stream(plan)
+    headers["Content-Length"] = str(plan.payload_len)
+    try:
+        return AdmittedStreamingResponse(
+            chunks,
+            media_type=plan.media_type,
+            headers=headers,
+            reserved_bytes=plan.payload_len,
+        )
+    except BaseException:
+        release_response_bytes(plan.payload_len)
+        raise
 
 
 @router.get("/{series_uid}/mip")
 async def volume_mip_endpoint(
     series_uid: str,
     request: Request,
+    variant: VolumeVariant = "auto",
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(require_series_read),
 ):
@@ -837,9 +847,12 @@ async def volume_mip_endpoint(
 
     tenant_id, include_all = (None, True) if user is None else tenant_scope(user)
 
-    bundle = await volume_service.volume_bundle(
-        db, series_uid, tenant_id=tenant_id, include_all=include_all
-    )
+    try:
+        bundle = await volume_service.volume_bundle(
+            db, series_uid, tenant_id=tenant_id, include_all=include_all, variant=variant
+        )
+    except GeometryValidationError as exc:
+        raise _geometry_http_exception(exc) from None
     if bundle is None:
         raise HTTPException(404, "No readable volumetric series found")
     info, slices = bundle
@@ -874,13 +887,16 @@ async def volume_mip_endpoint(
     # + float32 stack) — run it in the thread pool so a heavy projection never
     # blocks the event loop for the node's other requests.
     try:
-        result = await asyncio.to_thread(
+        result = await run_blocking(
             volume_service.mip_project,
             slices, info, axis=axis, mode=mode, offset=offset,
             thickness=thickness, window_center=wc_f, window_width=ww_f,
+            tenant_id=tenant_id,
         )
     except HTTPException:
         raise
+    except volume_service.VolumeAssemblyCapacityError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except IndexError as exc:
         raise HTTPException(416, str(exc)) from exc
     except ValueError as exc:
@@ -897,10 +913,13 @@ async def volume_mip_endpoint(
         "X-MIP-Slab": slab,
         "X-MIP-Spacing": ",".join(f"{v:.4f}" for v in result.spacing),
         "X-MIP-Window": f"{center:.1f},{width:.1f}",
+        "X-MIP-Derived-Resampled": "true" if info.get("derived_resampled") else "false",
+        "X-MIP-Gantry-Tilt-Corrected": "true" if info.get("gantry_tilt_corrected") else "false",
         "Cache-Control": "no-store",
         "Access-Control-Expose-Headers": (
             "Content-Length, X-PAXS-Mode-Hint, X-MIP-Rows, X-MIP-Cols, "
             "X-MIP-Axis, X-MIP-Mode, X-MIP-Slab, X-MIP-Spacing, X-MIP-Window, "
+            "X-MIP-Derived-Resampled, X-MIP-Gantry-Tilt-Corrected, "
             + LOAD_HEADERS_EXPOSED
         ),
     }
@@ -926,6 +945,7 @@ async def volume_mip_endpoint(
 async def volume_tiles_endpoint(
     series_uid: str,
     request: Request,
+    variant: VolumeVariant = "auto",
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(require_series_read),
 ):
@@ -956,9 +976,12 @@ async def volume_tiles_endpoint(
                                 share_scope=await get_share_scope(request))
     tenant_id, include_all = (None, True) if user is None else tenant_scope(user)
 
-    bundle = await volume_service.volume_bundle(
-        db, series_uid, tenant_id=tenant_id, include_all=include_all
-    )
+    try:
+        bundle = await volume_service.volume_bundle(
+            db, series_uid, tenant_id=tenant_id, include_all=include_all, variant=variant
+        )
+    except GeometryValidationError as exc:
+        raise _geometry_http_exception(exc) from None
     if bundle is None:
         raise HTTPException(404, "No readable volumetric series found")
     info, slices = bundle
@@ -1000,6 +1023,9 @@ async def volume_tiles_endpoint(
         raise HTTPException(416, f"{plane} index {start} out of range 0-{max_index}")
     end = max(start, min(end, max_index))
 
+    # B-10: an independent tile budget (see `enforce_tile_cap`).
+    enforce_tile_cap(end - start + 1)
+
     def _float_param(name: str) -> float | None:
         raw = q.get(name)
         if raw is None or raw == "":
@@ -1022,12 +1048,15 @@ async def volume_tiles_endpoint(
     # render_tiles materializes the volume (disk reads + decode + float32 stack)
     # and rasterizes up to VOLUME_MAX_SLICES PNGs — run it off the event loop.
     try:
-        frames = await asyncio.to_thread(
+        frames = await run_blocking(
             volume_service.render_tiles,
             series_uid, plane, start, end, wc_f, ww_f, size, slices, info,
+            tenant_id,
         )
     except HTTPException:
         raise
+    except volume_service.VolumeAssemblyCapacityError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except IndexError as exc:
         raise HTTPException(416, str(exc)) from exc
     except ValueError as exc:
@@ -1040,7 +1069,9 @@ async def volume_tiles_endpoint(
     # session entries nothing releases.
     tiles_mode = _resolve_mode(user)
     if tiles_mode == "server":
-        volume_service.register_server_session(series_uid)
+        volume_service.register_server_session(
+            series_uid, _viewer_session_identity(request, user)
+        )
 
     first, last = start, start + len(frames) - 1
     geo = {
@@ -1054,6 +1085,8 @@ async def volume_tiles_endpoint(
             f"{v:.4f}" for v in volume_service.plane_spacing(info, plane)
         ),
         "X-MPR-Index-0": str(first),
+        "X-MPR-Derived-Resampled": "true" if info.get("derived_resampled") else "false",
+        "X-MPR-Gantry-Tilt-Corrected": "true" if info.get("gantry_tilt_corrected") else "false",
         "Cache-Control": "no-store",
     }
     if wc_f is not None and ww_f is not None:
@@ -1099,7 +1132,8 @@ async def volume_tiles_endpoint(
     geo["Access-Control-Expose-Headers"] = (
         "Content-Length, X-PAXS-Mode-Hint, X-MPR-Plane, X-MPR-Range, "
         "X-MPR-Tiles, X-MPR-Rows, X-MPR-Cols, X-MPR-Spacing, X-MPR-Window, "
-        "X-MPR-Index-0, X-PAXS-Tile-Offset, X-PAXS-Tile-Length, "
+        "X-MPR-Index-0, X-MPR-Derived-Resampled, X-MPR-Gantry-Tilt-Corrected, "
+        "X-PAXS-Tile-Offset, X-PAXS-Tile-Length, "
         + LOAD_HEADERS_EXPOSED
     )
     return Response(
@@ -1113,6 +1147,9 @@ async def volume_tiles_endpoint(
 async def volume_mpr_slice_endpoint(
     series_uid: str,
     request: Request,
+    overview: bool = Query(default=False),
+    variant: VolumeVariant = "auto",
+    stack_fingerprint: Annotated[str | None, Query(pattern=r"^[0-9a-f]{16}$")] = None,
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(require_series_read),
 ):
@@ -1146,12 +1183,17 @@ async def volume_mpr_slice_endpoint(
 
     tenant_id, include_all = (None, True) if user is None else tenant_scope(user)
 
-    bundle = await volume_service.volume_bundle(
-        db, series_uid, tenant_id=tenant_id, include_all=include_all
-    )
+    try:
+        bundle = await volume_service.volume_bundle(
+            db, series_uid, tenant_id=tenant_id, include_all=include_all, variant=variant
+        )
+    except GeometryValidationError as exc:
+        raise _geometry_http_exception(exc) from None
     if bundle is None:
         raise HTTPException(404, "No readable volumetric series found")
     info, slices = bundle
+    if stack_fingerprint is not None and stack_fingerprint != info.get("stack_fingerprint"):
+        raise HTTPException(409, "The volume stack changed. Request current volume info.")
     # Multi-frame / Enhanced instances are expanded into per-frame slices by
     # the service — reslicing works on the expanded stack.
 
@@ -1161,6 +1203,14 @@ async def volume_mpr_slice_endpoint(
         raise HTTPException(400, "format must be 'png', 'raw' or 'npy'")
 
     plane = str(q.get("plane", "axial")).lower()
+    use_overview = (
+        overview
+        and plane in ("axial", "sagittal", "coronal")
+        and info["slices"] > settings.VOLUME_MPR_CLIENT_MAX_SLICES
+    )
+    sample_step = (
+        settings.VOLUME_MPR_OVERVIEW_DOWNSAMPLE if use_overview else 1
+    )
     # reslice_plane materializes the volume (disk reads + decode + float32
     # stack + trilinear sampling) — offload to the thread pool so a slice
     # reslice never blocks the event loop for the node's other requests.
@@ -1169,10 +1219,20 @@ async def volume_mpr_slice_endpoint(
             index = q.get("index")
             if index is None:
                 raise HTTPException(400, f"index is required for plane={plane}")
-            result = await asyncio.to_thread(
-                volume_service.reslice_plane,
-                slices, info, plane, index=int(index),
-            )
+            if plane == "axial" and stack_fingerprint is not None:
+                # The verified stack already orders these native slices.
+                # Its first preview only needs one decoded source frame.
+                result = await run_blocking(
+                    volume_service.reslice_native_plane_streamed,
+                    slices, info, plane, int(index),
+                    max_pixels=settings.VOLUME_MPR_MAX_PIXELS, downsample=sample_step,
+                )
+            else:
+                result = await run_blocking(
+                    volume_service.reslice_plane,
+                    slices, info, plane, index=int(index),
+                    tenant_id=tenant_id, downsample=sample_step,
+                )
         else:
             origin = q.get("origin")
             row = q.get("row")
@@ -1193,7 +1253,7 @@ async def volume_mpr_slice_endpoint(
                         size = (int(parts[0]), int(parts[1]))
                 except (TypeError, ValueError):
                     raise HTTPException(400, "size must be WxH or a single N")
-            result = await asyncio.to_thread(
+            result = await run_blocking(
                 volume_service.reslice_plane,
                 slices, info, "oblique",
                 origin=[float(v) for v in origin.split(",")],
@@ -1201,13 +1261,41 @@ async def volume_mpr_slice_endpoint(
                 col_vector=[float(v) for v in col.split(",")],
                 size=size,
                 max_pixels=settings.VOLUME_MPR_MAX_PIXELS,
+                tenant_id=tenant_id,
             )
+    except volume_service.VolumeAssemblyTooLargeError as exc:
+        if plane not in ("axial", "sagittal", "coronal"):
+            raise HTTPException(503, str(exc)) from exc
+        index = q.get("index")
+        try:
+            result = await run_blocking(
+                volume_service.reslice_native_plane_streamed,
+                slices, info, plane, int(index),
+                max_pixels=settings.VOLUME_MPR_MAX_PIXELS,
+                downsample=sample_step,
+            )
+        except IndexError as plane_error:
+            raise HTTPException(416, str(plane_error)) from plane_error
+        except ValueError as plane_error:
+            raise HTTPException(400, str(plane_error)) from plane_error
     except HTTPException:
         raise
+    except volume_service.VolumeAssemblyCapacityError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except IndexError as exc:
         raise HTTPException(416, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+    if plane in ("axial", "sagittal", "coronal"):
+        source_rows, source_cols = volume_service.plane_dims(info, plane)
+        expected_shape = (
+            (source_rows + sample_step - 1) // sample_step,
+            (source_cols + sample_step - 1) // sample_step,
+        )
+        actual_shape = tuple(int(value) for value in result.data.shape)
+        if (result.rows, result.cols) != expected_shape or actual_shape != expected_shape:
+            raise HTTPException(500, "MPR sample factor and returned geometry disagree")
 
     wc = q.get("window_center")
     ww = q.get("window_width")
@@ -1226,7 +1314,9 @@ async def volume_mpr_slice_endpoint(
     # live thin-client session, and counting it would both inflate the load
     # signal and leak entries that nothing ever releases.
     if slice_mode == "server":
-        volume_service.register_server_session(series_uid)
+        volume_service.register_server_session(
+            series_uid, _viewer_session_identity(request, user)
+        )
     geo = {
         "X-PAXS-Mode-Hint": slice_mode,
         "X-MPR-Rows": str(rows),
@@ -1234,10 +1324,16 @@ async def volume_mpr_slice_endpoint(
         "X-MPR-Plane": result.plane,
         "X-MPR-Spacing": ",".join(f"{v:.4f}" for v in result.spacing),
         "X-MPR-Window": f"{center:.1f},{width:.1f}",
+        "X-MPR-Downsample": str(sample_step),
+        "X-MPR-Non-Primary": "true" if sample_step > 1 else "false",
+        "X-MPR-Derived-Resampled": "true" if info.get("derived_resampled") else "false",
+        "X-MPR-Gantry-Tilt-Corrected": "true" if info.get("gantry_tilt_corrected") else "false",
         "Cache-Control": "no-store",
         "Access-Control-Expose-Headers": (
             "Content-Length, X-PAXS-Mode-Hint, X-MPR-Rows, X-MPR-Cols, "
-            "X-MPR-Plane, X-MPR-Spacing, X-MPR-Window, " + LOAD_HEADERS_EXPOSED
+            "X-MPR-Plane, X-MPR-Spacing, X-MPR-Window, X-MPR-Downsample, "
+            "X-MPR-Non-Primary, X-MPR-Derived-Resampled, "
+            "X-MPR-Gantry-Tilt-Corrected, " + LOAD_HEADERS_EXPOSED
         ),
     }
     geo.update(server_load_headers())   # §7.3

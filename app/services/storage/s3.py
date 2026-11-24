@@ -35,6 +35,7 @@ from app.services.storage.backend import (
     StorageError,
     sanitize_uid_for_key,
 )
+from app.core.observability import measure_storage_operation
 
 log = logging.getLogger("paxs.storage.s3")
 
@@ -168,6 +169,7 @@ class S3StorageBackend(StorageBackend):
     # ------------------------------------------------------------------ #
     # Core operations
     # ------------------------------------------------------------------ #
+    @measure_storage_operation("write")
     def save_bytes(self, key: str, data: bytes) -> None:
         try:
             self._s3().put_object(Bucket=self.bucket, Key=self._object_key(key), Body=data)
@@ -176,6 +178,7 @@ class S3StorageBackend(StorageBackend):
         except Exception as exc:
             raise StorageError(f"could not write {key!r}: {exc}") from exc
 
+    @measure_storage_operation("read")
     def read_bytes(self, key: str) -> bytes:
         try:
             resp = self._s3().get_object(Bucket=self.bucket, Key=self._object_key(key))
@@ -185,6 +188,7 @@ class S3StorageBackend(StorageBackend):
                 raise StorageError(f"object not found: {key!r}") from exc
             raise StorageError(f"could not read {key!r}: {exc}") from exc
 
+    @measure_storage_operation("read_stream")
     def read_stream(self, key: str) -> Any:
         """The S3 object's response body (a streaming file-like object)."""
         try:
@@ -198,6 +202,7 @@ class S3StorageBackend(StorageBackend):
     # ------------------------------------------------------------------ #
     # Streaming (C-7 / C-8)
     # ------------------------------------------------------------------ #
+    @measure_storage_operation("read_stream")
     async def iter_bytes(self, key: str,
                          chunk_size: int = DEFAULT_CHUNK_SIZE) -> AsyncIterator[bytes]:
         """Yield the S3 object in ``chunk_size`` pieces (C-7).
@@ -229,6 +234,7 @@ class S3StorageBackend(StorageBackend):
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(body.close)
 
+    @measure_storage_operation("write_stream")
     async def write_stream(self, key: str,
                            stream: AsyncIterator[bytes]) -> int:
         """Stream ``stream`` into an S3 object via managed multipart upload (C-7).
@@ -280,6 +286,7 @@ class S3StorageBackend(StorageBackend):
             os.unlink(tmp)
         return written
 
+    @measure_storage_operation("write_stream")
     def upload_fileobj(self, key: str, file_obj: BinaryIO) -> None:
         """Multipart-upload an open file object with a bounded TransferConfig.
 
@@ -297,6 +304,7 @@ class S3StorageBackend(StorageBackend):
                 raise
             raise StorageError(f"could not upload {key!r}: {exc}") from exc
 
+    @measure_storage_operation("exists")
     def exists(self, key: str) -> bool:
         try:
             self._s3().head_object(Bucket=self.bucket, Key=self._object_key(key))
@@ -311,6 +319,7 @@ class S3StorageBackend(StorageBackend):
         except Exception:  # noqa: BLE001 - boundary guard: 0 is the documented "size unknown" sentinel
             return 0
 
+    @measure_storage_operation("delete")
     def delete(self, key: str) -> bool:
         try:
             self._s3().delete_object(Bucket=self.bucket, Key=self._object_key(key))
@@ -319,6 +328,7 @@ class S3StorageBackend(StorageBackend):
             return False
         return True
 
+    @measure_storage_operation("delete")
     def delete_tree(self, prefix: str) -> None:
         object_prefix = self._object_key(prefix).rstrip("/") + "/"
         client = self._s3()
@@ -531,3 +541,4 @@ class S3StorageBackend(StorageBackend):
             raise StorageError(f"could not publish spool to {key!r}: {exc}") from exc
         with contextlib.suppress(OSError):
             os.unlink(staged_path)
+
